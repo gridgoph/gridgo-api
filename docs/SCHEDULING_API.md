@@ -76,6 +76,28 @@ not a delivery appointment. `earliest` is independent of the display horizon.
 The calendar is advisory at minimum/default quantity; match and checkout use
 actual quantities, options and draft group work.
 
+The response also adds `sameDayOrderBy`, either `null` or
+`{ "at": "2026-11-05T04:30:00.000Z", "passed": true }`. `at` is today's
+exclusive last ordering instant in ISO UTC: at that instant today stops being
+selectable. Format it in Asia/Manila, for example “Order before 12:30 PM to get
+it today”. `passed` is true when the response clock is at or after `at`.
+The value comes from replaying the same ready-by projection with the current
+eligible listings, queues, capacity, settings and listed rush tiers. Across
+several options it is the latest cutoff at which any option still offers today,
+including Tight or Rush (which can cost more); it does not promise Secured or
+the ordinary tier. No shop identity or count is exposed.
+
+`sameDayOrderBy` is null when no ordering time during today's GRIDGO opening
+could offer today: for example a closed day, no eligible listing, or production,
+queue or capacity that cannot finish today (including ordinary day-based work).
+Before opening it can have `passed: false` while today remains disabled by
+`outside_operating_hours`; clients must still use `days[].state` and
+`operatingStatus` for availability. After closing the elapsed cutoff remains
+available with `passed: true`. This is a current availability hint, independent
+of the display horizon, not a reservation: refetch when inputs or queues change.
+The shop production-time preview's `calendar` includes the same field. Existing
+dates, ready-by rules, allowances and prices are unchanged.
+
 Match root, `listings[]`, anonymous `otherListings[]`, cart `groups[]`, checkout
 `order` and ordinary owning-client/staff order projections carry `scheduling`:
 
