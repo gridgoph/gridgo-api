@@ -465,8 +465,11 @@ individual `CREATE INDEX CONCURRENTLY IF NOT EXISTS` commands. Migration
 Migration `1793847000000_saved_library_reads` adds `files_saved_library_idx`
 for the existing 50-file My files page; `1793847100000_saved_library_quota` adds
 `files_saved_quota_idx` for its saved/reserved-byte aggregate. Both use the same
-concurrent build procedure. Apply `npm run migrate` (node-pg-migrate
-up) to the dev database after merge and before running this API release.
+concurrent build procedure. Migration `1793892000000_operations_queue_reads`
+adds `claims_status_idx`, `issues_status_idx`, `issues_client_idx`,
+`escalations_order_idx` and `orders_arrived_packed_idx` through individual
+concurrent builds for filtered Operations queues and packed-arrival counts.
+Apply `npm run migrate` (node-pg-migrate up) to the dev database after merge and before running this API release.
 `pgm.noTransaction()` makes node-pg-migrate leave its default single transaction
 for these migrations only. Earlier migrations and completed index builds can
 therefore remain committed if a later build fails. HTTP mutation transactions,
@@ -492,7 +495,9 @@ WHERE n.nspname = 'public' AND c.relname IN (
   'users_bootstrap_email_idx', 'users_bootstrap_unusual_email_idx',
   'tester_invites_unmatched_idx', 'promotion_invites_pending_idx',
   'promotion_invites_client_idx', 'notifications_order_type_idx',
-  'file_references_reference_id_idx', 'files_saved_library_idx', 'files_saved_quota_idx'
+  'file_references_reference_id_idx', 'files_saved_library_idx', 'files_saved_quota_idx',
+  'claims_status_idx', 'issues_status_idx', 'issues_client_idx',
+  'escalations_order_idx', 'orders_arrived_packed_idx'
 ) ORDER BY c.relname;
 
 SELECT format('REINDEX INDEX CONCURRENTLY %I.%I;', n.nspname, c.relname)
@@ -503,7 +508,9 @@ WHERE n.nspname = 'public' AND NOT i.indisvalid AND c.relname IN (
   'users_bootstrap_email_idx', 'users_bootstrap_unusual_email_idx',
   'tester_invites_unmatched_idx', 'promotion_invites_pending_idx',
   'promotion_invites_client_idx', 'notifications_order_type_idx',
-  'file_references_reference_id_idx', 'files_saved_library_idx', 'files_saved_quota_idx'
+  'file_references_reference_id_idx', 'files_saved_library_idx', 'files_saved_quota_idx',
+  'claims_status_idx', 'issues_status_idx', 'issues_client_idx',
+  'escalations_order_idx', 'orders_arrived_packed_idx'
 )
 \gexec
 SQL
