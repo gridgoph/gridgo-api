@@ -1153,6 +1153,11 @@ function productionItemsFor(store, order, user) {
       const production = ["client", "supplier", "ops_admin", "super_admin"].includes(user?.role);
       return {
         id: line.id, itemName: line.itemNameSnapshot || "", quantity: line.quantity,
+        ...(user?.role === "client" && order.clientId === user.id ? {
+          // Use only the immutable line snapshot, never today's listing or taxonomy.
+          subcategoryCode: typeof line.artworkGuidance?.subcategoryCode === "string"
+            ? line.artworkGuidance.subcategoryCode : null,
+        } : {}),
         turnaroundDays: line.turnaroundDaysSnapshot ?? null,
         turnaroundMinutes: line.turnaroundMinutesSnapshot ?? (line.turnaroundHoursSnapshot == null ? null : line.turnaroundHoursSnapshot * 60),
         pricingUnit: line.pricingUnitSnapshot || null, packageQty: line.packageQtySnapshot ?? null,
