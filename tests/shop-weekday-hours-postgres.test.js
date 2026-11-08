@@ -16,6 +16,9 @@ import { up } from '../migrations/1794146000000_shop_weekday_hours.js';
 const DATABASE_URL = process.env.DATABASE_URL;
 const override = { weekday: 6, opensMinute: 480, closesMinute: 900 };
 const schedule = () => ({ ...defaultShopSchedule(), weekdayOverrides: [override] });
+const incompatibleSchedule = () => ({ ...defaultShopSchedule(),
+  week: [{ weekday: 6, opensMinute: 480, closesMinute: 1080 }],
+  weekdayOverrides: [{ weekday: 6, opensMinute: 1080, closesMinute: 1200 }] });
 
 test('forward migration leaves legacy schedules and orders byte-for-byte unchanged; SQL rejects invalid overrides', { skip: !DATABASE_URL }, async t => {
   const db = createDatabase({ DATABASE_URL }); t.after(() => db.close());
@@ -121,4 +124,46 @@ test('HTTP saves weekday hours, revalidates matches/calendar and gates both disp
   const opened = await api('rider', 'POST', '/dispatch/new_order/accept', {});
   assert.equal(opened.status, 200, JSON.stringify(opened.body));
   assert.equal(opened.body.order.state, 'rider_assigned');
+});
+
+for (const allIncompatible of [false, true]) test(`HTTP isolates ${allIncompatible ? 'all incompatible shops with the usual empty result' : 'an incompatible shop from its healthy alternative'}`, { skip: !DATABASE_URL }, async t => {
+  const db = createDatabase({ DATABASE_URL }); t.after(() => db.close());
+  await resetDatabase(db, 'TRUNCATE users, platform_settings, taxonomy_categories, accepted_file_formats RESTART IDENTITY CASCADE');
+  const initial = fixture();
+  initial.orders[0].readyBy = '2099-01-01T00:00:00.000Z';
+  initial.orders[0].promiseBy = '2099-01-01T01:00:00.000Z';
+  initial.catalogSpeedTiers = ['supplier', 'replacement'].map(supplierId => ({ id: `fast_${supplierId}`,
+    catalogItemId: `item_${supplierId}`, label: 'Fast', turnaroundMinutes: 60, turnaroundHours: 1,
+    priceMinor: 1500, surchargeMinor: null, sortOrder: 0, createdAt: initial.orders[0].createdAt,
+    updatedAt: initial.orders[0].createdAt }));
+  await db.transaction(() => saveStore(db, initial));
+  const api = await apiForTest(t, process.env.GRIDGO_WEEKDAY_E2E_MINIO ? {
+    MINIO_ENDPOINT: process.env.GRIDGO_WEEKDAY_E2E_MINIO, MINIO_PUBLIC_URL: process.env.GRIDGO_WEEKDAY_E2E_MINIO,
+    MINIO_ACCESS_KEY: 'weekday-test', MINIO_SECRET_KEY: 'weekday-test-secret', MINIO_BUCKET: 'weekday-test',
+  } : {});
+  for (const supplierId of allIncompatible ? ['supplier', 'replacement'] : ['supplier']) {
+    const saved = await api(supplierId, 'PATCH', '/me/shop-hours', { expectedVersion: 1, schedule: incompatibleSchedule() });
+    assert.equal(saved.status, 200, JSON.stringify(saved.body));
+  }
+  const matched = await api('client', 'POST', '/me/matches', { subcategoryCode: 'flyers', fulfillmentMode: 'pickup',
+    deadline: new Date(Date.now() + 30 * 86400000).toISOString() });
+  if (allIncompatible) {
+    assert.equal(matched.status, 404, JSON.stringify(matched.body));
+    assert.equal(matched.body.error, 'match_not_found');
+  } else {
+    assert.equal(matched.status, 200, JSON.stringify(matched.body));
+    assert.equal(matched.body.shop.supplierId, 'replacement');
+    assert.ok(matched.body.listings.every(row => row.supplierId === 'replacement'));
+    assert.equal(matched.body.alternativesCount, 0);
+  }
+  const calendar = await api('client', 'GET', '/me/deadline-days?subcategoryCode=flyers&days=14');
+  assert.equal(calendar.status, 200, JSON.stringify(calendar.body));
+  if (allIncompatible) {
+    assert.equal(calendar.body.earliest, null);
+    assert.ok(calendar.body.days.every(row => row.status === 'not_possible'));
+    assert.ok(calendar.body.days.some(row => row.reason === 'no_eligible_listing'));
+  } else {
+    assert.equal(calendar.body.days.find(row => row.status === 'secured')?.readyBy, matched.body.listings[0].readyBy);
+    assert.ok(Date.parse(calendar.body.earliest) <= Date.parse(matched.body.listings[0].readyBy));
+  }
 });

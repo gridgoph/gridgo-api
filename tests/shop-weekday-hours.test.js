@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { defaultShopSchedule, addWorkingMinutes, addWorkingDays, addOpeningMilliseconds,
-  openingMillisecondsBetween, workingMinutesBetween, isOpenAt, projectFinish, validateShopSchedule } from '../src/availability.js';
+  openingMillisecondsBetween, workingMinutesBetween, isOpenAt, projectFinish, validateShopSchedule, AvailabilityError } from '../src/availability.js';
 import { productionDayMinutes } from '../src/production-days.js';
 import { routeSupplierCatalog } from '../src/catalog-routes.js';
 import { snapshotShopClock, shopHoursStatus } from '../src/shop-hours.js';
@@ -13,7 +13,7 @@ import { validateOperatingHours } from '../src/operating-hours.js';
 import { validateHubPickup } from '../src/hub-pickup.js';
 import { availableDispatch } from '../src/dispatch-policy.js';
 import { nextShopDispatchAt, requireShopDispatchHours } from '../src/shop-dispatch-hours.js';
-import { projectShopFinish, matchShop, deadlineDays } from '../src/order-match.js';
+import { projectShopFinish, matchShop, deadlineDays, projectMatchCandidate } from '../src/order-match.js';
 import { fixture } from './fixtures/scheduling.js';
 
 const saturday = { weekday: 6, opensMinute: 480, closesMinute: 900 }; // 08:00–15:00 Manila
@@ -176,5 +176,36 @@ test('no overrides (or an empty list) reproduce the previous calendar, estimates
     assert.deepEqual(deadlineDays(store, { subcategoryCode: 'flyers', now, days: 5 }), calendar);
     assert.equal(shopHoursStatus(store.supplierProfiles[0], store.settings, now).isOpenNow, status.isOpenNow);
     assert.equal(availableDispatch({ ...order, shopClock: { version: 1, schedule: next } }, store, now), dispatch);
+  }
+});
+
+test('a dispatch-incompatible candidate cannot hide healthy matching or calendar choices, including listed rush tiers', () => {
+  const { store } = fixture();
+  const schedule = { ...defaultShopSchedule(), week: [{ weekday: 6, opensMinute: 480, closesMinute: 1080 }],
+    weekdayOverrides: [{ weekday: 6, opensMinute: 1080, closesMinute: 1200 }] };
+  store.supplierProfiles[0].schedule = schedule;
+  store.catalogSpeedTiers = [{ id: 'fast', catalogItemId: 'item_shop_a', label: 'Fast', turnaroundHours: 1, priceMinor: 15000 }];
+  const input = { subcategoryCode: 'flyers', now: '2026-10-17T05:00:00.000Z',
+    deadline: '2026-11-30T08:00:00.000Z', ranking: ['speed', 'quality', 'cost', 'distance'] };
+  assert.equal(matchShop(store, input).shop.supplierId, 'shop_b');
+  assert.ok(deadlineDays(store, { ...input, days: 14 }).days.some(row => row.status === 'secured'));
+  store.supplierProfiles[1].schedule = schedule;
+  assert.throws(() => matchShop(store, input), { code: 'match_not_found', status: 404 });
+  const calendar = deadlineDays(store, { ...input, days: 14 });
+  assert.equal(calendar.earliest, null);
+  assert.ok(calendar.days.every(row => row.status === 'not_possible'));
+  assert.ok(calendar.days.some(row => row.reason === 'no_eligible_listing'));
+});
+
+test('ordinary and rush candidate projections skip only typed dispatch-unavailable failures', () => {
+  const unavailable = new AvailabilityError(409, 'dispatch_unavailable', 'No overlap');
+  assert.equal(projectMatchCandidate(() => { throw unavailable; }), null);
+  const valid = { promiseBy: '2026-10-19T00:00:00.000Z' };
+  assert.equal(projectMatchCandidate(() => valid), valid);
+  for (const error of [new AvailabilityError(400, 'invalid_schedule', 'Invalid'),
+    new AvailabilityError(409, 'shop_never_open', 'Beyond horizon'),
+    new AvailabilityError(400, 'dispatch_unavailable', 'Wrong status'),
+    Object.assign(new Error('Unexpected'), { status: 409, code: 'dispatch_unavailable' }), new TypeError('Unexpected')]) {
+    assert.throws(() => projectMatchCandidate(() => { throw error; }), caught => caught === error);
   }
 });

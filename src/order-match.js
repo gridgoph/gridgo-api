@@ -298,6 +298,16 @@ export function calendarProbeProjector(ordinary, rushProjects) {
   });
 }
 
+/** A shop without a dispatch overlap cannot poison the other candidates.
+ * Keep invalid calendars and unexpected failures visible to the caller. */
+export function projectMatchCandidate(project) {
+  try { return project(); }
+  catch (error) {
+    if (error instanceof AvailabilityError && error.status === 409 && error.code === 'dispatch_unavailable') return null;
+    throw error;
+  }
+}
+
 /** Selected tiers are resolved from the approved catalogue, never request money. */
 export function listingTiming(store, item, line = {}) {
   const listing = publicCatalogItem(store, item);
@@ -394,7 +404,9 @@ function candidateRows(store, { subcategoryCode, supplierId: onlySupplierId, dro
         units: Number(combinedUnits),
         express: listing.express === true && groupExpress, deadline,
       });
-      let { projection, queue } = project(now);
+      const projected = projectMatchCandidate(() => project(now));
+      if (!projected) return null;
+      let { projection, queue } = projected;
       const rushProjects = listing.pricedByColour ? [] : listing.speedTiers.filter(tier => tier.turnaroundHours < (listing.minimumTurnaroundHours ?? listing.turnaroundHours)).map(tier => {
         const projectFast = shopFinishProjector(projectionStore, { supplierId, deadline,
           turnaroundHours: Math.max(tier.turnaroundHours, ...groupHours),
@@ -407,7 +419,7 @@ function candidateRows(store, { subcategoryCode, supplierId: onlySupplierId, dro
           return fast;
         };
       });
-      const rushChoices = rushProjects.map(project => project(now));
+      const rushChoices = rushProjects.map(project => projectMatchCandidate(() => project(now))).filter(Boolean);
       if (deadline && !fitsDeadline(projection, deadline)) {
         const fast = rushChoices.find(row => fitsDeadline(row, deadline));
         if (fast) projection = fast;
@@ -421,7 +433,7 @@ function candidateRows(store, { subcategoryCode, supplierId: onlySupplierId, dro
         speed: Math.max(1, Date.parse(projection.promiseBy) - Date.parse(now)),
         cost: fromPrice([listing]),
       };
-    }).filter((choice) => {
+    }).filter(Boolean).filter((choice) => {
       if (fitsDeadline(choice.projection, deadline)) return true;
       missedDeadline.push({ supplierId, promiseBy: choice.projection.promiseBy });
       return false;

@@ -114,6 +114,12 @@ No listing duration, price, payment or penalty policy is rewritten. For example,
 one hour of service time starting Saturday 14:30 at a shop closing at 15:00 and
 closed Sunday finishes Monday 08:30 (if Monday opens at 08:00).
 
+If a shop has no opening shared with GRIDGO dispatch, matching omits that
+candidate (including unavailable rush choices) and continues with other shops.
+When none remain, matching keeps `404 match_not_found` and the deadline calendar
+returns `200` with null `earliest` and `no_eligible_listing` on otherwise eligible
+dates. Calendar validation and unexpected errors still propagate.
+
 Staff may send only `expectedVersion`, `temporarilyClosed`, and `reason`;
 attempting to edit hours or extensions returns `403 forbidden`. A trimmed
 nonempty reason, maximum 2,000 characters, is required (`400 reason_required`).
