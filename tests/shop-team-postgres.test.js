@@ -46,6 +46,39 @@ async function invite(api,kind='link',identity) {
   assert.equal(r.status,201,bodyOf(r)); return r.body;
 }
 
+test('HTTP Staff reads own legacy multi-shop artwork and mockups without crossing job scope', {skip}, async t => {
+  const {db,api} = await setup(t, s => {
+    s.orders[0].supplierId = null;
+    s.orderJobs.push({...s.orderJobs[0], id:'other_job', supplierId:'replacement'});
+    s.orderLineItems.push({...s.orderLineItems[0], id:'other_line', sortOrder:1, jobId:'other_job', catalogItemId:'item_replacement'});
+    for (const purpose of ['artwork','mockup']) {
+      for (const [key,line] of [['own',s.orderLineItems[0]],['foreign',s.orderLineItems[1]],['unattributed',null]]) {
+        const fileId = `${purpose}_${key}`;
+        if (line) line[`${purpose}FileId`] = fileId;
+        s.files.push({fileId,purpose,ownerId:'client',state:'ready',objectKey:`private/${fileId}`,
+          originalFilename:`${fileId}.png`,declaredContentType:'image/png',detectedContentType:'image/png',size:100,createdAt:AT,
+          references:[{type:'order',id:'order',field:line ? `line:${line.id}:${purpose}` : `${purpose}FileIds`}]});
+      }
+      s.orders[0][`${purpose}FileIds`] = ['own','foreign','unattributed'].map(key=>`${purpose}_${key}`);
+    }
+  });
+  for (const who of ['supplier','other']) {
+    const order = await api(who,'GET','/orders/order',null,supplier);
+    assert.equal(order.status,200,bodyOf(order));
+    assert.deepEqual(order.body.order.productionItems.map(line=>line.id),['line']);
+    for (const purpose of ['artwork','mockup']) for (const suffix of ['', '/download-url']) {
+      const own = await api(who,'GET',`/files/${purpose}_own${suffix}`,null,supplier);
+      assert.equal(own.status,200,bodyOf(own));
+      for (const key of ['foreign','unattributed']) {
+        const denied = await api(who,'GET',`/files/${purpose}_${key}${suffix}`,null,supplier);
+        assert.equal(denied.status,403,bodyOf(denied));
+      }
+    }
+  }
+  await mutate(db,s=>{s.orderJobs.find(job=>job.id==='job').state='cancelled';});
+  assert.equal((await api('other','GET','/files/artwork_own',null,supplier)).status,403);
+});
+
 test('HTTP deny-by-default staff/pending/removed blocks every owner route; owners retain existing access', {skip},async t=>{
   const {db,api}=await setup(t);
   assert.equal((await api('supplier','GET','/me/supplier-profile')).status,200);

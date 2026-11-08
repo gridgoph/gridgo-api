@@ -915,7 +915,6 @@ function readGraph(database) {
 }
 
 async function readIdentity(graph, userIds) {
-  await graph.read('shop_memberships', 'WHERE user_id = ANY($1::text[])', [userIds]);
   await graph.read('users', 'WHERE id = ANY($1::text[])', [userIds]);
   await graph.read('user_role_memberships', 'WHERE user_id = ANY($1::text[])', [userIds]);
   await graph.read('approval_cases', 'WHERE user_id = ANY($1::text[])', [userIds]);
@@ -923,6 +922,7 @@ async function readIdentity(graph, userIds) {
 
 async function readNotificationContext(graph, { orderIds = [], caseIds = [], activeRiderIds = [] } = {}) {
   const { loaded, read } = graph;
+  await read('shop_memberships', 'WHERE user_id = ANY($1::text[])', [loaded.users.map(row => row.id)]);
   const recipientIds = [...new Set([...loaded.users.map(row => row.id), ...(loaded.shop_memberships || []).map(row => row.shop_id)])];
   await read('user_role_memberships', 'WHERE user_id = ANY($1::text[])', [recipientIds]);
   await read('approval_cases', 'WHERE user_id = ANY($1::text[]) OR id = ANY($2::text[])', [recipientIds, caseIds]);
@@ -1510,7 +1510,7 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
   }
   await read('order_line_item_options', 'WHERE order_line_item_id = ANY($1::text[])', [loaded.order_line_items.map(row => row.id)]);
   await read('refund_payments', 'WHERE request_id = ANY($1::text[])', [loaded.refund_settlements.map(row => row.request_id)]);
-  await read('order_actions', 'WHERE order_id = ANY($1::text[])', [loaded.orders.map(row => row.id)]);
+  if (staff || selected === 'supplier') await read('order_actions', 'WHERE order_id = ANY($1::text[])', [loaded.orders.map(row => row.id)]);
   const suppliers = [...new Set(loaded.orders.map(row => row.supplier_id).filter(Boolean))];
   await read('supplier_profiles', 'WHERE user_id = ANY($1::text[])', [suppliers]);
   await read('supplier_payout_accounts', 'WHERE supplier_id = ANY($1::text[])', [suppliers]);

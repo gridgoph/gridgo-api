@@ -29,7 +29,10 @@ async function cart(api, s, quantities=[1]) {
   const made = await ok(api,'client','POST','/me/carts',{fulfillmentMode:'delivery',defaultDropoff:s.orders[0].dropoff},201);
   const path = `/me/carts/${made.cart.id}`;
   // These live HTTP money tests need a feasible deadline whenever CI runs.
-  const deadline = new Date(Date.now() + 7 * 24 * 3600000).toISOString();
+  const due = new Date(Date.now() + 7 * 24 * 3600000);
+  // The live calendar rejects Sunday handovers, even with ample production time.
+  if (new Intl.DateTimeFormat('en-US', {timeZone:'Asia/Manila',weekday:'short'}).format(due) === 'Sun') due.setUTCDate(due.getUTCDate()+1);
+  const deadline = due.toISOString();
   for (const [n,quantity] of quantities.entries()) await ok(api,'client','POST',`${path}/lines`,{catalogItemId:`item_${n?'replacement':'supplier'}`,quantity,optionIds:[],artworkFileId:'artwork',deadline},201);
   return path;
 }

@@ -1053,9 +1053,9 @@ function shopBootstrap(req, store, user, pathname) {
   const member = selectedShop(store, user, req.headers['x-gridgo-shop-id']);
   if (!member) return null;
   if (member.status === 'removed') assertActiveShop(member);
+  if (member.userId === member.shopId && member.role === 'owner' && member.status === 'active') return null;
   const held = accountHoldDenial(user);
   if (held) throw Object.assign(new Error(held.error), { status: 403, code: held.error });
-  if (member.userId === member.shopId && member.role === 'owner' && member.status === 'active') return null;
   return { user: { id: user.id, name: user.name, role: 'supplier' }, shop: shopSummary(store, member),
     memberships: [{ role: 'supplier' }], approvalCases: [] };
 }
@@ -3968,7 +3968,10 @@ async function handleAuditedRequest(req, res) {
       const heartbeat = setInterval(async () => {
         if (streamShopId) {
           try {
-            const current = await database.query('SELECT status FROM shop_memberships WHERE shop_id=$1 AND user_id=$2', [streamShopId, user.id]);
+            const current = await database.query(`SELECT status FROM shop_memberships WHERE shop_id=$1 AND user_id=$2
+              UNION ALL SELECT 'active' WHERE $1=$2
+                AND NOT EXISTS (SELECT 1 FROM shop_memberships WHERE shop_id=$1 AND user_id=$2)
+                AND EXISTS (SELECT 1 FROM user_role_memberships WHERE user_id=$2 AND role='supplier')`, [streamShopId, user.id]);
             if (current.rows[0]?.status !== 'active') {
               res.write('event: access_revoked\ndata: {"error":"shop_access_removed"}\n\n'); res.end(); return;
             }

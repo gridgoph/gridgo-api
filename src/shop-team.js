@@ -3,6 +3,7 @@ import { clerkClientProfile } from './auth.js';
 import { identityHasMembership, selectActorRole } from './authorization-context.js';
 import { ensureShopOwners } from './shop-team-store.js';
 import { queueInvalidate } from './notifications.js';
+import { canReadOrderArtwork } from './order-file-access.js';
 
 export const shopTeamError = (status, code) => { throw Object.assign(new Error(code), { status, code }); };
 export const inviteHash = token => createHash('sha256').update(token).digest('hex');
@@ -88,7 +89,13 @@ export function assertStaffFile(user, store, file, { upload = false, purpose = f
   if (!readPurposes.has(file.purpose)) shopTeamError(403, 'shop_owner_required');
   if (file.ownerId === user.id && file.createdByUserId === actorUserId(user) && !file.references?.length) return;
   const refs = (file.references || []).flatMap(ref => ref.type === 'order' ? [ref] : ['client_shop_chat_message', 'pickup_chat_message'].includes(ref.type) ? [{ id: ref.orderId }] : []);
-  if (!refs.length || !refs.some(ref => store.orders.some(order => order.id === ref.id && order.supplierId === user.id))) shopTeamError(403, 'forbidden');
+  if (!refs.some(ref => store.orders.some(order => {
+    if (order.id !== ref.id) return false;
+    const jobs = (store.orderJobs || []).filter(job => job.orderId === order.id && job.state !== 'cancelled');
+    const ownWork = order.supplierId === user.id || (!order.supplierId && jobs.length > 1 && jobs.some(job => job.supplierId === user.id));
+    return ownWork && (!['artwork', 'mockup'].includes(file.purpose)
+      || canReadOrderArtwork(user, store, order, file.fileId, file.purpose, file));
+  }))) shopTeamError(403, 'forbidden');
 }
 
 function verifiedIdentities(clerkUser) {

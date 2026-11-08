@@ -47,7 +47,7 @@ async function fixture(db) {
   });
   return { prefix, a: prefix + 'a', b: prefix + 'b', c: prefix + 'c', async cleanup() {
     await db.transaction(async () => {
-      for (const table of ['notifications', 'device_tokens', 'client_profiles', 'user_role_memberships'])
+      for (const table of ['notifications', 'device_tokens', 'client_profiles', 'shop_memberships', 'user_role_memberships'])
         await db.query(`DELETE FROM ${table} WHERE user_id=ANY($1)`, [[prefix+'a', prefix+'b', prefix+'c']]);
       await db.query('DELETE FROM users WHERE id=ANY($1)', [[prefix+'a', prefix+'b', prefix+'c']]);
     });
