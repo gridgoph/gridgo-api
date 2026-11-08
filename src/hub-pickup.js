@@ -33,6 +33,7 @@ export function validateHubPickup(value, fail) {
   }
   if (value.schedule !== null) {
     if (!value.schedule || typeof value.schedule !== "object" || Array.isArray(value.schedule)
+        || Object.hasOwn(value.schedule, 'weekdayOverrides')
         || !Array.isArray(value.schedule.week) || value.schedule.week.length > 28
         || (value.schedule.closures != null && (!Array.isArray(value.schedule.closures) || value.schedule.closures.length > 120))) {
       fail(400, "invalid_hub_pickup_schedule", "Set a weekly schedule with an optional closure array.", { field: "hubPickup.schedule" });
