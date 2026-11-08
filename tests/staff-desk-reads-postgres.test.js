@@ -5,6 +5,7 @@ import { isHotReadPath, loadHotReadStore, saveStore } from '../src/postgres-stor
 import { parityApiForTest } from './fixtures/read-parity.js';
 import { setupStaffDesks } from './fixtures/staff-desks.js';
 import { instrument } from './fixtures/order-reads.js';
+import { AT } from './fixtures/reschedule.js';
 
 export const desks = ['/credits/balance?clientId=client', '/baskets', '/baskets/basket_staff', '/baskets/missing','/ops/tester-invites', '/ops/tester-rewards', '/admin/featured-prints', '/admin/season-windows', '/admin/season-windows/push-settings', '/ops/catalog-items', '/approval-cases', '/approval-cases/case_rider',
   '/supplier-services', '/supplier-services/service_supplier', '/supplier-payment-terms',
@@ -59,6 +60,49 @@ test('staff desks preserve full-store HTTP responses and headers across identiti
   }
   assert.equal(failures.length, 0, JSON.stringify(failures.map(({ who, path, statuses }) => ({ who, path, statuses }))));
   t.diagnostic(`${comparisons} exact HTTP comparisons`);
+});
+
+test('staff desks preserve empty filters and NUL-containing binary cursors', { skip: !process.env.DATABASE_URL }, async t => {
+  const database = createDatabase(process.env); t.after(() => database.close());
+  await setupStaffDesks(database);
+  const at = Date.now() + 120000;
+  const old = await parityApiForTest(t, true, at), current = await parityApiForTest(t, false, at);
+  const paths = [
+    '/supplier-services?supplierId=', '/supplier-services?state=', '/supplier-services?supplierId=&state=',
+    '/ops/hub/receipt-scans?month=', '/ops/hub/receipt-scans?supplierId=', '/ops/hub/receipt-scans?month=&supplierId=',
+    '/ops/reschedule-requests?supplierId=', '/ops/reschedule-requests?status=',
+    '/approval-cases?status=', '/approval-cases?kind=', '/approval-cases?cursor=',
+    '/ops/finance/supplier-invoices?month=2026-10&supplierId=', '/ops/finance/supplier-invoices?month=',
+    '/credits/balance?clientId=', '/supplier-payment-terms?supplierId=', '/refund-requests?status=',
+    '/ops/vouchers?clientId=', '/ops/tester-invites?inviterId=', '/ops/tester-invites?status=',
+    '/ops/tester-rewards?clientId=', '/ops/tester-rewards?status=',
+    '/admin/voucher-redemptions?campaignId=', '/admin/voucher-redemptions?clientId=', '/admin/voucher-redemptions?kind=',
+    '/admin/voucher-redemptions?from=', '/admin/survey-responses?to=',
+    '/ops/catalog-items?supplierId=', '/ops/catalog-items?subcategoryCode=', '/ops/catalog-items?productionTimeReview=',
+    '/ops/catalog-items?q=', '/ops/organizations?after=',
+  ];
+  // NUL is accepted by the existing cursor contract, but cannot be bound as PG text.
+  // Cover leading/interior NULs and the exact stored-ID prefix on each binary cursor.
+  for (const after of ['\0', '\0other', 'o\0ther', 'other\0', 'other\0suffix', 'z\0']) {
+    paths.push(`/ops/organizations?${new URLSearchParams({ after })}`);
+  }
+  for (const id of ['\0', '\0case_org', 'case_\0org', 'case_org\0', 'case_org\0suffix', 'z\0']) {
+    const cursor = Buffer.from(JSON.stringify({ submittedAt: AT, id })).toString('base64url');
+    paths.push(`/approval-cases?status=approved&cursor=${cursor}`);
+  }
+  const failures = [];
+  for (const who of ['ops', 'admin', 'test_ops', 'dual', 'supplier']) for (const path of paths) {
+    const a = await old(who, 'GET', path, null, { raw: true });
+    const b = await current(who, 'GET', path, null, { raw: true });
+    if (b.status !== a.status || b.body !== a.body) failures.push({ who, path, old: a.body, current: b.body, statuses: [a.status, b.status] });
+    for (const key of ['content-type', 'cache-control', 'content-disposition', 'x-next-offset']) assert.equal(b.headers.get(key), a.headers.get(key), `${who} ${path}: ${key}`);
+  }
+  if (failures.length && process.env.STAFF_PARITY_FAILURES) {
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(process.env.STAFF_PARITY_FAILURES, JSON.stringify(failures, null, 2));
+  }
+  assert.equal(failures.length, 0, JSON.stringify(failures.map(({ who, path, statuses }) => ({ who, path, statuses }))));
+  t.diagnostic(`${paths.length * 5} exact HTTP comparisons for empty filters and binary cursors`);
 });
 
 test('staff desk graphs are read-only and do not transfer unrelated inbox, audit or ping history', { skip: !process.env.DATABASE_URL }, async t => {

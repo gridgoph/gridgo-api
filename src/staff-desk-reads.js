@@ -21,6 +21,10 @@ const DESKS = new Set(['/credits/balance','/ops/catalog-items', '/approval-cases
 const DETAIL = /^\/(?:approval-cases\/[^/]+|supplier-services\/[^/]+|users\/[^/]+\/production-lapses|ops\/shops\/[^/]+\/(?:hours|performance)|ops\/orders\/[^/]+\/location-diagnostics|ops\/finance\/supplier-invoices(?:\/[^/]+)?|ops\/organizations\/[^/]+(?:\/statements)?|admin\/voucher-campaigns\/[^/]+|ops\/(?:account-deletion-requests|issue-reports)\/[^/]+|admin\/legal\/documents\/[^/]+|admin\/tracker(?:\/[^/]+\/[0-9]+|\/decisions\/[^/]+\/attachments\/[^/]+)?|support-chat\/threads\/[^/]+(?:\/messages)?|refund-requests\/[^/]+)$/;
 export const isStaffDeskRead = path => DESKS.has(path) || DETAIL.test(path);
 const text = value => value?.includes('\0') ? null : value;
+// Stored IDs cannot contain NUL. For their binary `id > cursor` comparison,
+// the prefix before the first NUL selects exactly the same IDs as JS does.
+// Keep this separate from equality filters, where a NUL never matches an ID.
+const binaryCursorPrefix = value => value?.split('\0', 1)[0] ?? null;
 const unique = values => [...new Set(values.filter(Boolean))];
 
 /** Only rows a desk projects or uses for authorization/aggregates. The unchanged
@@ -103,7 +107,7 @@ export async function readStaffDesk(database, graph, actorIds, path, params, hel
     if (path === '/ops/hub/escalations') await read('orders', `WHERE data#>'{handover,escalation}' IS NOT NULL${orderScope}`);
     if (path === '/ops/hub/unclaimed') await read('orders', `WHERE state='awaiting_collection' AND data#>>'{handover,qrToken}' IS NOT NULL${orderScope}`);
     if (path === '/ops/hub/receipt-scans') {
-      const month = params.get('month'), owner = text(params.get('supplierId'));
+      const month = params.get('month') || null, owner = text(params.get('supplierId') || null);
       await read('files', `WHERE purpose='supplier_invoice' AND state='ready'
         AND ($1::text IS NULL OR owner_id=$1) AND ($2::text IS NULL OR to_char(created_at AT TIME ZONE 'UTC','YYYY-MM')=$2)`, [owner, text(month)]);
       await read('file_references', 'WHERE file_id = ANY($1::text[])', [loaded.files.map(r => r.file_id)]);
@@ -123,7 +127,7 @@ export async function readStaffDesk(database, graph, actorIds, path, params, hel
       const id = /^\/ops\/shops\/([^/]+)\/hours$/.exec(path)?.[1];
       await read('supplier_profiles', id ? 'WHERE user_id=$1' : '', id ? [text(id)] : []);
     } else {
-      const id = path.split('/')[2], supplierId = actor.role === 'supplier' ? actor.id : params.get('supplierId');
+      const id = path.split('/')[2], supplierId = actor.role === 'supplier' ? actor.id : params.get('supplierId') || null;
       await read('supplier_services', id ? 'WHERE id=$1' : 'WHERE ($1::text IS NULL OR supplier_id=$1) AND ($2::text IS NULL OR state=$2)',
         id ? [text(id)] : [text(supplierId), text(params.get('state') || null)]);
       const services = loaded.supplier_services.map(r => r.id);
@@ -205,7 +209,7 @@ export async function readStaffDesk(database, graph, actorIds, path, params, hel
     if (path.endsWith('/statements')) { try { id = decodeURIComponent(id); } catch { return initial; } }
     if (id) await identities([id]);
     else {
-      const rows = await database.query(`SELECT user_id FROM (SELECT user_id FROM organization_accounts UNION SELECT id FROM users WHERE account_type='organization') s WHERE user_id > $1 COLLATE "C" ORDER BY user_id COLLATE "C" LIMIT 51`, [text(params.get('after') || '')]);
+      const rows = await database.query(`SELECT user_id FROM (SELECT user_id FROM organization_accounts UNION SELECT id FROM users WHERE account_type='organization') s WHERE user_id > $1 COLLATE "C" ORDER BY user_id COLLATE "C" LIMIT 51`, [binaryCursorPrefix(params.get('after') || '')]);
       await identities(rows.rows.map(r => r.user_id));
     }
     const users = loaded.users.map(r => r.id);
@@ -226,7 +230,7 @@ export async function readStaffDesk(database, graph, actorIds, path, params, hel
     if (cursor && (typeof cursor.submittedAt !== 'string' || !Number.isFinite(Date.parse(cursor.submittedAt)) || typeof cursor.id !== 'string' || !cursor.id)) return initial;
     await read('approval_cases', id ? 'WHERE id=$1' : `WHERE submitted_at IS NOT NULL AND status=$1 AND ($2::text IS NULL OR kind=$2)${reviewOnly ? ' AND user_id IN (SELECT id FROM users WHERE review_data)' : ''}
       AND ($3::text IS NULL OR to_char(submitted_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') > $3 COLLATE "C" OR (to_char(submitted_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')=$3 AND id > $4 COLLATE "C"))
-      ORDER BY submitted_at,id COLLATE "en-x-icu" LIMIT 51`, id ? [text(id)] : [text(status), text(kind), text(cursor?.submittedAt || null), text(cursor?.id || null)]);
+      ORDER BY submitted_at,id COLLATE "en-x-icu" LIMIT 51`, id ? [text(id)] : [text(status), text(kind), text(cursor?.submittedAt || null), binaryCursorPrefix(cursor?.id)]);
     const owners = unique([...actorIds, ...loaded.approval_cases.map(r => r.user_id)]);
     await identities(owners);
     for (const table of ['supplier_profiles','rider_profiles','client_profiles','organization_accounts']) await read(table, 'WHERE user_id = ANY($1::text[])', [owners]);
