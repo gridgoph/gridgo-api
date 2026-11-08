@@ -1872,7 +1872,9 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     const receiptOrderId = basketForOrder(store, orderId)?.receiptOrderId || orderId;
     const invoice = (store.orderInvoices || []).find((row) => row.orderId === receiptOrderId);
     if (!invoice) fail(404, "invoice_not_found", "This order does not have an invoice.");
-    const snapshot = clientInvoice(invoice.snapshot, { hideSupplierAmounts: Boolean(basketForOrder(store, orderId) || invoice.snapshot.organizationDiscountRateBps > 0 || invoice.snapshot.serviceFeeSchedule?.version === 2) && !privileged, exposeWorking: privileged });
+    const snapshot = clientInvoice(invoice.snapshot, { hideSupplierAmounts: Boolean(basketForOrder(store, orderId)
+      || invoice.snapshot.basketId || invoice.snapshot.groups?.length > 1
+      || invoice.snapshot.organizationDiscountRateBps > 0 || invoice.snapshot.serviceFeeSchedule?.version === 2) && !privileged, exposeWorking: privileged });
     // Invoices issued before the snapshot carried the split were all 75/25.
     if (snapshot.paymentPlan && snapshot.paymentPlan.downpaymentPercent == null) {
       snapshot.paymentPlan.downpaymentPercent = orderDownpaymentPercent(order);

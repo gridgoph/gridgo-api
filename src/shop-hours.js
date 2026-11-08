@@ -1,5 +1,5 @@
 import { identityHasMembership } from './authorization-context.js';
-import { AvailabilityError, validateShopSchedule, defaultShopSchedule, isOpenAt, addOpeningMilliseconds } from './availability.js';
+import { AvailabilityError, validateShopSchedule, defaultShopSchedule, isOpenAt, addOpeningMilliseconds, weeklyWindows } from './availability.js';
 import { operatingHours, validateOperatingHours } from './operating-hours.js';
 import { productionDayMinutes } from './production-days.js';
 import { privilegedAdminMemberships, queueInvalidate } from './notifications.js';
@@ -19,7 +19,7 @@ export function shopHoursStatus(profile, settings, at = new Date().toISOString()
     return { timeZone: 'Asia/Manila', schedule: baseSchedule(profile), version: profile?.version || 1,
       temporarilyClosed: Boolean(profile?.isClosed), isOpenNow: false, nextOpeningAt: null,
       todayExtension: null, dispatchNotice: null, calendarAvailable: false,
-      features: { multipleWindows: false, overnightWindows: false, riderShifts: false, hubDays: false } };
+      features: { weekdayOverrides: true, multipleWindows: false, overnightWindows: false, riderShifts: false, hubDays: false } };
   }
   const today = local(at, schedule.utcOffsetMinutes).toISOString().slice(0, 10);
   const todayExtension = schedule.extension?.day === today ? structuredClone(schedule.extension) : null;
@@ -35,7 +35,7 @@ export function shopHoursStatus(profile, settings, at = new Date().toISOString()
     nextOpeningAt, todayExtension, calendarAvailable: true,
     dispatchNotice: extensionEnd && (!isOpenAt(platform, at) || !isOpenAt(platform, extensionEnd))
       ? 'review_and_dispatch_in_next_working_window' : null,
-    features: { multipleWindows: false, overnightWindows: false, riderShifts: false, hubDays: false } };
+    features: { weekdayOverrides: true, multipleWindows: false, overnightWindows: false, riderShifts: false, hubDays: false } };
 }
 
 /** Prospective only. Never opt a historical order in during reads or migration. */
@@ -48,17 +48,21 @@ export function snapshotShopClock(store, order) {
 export const shopSlaClock = order => order.shopClock ?? order.operatingClock;
 
 function validateBase(schedule) {
-  if (!schedule || Object.keys(schedule).some(key => !['utcOffsetMinutes', 'week', 'closures'].includes(key))) {
+  if (!schedule || Object.keys(schedule).some(key => !['utcOffsetMinutes', 'week', 'closures', 'weekdayOverrides'].includes(key))) {
     fail(400, 'invalid_shop_hours', 'Send only the base weekly hours and closure dates; declare extensions separately.');
   }
-  try { validateOperatingHours({ timeZone: 'Asia/Manila', schedule, artworkReviewMinutes: 1, priorityDispatchCutoffMinute: 0 }, { requireDispatchWindow: false }); }
+  const { weekdayOverrides, ...base } = schedule;
+  try {
+    validateShopSchedule(schedule);
+    validateOperatingHours({ timeZone: 'Asia/Manila', schedule: base, artworkReviewMinutes: 1, priorityDispatchCutoffMinute: 0 }, { requireDispatchWindow: false });
+  }
   catch { fail(400, 'invalid_shop_hours', 'Use one daytime window per open day in Asia/Manila and valid closure dates (at most 90 days).'); }
   productionDayMinutes(schedule);
 }
 
 function extensionFor(schedule, input, at) {
   const date = local(at), day = date.toISOString().slice(0, 10);
-  const row = schedule.week.find(row => row.weekday === date.getUTCDay());
+  const row = weeklyWindows(schedule, date.getUTCDay()).at(-1);
   const closesMinute = input?.closesMinute;
   const closesAt = Date.parse(`${day}T00:00:00Z`) + (closesMinute - 480) * 60000;
   if (!input || Object.keys(input).some(key => !['day', 'closesMinute'].includes(key)) || (input.day != null && input.day !== day)
@@ -94,7 +98,9 @@ export async function routeShopHours({ req, url, store, user, readBody, now, id,
   if (Object.hasOwn(body, 'temporarilyClosed') && typeof body.temporarilyClosed !== 'boolean') fail(400, 'invalid_shop_hours', 'Temporarily closed must be true or false.');
   const schedule = structuredClone(profile.schedule || defaultShopSchedule());
   if (Object.hasOwn(body, 'schedule')) {
-    validateBase(body.schedule);
+    if (!body.schedule || typeof body.schedule !== 'object' || Array.isArray(body.schedule)) fail(400, 'invalid_shop_hours', 'Send a weekly schedule object.');
+    // Older editors omit overrides. Preserve them unless explicitly replaced ([] clears).
+    validateBase({ ...(Object.hasOwn(schedule, 'weekdayOverrides') ? { weekdayOverrides: schedule.weekdayOverrides } : {}), ...body.schedule });
     Object.assign(schedule, structuredClone(body.schedule));
     // The old declaration belonged to the previous base hours. Committed orders retain theirs.
     delete schedule.extension;

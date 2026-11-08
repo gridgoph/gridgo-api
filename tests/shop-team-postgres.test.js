@@ -112,6 +112,38 @@ test('HTTP deny-by-default staff/pending/removed blocks every owner route; owner
   assert.equal((await api('supplier','GET','/me/supplier-profile')).status,200);
 });
 
+test('merged hours, tester and removal routes preserve shop and Super Admin boundaries', {skip}, async t => {
+  const {db,api} = await setup(t);
+  const hours = await api('supplier','GET','/me/shop-hours',null,supplier);
+  assert.equal(hours.status,200,bodyOf(hours));
+  const edit = {expectedVersion:hours.body.hours.version,schedule:{...hours.body.hours.schedule,
+    weekdayOverrides:[{weekday:6,opensMinute:480,closesMinute:900}]}};
+  for (const status of ['active','pending','removed']) {
+    await mutate(db,s=>{s.shopMemberships.find(m=>m.userId==='other').status=status;});
+    const error = status==='active' ? 'shop_owner_required' : status==='pending' ? 'shop_approval_pending' : 'shop_access_removed';
+    for (const [path,body,opts] of [
+      ['/me/shop-hours',edit,supplier],
+      ['/ops/orders/order/remove',{reason:'Remove test order',confirmEmail:'client@example.invalid'},supplier],
+      ['/me/tester-program/check-in',{app:'supplier',version:'1',source:'open'},{}],
+    ]) {
+      const response = await api('other',path==='/me/shop-hours'?'PATCH':'POST',path,body,opts);
+      assert.equal(response.status,403,bodyOf(response)); assert.equal(response.body.error,error,bodyOf(response));
+    }
+    assert.equal((await api('other','GET','/me/tester-program?app=supplier')).body.error,error);
+  }
+  const edited = await api('supplier','PATCH','/me/shop-hours',edit,supplier);
+  assert.equal(edited.status,200,bodyOf(edited));
+  assert.deepEqual(edited.body.hours.schedule.weekdayOverrides,edit.schedule.weekdayOverrides);
+  assert.equal((await api('supplier','GET','/me/tester-program?app=supplier',null,supplier)).status,200);
+  for (const who of ['supplier','ops']) {
+    const removed = await api(who,'POST','/ops/orders/order/remove',{reason:'Remove test order',confirmEmail:'client@example.invalid'});
+    assert.equal(removed.status,403,bodyOf(removed)); assert.equal(removed.body.error,'forbidden');
+  }
+  await mutate(db,s=>{s.shopMemberships.find(m=>m.userId==='other').status='active';});
+  assert.equal((await api('other','GET','/orders/order',null,supplier)).body.order.clientEmail,undefined);
+  assert.equal((await api('admin','GET','/orders/order')).body.order.clientEmail,'client@example.invalid');
+});
+
 test('HTTP all invite kinds use verified identities, expire, revoke, claim once, approve/decline and guard last owner', {skip}, async t=>{
   const {db,api}=await setup(t,s=>{s.shopMemberships=[];});
   assert.equal((await api(null,'POST','/auth/shop-invites/claim',{token:'a'.repeat(43)})).status,401);

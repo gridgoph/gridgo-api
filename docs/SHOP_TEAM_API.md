@@ -199,6 +199,11 @@ shop hours/open-close, supplier payment terms, supplier services/pricing,
 catalog items/products/options/tiers/photos/production times, listing starters,
 readiness, catalog preview, payout account, payouts, earnings, reports,
 supplier invoices, shop failures, account settings, and team management.
+Per-day `schedule.weekdayOverrides` editing remains Owner-only on
+`PATCH /me/shop-hours`. Supplier-context `/me/tester-program` reads, check-ins
+and feedback also require active Owner access; personal client/rider tester
+memberships retain their existing authorization. `POST /ops/orders/:id/remove`
+remains Super Admin-only, including when a shop Owner holds other roles.
 Staff order projections allow only work fields and remove nested prices,
 payouts, earnings, payment/settlement snapshots and raw financial timeline notes.
 

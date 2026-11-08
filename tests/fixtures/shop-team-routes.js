@@ -1,5 +1,6 @@
 export const OWNER_ROUTES = [
   ['GET','/me/supplier-profile'], ['PATCH','/me/supplier-profile'], ['GET','/me/shop-hours'], ['PATCH','/me/shop-hours'],
+  ['GET','/me/tester-program?app=supplier'], ['POST','/me/tester-program/check-in'], ['POST','/me/tester-program/feedback'],
   ['GET','/me/supplier-payment-terms'], ['PATCH','/me/supplier-payment-terms'], ['GET','/me/supplier-readiness'],
   ['GET','/me/catalog-preview'], ['GET','/listing-starters'], ['GET','/me/catalog-items'], ['POST','/me/catalog-items'],
   ['GET','/me/catalog-items/item_supplier'], ['PATCH','/me/catalog-items/item_supplier'], ['DELETE','/me/catalog-items/item_supplier'],

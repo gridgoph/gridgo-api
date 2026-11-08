@@ -15,6 +15,7 @@ const dayValid = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.tes
 export function validateOperatingHours(value, { requireDispatchWindow = true } = {}) {
   if (!value || value.timeZone !== 'Asia/Manila' || value.schedule?.utcOffsetMinutes !== 480
     || Object.hasOwn(value.schedule, 'extension')
+    || Object.hasOwn(value.schedule, 'weekdayOverrides')
     || !Number.isSafeInteger(value.artworkReviewMinutes) || value.artworkReviewMinutes < 1 || value.artworkReviewMinutes > 540
     || (Object.hasOwn(value, 'sameDayReviewMinutes') && (!Number.isSafeInteger(value.sameDayReviewMinutes) || value.sameDayReviewMinutes < 1 || value.sameDayReviewMinutes > 540))
     || (Object.hasOwn(value, 'sameDayPromiseAllowanceMinutes') && (!Number.isSafeInteger(value.sameDayPromiseAllowanceMinutes) || value.sameDayPromiseAllowanceMinutes < 0 || value.sameDayPromiseAllowanceMinutes > 600))

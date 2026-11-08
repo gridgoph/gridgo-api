@@ -1,6 +1,7 @@
 import { actorUserId } from './shop-team.js';
 import { appendAudit } from './audit.js';
 import { tooManyRequests } from "./support-rate-limit.js";
+import { activeOrderSql } from './order-removal.js';
 import { notifyAdmins } from "./domain-events.js";
 import { approvedRole, canAccessOrder, queueInvalidate } from "./notifications.js";
 import { parseDeliveryMessage, parseDeliveryPhotoIds } from "./delivery-chat.js";
@@ -341,7 +342,7 @@ export async function purgeClosedPickupChats(database, at = new Date().toISOStri
     `SELECT DISTINCT m.order_id, m.rider_id, o.state, o.rider_id AS current_rider_id,
             o.fulfillment_mode, o.issue_window_opened_at, o.data->>'awaitingCollectionAt' AS awaiting_collection_at, o.data->'deliveryEvidence' AS delivery_evidence
        FROM pickup_chat_messages m
-       JOIN orders o ON o.id = m.order_id`,
+       JOIN orders o ON o.id = m.order_id WHERE ${activeOrderSql('o.id')}`,
   );
   let removed = 0;
   const photoIds = [];

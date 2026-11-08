@@ -1,6 +1,7 @@
 import { recordOrderActions } from './shop-order-actions.js';
 import { shopMembershipsFor, selectedShop, assertActiveShop, shopSummary, staffRouteAllowed, identityShopRoute,
   supplierShopActor, notifyShopStaff, routeShopTeam, claimShopInvite, discoverShopInvites, isShopStaff, actorUserId, assertStaffFile } from './shop-team.js';
+import { ORDER_REMOVAL_ROUTE, removeOrder, activeOrderSql } from './order-removal.js';
 import { routeTesterProgram } from './tester-program-routes.js';
 import { isQuoteListing } from "./quote-listings.js";
 import { routeQuoteRequests, expireQuoteRequests, quoteValidityDays, quoteSaveError } from "./quote-requests.js";
@@ -95,6 +96,7 @@ import { originalDomainStore } from "./postgres-store.js";
 import { TEST_OPERATIONS_FORBIDDEN, isTestOperationsUser, mergeTestOperationsView, reviewSubject, testOperationsRouteAllowed, testOperationsView } from "./test-operations.js";
 import { hasRole, hasSupplierAppAccess, approvedRole, canAccessOrder, notificationVisible, EVENT_ROLES, invalidateFrameVisible } from "./notifications.js";
 import { availableDispatch, dispatchWorkHeld } from "./dispatch-policy.js";
+import { requireShopDispatchHours } from './shop-dispatch-hours.js';
 import http from "node:http";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -308,6 +310,8 @@ import {
 } from "./tracker.js";
 import {
   loadDeviceTokenStore,
+  loadTesterProgramIdentityStore,
+  appendTesterProgramAudit,
   loadNotificationStore,
   loadInboxStore,
   loadDeliveryStore,
@@ -321,6 +325,7 @@ import {
   saveDeviceTokenStore,
   saveStore,
 } from "./postgres-store.js";
+import { isTesterProgramRoute, routeTesterProgram as routePlayTesterProgram } from './tester-program.js';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PORT = Number(process.env.PORT || 8787);
@@ -1833,7 +1838,7 @@ async function expireElapsedIssueWindows() {
   const candidate = await database.query(`
     SELECT 1
       FROM orders AS candidate
-     WHERE candidate.state = 'issue_window_open'
+     WHERE ${activeOrderSql('candidate.id')} AND candidate.state = 'issue_window_open'
        AND candidate.issue_window_expires_at <= now()
        AND candidate.payout_hold = false
        AND NOT EXISTS (
@@ -1864,7 +1869,7 @@ async function expireElapsedIssueWindows() {
 
 async function sweepRescheduleRequests() {
   const candidate = await database.query(`SELECT 1 FROM orders
-    WHERE data #>> '{rescheduleRequest,status}' = 'pending'
+    WHERE ${activeOrderSql('orders.id')} AND data #>> '{rescheduleRequest,status}' = 'pending'
       AND (data #>> '{rescheduleRequest,expiresAt}')::timestamptz <= now() LIMIT 1`);
   if (!candidate.rowCount) return;
   await enqueueMutation(async () => {
@@ -2342,7 +2347,7 @@ async function handleAuditedRequest(req, res) {
       });
     }
     if (await testOperationsSession(req) && !testOperationsRouteAllowed(req.method, pathname)) {
-      return send(res, 403, TEST_OPERATIONS_FORBIDDEN);
+      return send(res, 403, ORDER_REMOVAL_ROUTE.test(pathname) ? { error: 'forbidden' } : TEST_OPERATIONS_FORBIDDEN);
     }
     if (pathname.startsWith('/legal/') && await legalResponse(req, res, url)) return;
     if (pathname === '/account-deletion-requests' || pathname === '/api/account-deletion-requests') {
@@ -2500,6 +2505,34 @@ async function handleAuditedRequest(req, res) {
       const { mutated } = applyClerkWebhookEvent(store, event);
       if (mutated) await save(store);
       return send(res, 200, { ok: true });
+    }
+
+    if (isTesterProgramRoute(pathname)) {
+      res.setHeader('Cache-Control', 'private, no-store');
+      const verified = await verifiedClerkClaimsFor(req);
+      const identityStore = await loadTesterProgramIdentityStore(database, verified?.claims?.sub || null);
+      const auth = await authenticateRequest(req, identityStore);
+      if (!auth.user) return send(res, auth.status || 401, authFailureBody(auth));
+      const held = accountHoldDenial(auth.user);
+      if (held) return send(res, 403, held);
+      const role = req.headers['x-gridgo-role'];
+      const supplierTester = pathname.startsWith('/me/') && (req.method === 'GET'
+        ? url.searchParams.get('app') === 'supplier'
+        : req.method === 'POST' && (await readBody(req))?.app === 'supplier');
+      // This lightweight route precedes the normal shop gate. Keep supplier
+      // tester access Owner-only without granting the person's shop identity.
+      if (wantsShop(req, identityStore, auth.user, role) || (!role && supplierTester)) {
+        const member = selectedShop(identityStore, auth.user, req.headers['x-gridgo-shop-id']);
+        if (member) {
+          assertActiveShop(member);
+          if (member.role !== 'owner') return send(res, 403, { error: 'shop_owner_required' });
+        }
+      }
+      if (role && (!EVENT_ROLES.includes(role) || !hasRole(identityStore, auth.user.id, role))) return send(res, 403, { error: 'forbidden' });
+      const user = selectActorRole(identityStore, auth.user, role || auth.user.role, { restrictMemberships: Boolean(role) });
+      const result = await routePlayTesterProgram({ req, url, user, database, readBody, now,
+        auditEvent: entry => appendTesterProgramAudit(database, entry, now()) });
+      return send(res, result.status, result.body);
     }
 
     await expireElapsedIssueWindows();
@@ -2845,6 +2878,11 @@ async function handleAuditedRequest(req, res) {
       }
       res.setHeader('Cache-Control', 'private, no-store');
       return send(res, 200, clientHomeSummary(store, user.id, now()));
+    }
+    if (req.method === 'POST' && ORDER_REMOVAL_ROUTE.test(pathname)) {
+      const result = await removeOrder({ database, store, user, orderId: ORDER_REMOVAL_ROUTE.exec(pathname)[1],
+        body: await readBody(req), at: now(), audit, invalidate: queueOrderInvalidate, load, save });
+      return send(res, result.status, result.body);
     }
     // Test operations read and write through a review-only view of the store.
     const testOperations = Boolean(user) && isTestOperationsUser(store, user.id);
@@ -3301,7 +3339,14 @@ async function handleAuditedRequest(req, res) {
       return send(res, basketResponse.status, basketResponse.body);
     }
     if (req.method === "POST" && /^\/orders\/[^/]+\/payments\//.test(pathname)) {
-      const basket = basketForOrder(store, pathname.split("/")[2]);
+      const orderId = pathname.split("/")[2];
+      const unavailableBasket = store.removedBasketMemberships?.get(orderId);
+      if (unavailableBasket) {
+        if (unavailableBasket.clientId !== user.id && !isOps(user)) return send(res, 403, { error: "forbidden" });
+        return send(res, 409, { error: "basket_payment_unavailable",
+          message: "This basket includes a removed order and can no longer accept payment. Contact Operations for help." });
+      }
+      const basket = basketForOrder(store, orderId);
       if (basket) {
         if (basket.clientId !== user.id && !isOps(user)) return send(res, 403, { error: "forbidden" });
         return send(res, 409, { error: "basket_payment_required", basketId: basket.id });
@@ -6680,6 +6725,7 @@ async function handleAuditedRequest(req, res) {
         || (order.state === 'needs_qa' && ['supplier_assigned', 'approved_for_matching', 'proof_approval', 'client_correction'].includes(next)))) {
         requireOperatingHours(store.settings, now(), next === 'rider_assigned' ? 'Dispatch' : 'Artwork review');
       }
+      if (next === 'rider_assigned') requireShopDispatchHours(order, store.settings, now());
       if (order.state === "proof_approval" && next === "approved_for_matching") {
         approveSample({ store, order, user, approval: body.approval, at: now(), id, req });
       }
@@ -7150,6 +7196,7 @@ async function handleAuditedRequest(req, res) {
         return send(res, 409, { error: "pickup_fulfillment_not_available" });
       }
       if (order.operatingClock) requireOperatingHours(store.settings, now(), "Dispatch");
+      requireShopDispatchHours(order, store.settings, now());
       order.riderId = user.id;
       order.riderAssignedAt = now();
       delete order.riderProgress;
@@ -7944,7 +7991,7 @@ async function sweepCalls() {
   if (callsBusy) return;
   callsBusy = true;
   try {
-    const active = await database.query("SELECT 1 FROM order_calls WHERE state IN ('ringing','accepted') LIMIT 1");
+    const active = await database.query(`SELECT 1 FROM order_calls WHERE ${activeOrderSql('order_calls.order_id')} AND state IN ('ringing','accepted') LIMIT 1`);
     if (active.rowCount) await enqueueMutation(async () => {
       const store = await load();
       if (await reconcileCalls(database, store, { createId: id, at: now() })) await save(store);
@@ -7961,7 +8008,7 @@ async function runLifecycleWork() {
       sweepRescheduleRequests,
       async () => {
         const candidate = await database.query(`SELECT 1 FROM orders
-          WHERE state = 'supplier_assigned' AND supplier_id IS NOT NULL AND (
+          WHERE ${activeOrderSql('orders.id')} AND state = 'supplier_assigned' AND supplier_id IS NOT NULL AND (
             data->'shopAcceptance' IS NULL
             OR data #>> '{shopAcceptance,supplierId}' IS DISTINCT FROM supplier_id
             OR (data #>> '{shopAcceptance,status}' = 'pending'
@@ -7990,7 +8037,7 @@ async function runLifecycleWork() {
         // Avoid taking the global mutation lock when there are no active hub
         // handovers. Recheck the graph under the lock if a candidate exists.
         const candidates = await database.query(`SELECT 1 FROM orders
-          WHERE state = 'awaiting_collection' AND data->'handover'->>'qrToken' IS NOT NULL
+          WHERE ${activeOrderSql('orders.id')} AND state = 'awaiting_collection' AND data->'handover'->>'qrToken' IS NOT NULL
           AND data->'handover'->>'consumedAt' IS NULL LIMIT 1`);
         if (!candidates.rowCount) return;
         await enqueueMutation(async () => {
@@ -8029,7 +8076,7 @@ async function runLifecycleWork() {
           CROSS JOIN LATERAL (SELECT coalesce(o.issue_window_opened_at,
             (SELECT (e->>'at')::timestamptz FROM jsonb_array_elements(CASE WHEN jsonb_typeof(o.data->'timeline')='array' THEN o.data->'timeline' ELSE '[]'::jsonb END)
               WITH ORDINALITY AS entry(e,n) WHERE e->>'state'='delivered' ORDER BY n LIMIT 1)) AS completed_at) c
-          WHERE o.state IN ('delivered','issue_window_open','completed','payout_released')
+          WHERE ${activeOrderSql('o.id')} AND o.state IN ('delivered','issue_window_open','completed','payout_released')
             AND c.completed_at >= l.launched_at - interval '336 hours'
             AND greatest(c.completed_at,l.launched_at) <= $1
             AND greatest(c.completed_at,l.launched_at) + interval '168 hours' > $1
@@ -8048,7 +8095,7 @@ async function runLifecycleWork() {
           AND u.created_at > $1::timestamptz - interval '144 hours'
           AND f.awarded_at IS NULL AND f.reminded_5_at IS NULL
           AND (f.reminded_2_at IS NULL OR u.created_at <= $1::timestamptz - interval '120 hours')
-          AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.client_id=u.id) LIMIT 1`, [now()]);
+          AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.client_id=u.id AND ${activeOrderSql('o.id')}) LIMIT 1`, [now()]);
         if (!candidate.rowCount) return;
         await enqueueMutation(async () => {
           const store = await load();

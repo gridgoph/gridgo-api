@@ -1,4 +1,5 @@
 import { tooManyRequests } from "./support-rate-limit.js";
+import { activeOrderSql } from './order-removal.js';
 
 /*
  Client <-> rider messages for one door delivery (gridgo-client#198).
@@ -338,7 +339,7 @@ export async function purgeClosedDeliveryChats(database, at = new Date().toISOSt
     `SELECT DISTINCT m.order_id, m.rider_id, o.state, o.rider_id AS current_rider_id,
             o.fulfillment_mode, o.issue_window_opened_at, o.data->'deliveryEvidence' AS delivery_evidence
        FROM delivery_chat_messages m
-       JOIN orders o ON o.id = m.order_id`,
+       JOIN orders o ON o.id = m.order_id WHERE ${activeOrderSql('o.id')}`,
   );
   let removed = 0;
   const photoIds = [];

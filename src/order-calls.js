@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { activeOrderSql } from './order-removal.js';
 import { deliveryChatParty, deliveryChatWindow } from "./delivery-chat.js";
 import { pickupChatParty, pickupChatWindow } from "./pickup-chat.js";
 import { approvedRole, canAccessOrder, queueInvalidate } from "./notifications.js";
@@ -79,7 +80,7 @@ async function finish(database, store, call, state, { createId, at }) {
 
 /** Called under the domain lock, before save on every mutation and on a 1s tick. */
 export async function reconcileCalls(database, store, { createId, at }) {
-  const { rows } = await database.query("SELECT * FROM order_calls WHERE state IN ('ringing','accepted')");
+  const { rows } = await database.query(`SELECT * FROM order_calls WHERE ${activeOrderSql('order_calls.order_id')} AND state IN ('ringing','accepted')`);
   let count = 0;
   for (const call of rows) {
     const order = store.orders.find(o => o.id === call.order_id);
@@ -238,7 +239,7 @@ export async function routeOrderCalls({ req, res, pathname, user, store, databas
 
 /** Same sweep/window as each order chat, including reassignment and cancellation. */
 export async function purgeClosedCalls(database, store, at) {
-  const { rows } = await database.query('SELECT * FROM order_calls');
+  const { rows } = await database.query(`SELECT * FROM order_calls WHERE ${activeOrderSql('order_calls.order_id')}`);
   let removed = 0;
   for (const call of rows) {
     const order = store.orders.find(o => o.id === call.order_id);
