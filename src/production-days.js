@@ -1,6 +1,7 @@
 import { AvailabilityError, defaultShopSchedule, validateShopSchedule } from './availability.js';
 
-/** Split shifts count together. A variable-length week needs an explicit policy. */
+/** Split shifts count together. Weekday overrides change available time, never
+ * the base divisor used by published day-based listing durations. */
 export function productionDayMinutes(schedule = defaultShopSchedule()) {
   validateShopSchedule(schedule);
   const totals = new Map();

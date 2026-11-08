@@ -29,6 +29,7 @@ const fail = (status, code, message) => { throw new MatchError(status, code, mes
 
 export function publicBasket(store, basket, user) {
   const privileged = staff(user);
+  const orderReader = privileged && user.role === 'super_admin' ? user : { ...user, role: privileged ? 'ops_admin' : 'client' };
   const orders = basket.orderIds.map((id) => store.orders.find((order) => order.id === id));
   return {
     id: basket.id, receiptOrderId: basket.receiptOrderId, totalMinor: basket.totalMinor,
@@ -45,7 +46,7 @@ export function publicBasket(store, basket, user) {
       ...(privileged ? { itemSubtotalMinor: order.supplierSubtotalMinor, serviceFeeMinor: order.serviceFeeMinor } : {}),
       deliveryFeeMinor: order.deliveryFeeMinor, totalMinor: order.totalMinor,
       ...(order.pickupFeeMinor != null ? { pickupFeeMinor: order.pickupFeeMinor } : {}),
-      order: publicOrderFor(order, privileged ? { ...user, role: 'ops_admin' } : { ...user, role: 'client' }, store),
+      order: publicOrderFor(order, orderReader, store),
     })),
   };
 }

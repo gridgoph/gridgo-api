@@ -1,3 +1,5 @@
+import { orderRemovalBlock } from './order-removal.js';
+import { identityHasMembership } from './authorization-context.js';
 import { collectedVoucherFundingMinor } from './voucher-funding.js';
 import { DEFAULT_SAVED_FILES_LIMIT_BYTES } from './file-retention-policy.js';
 import { deliveryPackagePhotoId } from './delivery-package-photos.js';
@@ -1153,6 +1155,11 @@ function productionItemsFor(store, order, user) {
       const production = ["client", "supplier", "ops_admin", "super_admin"].includes(user?.role);
       return {
         id: line.id, itemName: line.itemNameSnapshot || "", quantity: line.quantity,
+        ...(user?.role === "client" && order.clientId === user.id ? {
+          // Use only the immutable line snapshot, never today's listing or taxonomy.
+          subcategoryCode: typeof line.artworkGuidance?.subcategoryCode === "string"
+            ? line.artworkGuidance.subcategoryCode : null,
+        } : {}),
         turnaroundDays: line.turnaroundDaysSnapshot ?? null,
         turnaroundMinutes: line.turnaroundMinutesSnapshot ?? (line.turnaroundHoursSnapshot == null ? null : line.turnaroundHoursSnapshot * 60),
         pricingUnit: line.pricingUnitSnapshot || null, packageQty: line.packageQtySnapshot ?? null,
@@ -1747,6 +1754,15 @@ export function publicOrderFor(order, user, store = null) {
   // The orders queue names the client. Only Operations and Super Admin receive
   // it. A shop, a rider, and the client keep the projection they already had.
   if (ops) publicRecord.clientName = clientNameFor(store, order.clientId);
+  // Typed removal confirmation is a Super Admin capability. Never trust an
+  // arbitrary historical orders.data contact field for this projection.
+  delete publicRecord.clientEmail;
+  if (user?.role === 'super_admin') publicRecord.clientEmail = store?.users?.find(row => row.id === order.clientId)?.email ?? null;
+  delete publicRecord.removal;
+  if (store?.users && user?.role === 'super_admin' && identityHasMembership(user, 'super_admin')) {
+    const blockedReason = orderRemovalBlock(store, order);
+    publicRecord.removal = { allowed: blockedReason === null, blockedReason };
+  }
   return publicRecord;
 }
 

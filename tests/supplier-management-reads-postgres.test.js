@@ -94,7 +94,12 @@ test('supplier management graph bounds board hydration and excludes unrelated hi
       assert.ok(!queries.some(q => /FROM (audit_log|notifications|location_pings|notification_push_outbox)\b/.test(q.sql)), path);
       if (url.pathname === '/me/catalog-items') assert.equal(store.catalogItems.length, 1);
       await assert.rejects(database.transaction(() => saveStore(database, store)), /read-only/);
-      result.push(queries);
+      // ANY filters are unordered; table growth can change PostgreSQL's scan order.
+      result.push(queries.map(query => ({ ...query,
+        values: query.values?.map((value, index) =>
+          Array.isArray(value) && query.sql.includes(`ANY($${index + 1}::text[])`)
+            ? [...value].sort() : value),
+      })));
     }
     return result;
   };

@@ -686,6 +686,23 @@ Returns `{ invoice }` with immutable line snapshots, one delivery line per job, 
 
 Common errors are `invalid_preference_ranking`, `dropoff_required`, `match_not_found`, `cart_not_found`, `cart_checked_out`, `cart_empty`, `catalog_item_stale`, `file_not_ready`, and `payment_method_not_allowed`.
 
+## Order reads for reorder
+
+For the owning client, `GET /orders` and `GET /orders/:id` include
+`productionItems[].subcategoryCode` as a string or `null`. It comes only from
+the immutable order line's stored `artworkGuidance.subcategoryCode`; missing
+values (including older or link-only snapshots) return `null`. Reads never
+infer it from the current listing, taxonomy, or product family. Supplier, rider,
+and staff projections are unchanged.
+
+Existing `productionItems[].options` already carry the selected `{ groupName,
+label }` snapshots, alongside quantity and structured specs. The current match
+listing's `optionGroups` provide available choices and IDs; clients can restore
+only choices that are still offered after a fresh match, using those current
+IDs. No additional listing or option field is required on the order. Reorder
+uses the normal match/cart flow and current prices; `POST /orders` remains
+unchanged for installed older apps.
+
 ## Reviews read back
 
 `POST /orders/:id/review` is written up under checkout. Two readers turn those rows into something a person can use (`src/shop-reviews.js`).

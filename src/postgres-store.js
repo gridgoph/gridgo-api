@@ -1,3 +1,4 @@
+import { orderReadQuery, activeOrderSql, attachOrderRemovalContext } from './order-removal.js';
 import { artworkFileIdsFor } from './artwork-attachments.js';
 import { parseCatalogListQuery } from './catalog-routes.js';
 import { notificationVisible, parseNotificationListLimit, canAccessOrder, hasRole } from './notifications.js';
@@ -10,7 +11,7 @@ import { enforceReviewData, labelReviewNotifications, reviewReportView } from '.
 import { performanceTable, performanceRows, loadPerformanceRows } from './supplier-performance-store.js';
 import { parsePaperSize } from './print-layout.js';
 import { canonicalColourPricing } from './colour-pricing.js';
-import { finalizeAuditEntries } from './audit.js';
+import { appendAudit, finalizeAuditEntries } from './audit.js';
 import { supplierInvoiceTable, supplierInvoiceRows, loadSupplierInvoiceRows } from './supplier-invoice-store.js';
 import { sampleBatchTable, sampleBatchRows, loadSampleBatchRows } from './sample-batch-store.js';
 import { surveyTable, surveyRows, loadSurveyRows } from './survey-store.js';
@@ -877,13 +878,14 @@ export async function loadStore(database) {
   if (!database.inTransaction()) return database.snapshot(() => loadStore(database));
   const loaded = {};
   for (const table of TABLES) {
-    loaded[table.name] = (await database.query(`SELECT ${table.columns.join(", ")} FROM ${table.name}`)).rows;
+    loaded[table.name] = (await database.query(orderReadQuery(table))).rows;
   }
   const store = storeFromRows(loaded, {
     legalPenaltyGate: await loadLegalPenaltyGate(database),
     supplierPerformanceLaunchedAt: (await database.query("SELECT launched_at FROM supplier_performance_launch WHERE singleton")).rows[0]?.launched_at || null,
     surveyLaunchedAt: (await database.query("SELECT launched_at FROM survey_launch WHERE singleton")).rows[0]?.launched_at || null,
   });
+  await attachOrderRemovalContext(database, store, { retention: true });
   Object.defineProperty(store, "listOwnCatalogItems", {
     value: (params) => listOwnCatalogItems(database, params),
     enumerable: false,
@@ -898,7 +900,7 @@ function readGraph(database) {
   async function read(name, where, values = []) {
     const table = TABLES.find(table => table.name === name);
     if (!table) throw new Error(`Unknown read graph table: ${name}`);
-    loaded[name] = (await database.query(`SELECT ${table.columns.join(', ')} FROM ${name} ${where}`, values)).rows;
+    loaded[name] = (await database.query(orderReadQuery(table, where), values)).rows;
   }
   function finish(options = {}) {
     const store = storeFromRows(loaded, { ...options, writable: false });
@@ -958,7 +960,9 @@ export async function loadDeliveryStore(database, { userIds = [], notificationId
     await read('users', 'WHERE id = ANY($1::text[])', [ownerIds]);
     const seasonIds = loaded.notifications.map(row => row.data?.seasonWindowId).filter(Boolean);
     if (seasonIds.length) await read('season_windows', 'WHERE id = ANY($1::text[])', [seasonIds]);
-    return graph.finish();
+    const store = graph.finish();
+    if (subjectId) await attachOrderRemovalContext(database, store, { subjectId });
+    return store;
   });
 }
 
@@ -1490,7 +1494,7 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
     // Preserve the existing 403 for a real, inaccessible detail without
     // hydrating its private graph. Test operations still sees hidden rows as 404.
     if (detail) store.orderReadForbidden = (await database.query(
-      `SELECT EXISTS (SELECT 1 FROM orders WHERE id = $1 ${reviewOnly ? 'AND review_data' : ''}) AS present`,
+      `SELECT EXISTS (SELECT 1 FROM orders WHERE ${activeOrderSql('orders.id')} AND id = $1 ${reviewOnly ? 'AND review_data' : ''}) AS present`,
       [pathname.split('/')[2]],
     )).rows[0].present;
     return store;
@@ -1499,6 +1503,25 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
     'platform_revenue_adjustments', 'claims', 'order_change_requests', 'order_change_payments', 'order_change_payouts',
     'delivery_pin_payments', 'refund_supplier_payouts', 'shop_reviews', 'delivery_reminders']) {
     await read(name, 'WHERE order_id = ANY($1::text[])', [orderIds]);
+  }
+  if (selected === 'super_admin' && identityHasMembership(actor, 'super_admin')) {
+    // The removal guard also sees shared payments and retained financial history.
+    // Keep these facts scoped to the projected orders, including legacy credit
+    // references stored inside data. Other roles do not need this private graph.
+    await read('order_basket_groups', `WHERE basket_id IN
+      (SELECT basket_id FROM order_basket_groups WHERE order_id = ANY($1::text[]))`, [orderIds]);
+    await read('order_baskets', 'WHERE id = ANY($1::text[])', [loaded.order_basket_groups.map(row => row.basket_id)]);
+    // Containment uses each history table's order_refs GIN index. Preserve
+    // scalar/array references both at the snapshot root and inside legacy data.
+    const references = orderIds.flatMap(orderId => [
+      { orderId }, { orderIds: [orderId] }, { data: { orderId } }, { data: { orderIds: [orderId] } },
+    ]).map(reference => JSON.stringify(reference));
+    const linked = 'WHERE data @> ANY($1::jsonb[])';
+    await read('credit_ledger', linked, [references]);
+    await read('credit_accounts', 'WHERE user_id = ANY($1::text[])', [loaded.credit_ledger.map(row => row.user_id)]);
+    for (const name of ['voucher_reservations', 'voucher_redemptions', 'voucher_ledger']) {
+      await read(name, linked, [references]);
+    }
   }
   await read('order_line_item_options', 'WHERE order_line_item_id = ANY($1::text[])', [loaded.order_line_items.map(row => row.id)]);
   await read('refund_payments', 'WHERE request_id = ANY($1::text[])', [loaded.refund_settlements.map(row => row.request_id)]);
@@ -1555,7 +1578,7 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
     // not merely the opened order. Return only counts for the visible shops.
     const counts = await database.query(`SELECT event->'supplierId' AS supplier, count(*)::int AS count
       FROM orders CROSS JOIN LATERAL jsonb_array_elements(COALESCE(NULLIF(data#>'{shopHandover,arrivedPacked}', 'null'::jsonb), '[]'::jsonb)) event
-      WHERE data#>'{shopHandover,arrivedPacked}' IS NOT NULL
+      WHERE ${activeOrderSql('orders.id')} AND data#>'{shopHandover,arrivedPacked}' IS NOT NULL
         AND data#>'{shopHandover,arrivedPacked}' @> ANY($2::jsonb[])
         AND event->'supplierId' = ANY($1::jsonb[]) ${dispatch && reviewOnly ? 'AND review_data' : reviewScope}
       GROUP BY event->'supplierId'`, [[...new Set(loaded.orders.map(row => JSON.stringify(row.supplier_id)))],
@@ -1601,6 +1624,28 @@ async function readQuoteGraph(graph, ids, pathname, status) {
     await read('supplier_profiles', 'WHERE user_id = ANY($1::text[])', [suppliers]);
   }
   return graph.finish();
+}
+
+/** Identity only: tester telemetry must not load orders or run lifecycle work. */
+export async function loadTesterProgramIdentityStore(database, clerkSubject) {
+  return database.snapshot(async () => {
+    const graph = readGraph(database);
+    await graph.read('users', 'WHERE clerk_user_id = $1', [clerkSubject]);
+    await readIdentity(graph, graph.loaded.users.map(row => row.id));
+    return graph.finish();
+  });
+}
+
+/** Tester administration appends evidence without running domain save hooks. */
+export async function appendTesterProgramAudit(database, entry, at) {
+  if (!database.inWriteTransaction()) throw new Error('Tester audit requires a write transaction');
+  const store = { users: [entry.actor], auditLog: [] };
+  appendAudit(store, entry, { at });
+  finalizeAuditEntries(store, null);
+  const { id, at: eventAt, actorId, actorRole, action, entityType, entityId, orderId, ...data } = store.auditLog[0];
+  await database.query(`INSERT INTO audit_log(id,at,actor_id,actor_role,action,entity_type,entity_id,order_id,position,data)
+    SELECT $1,$2,$3,$4,$5,$6,$7,$8,COALESCE(max(position),-1)+1,$9 FROM audit_log`,
+  [id, eventAt, actorId, actorRole, action, entityType, entityId, orderId, data]);
 }
 
 export async function loadHotReadStore(database, clerkSubject, pathname, { after = '', status = null, sessionHash = null, role, includeReviewData = false, searchParams = new URLSearchParams() } = {}) {
@@ -1792,7 +1837,7 @@ export async function loadNotificationStore(database, clerkSubject, { lastEventI
     const loaded = Object.fromEntries(TABLES.map(table => [table.name, []]));
     async function read(name, where = '', values = []) {
       const table = TABLES.find(table => table.name === name);
-      loaded[name] = (await database.query(`SELECT ${table.columns.join(', ')} FROM ${name} ${where}`, values)).rows;
+      loaded[name] = (await database.query(orderReadQuery(table, where), values)).rows;
     }
     await read('users', 'WHERE clerk_user_id = $1', [clerkSubject]);
     if (loaded.users.length === 1) {

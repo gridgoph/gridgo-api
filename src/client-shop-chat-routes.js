@@ -1,4 +1,5 @@
 import { parseDeliveryMessage, parseDeliveryPhotoIds } from './delivery-chat.js';
+import { activeOrderSql } from './order-removal.js';
 import { maskChatContacts } from './chat-contact-masking.js';
 import { tooManyRequests } from './support-rate-limit.js';
 import { notifyAdmins } from './domain-events.js';
@@ -99,7 +100,7 @@ async function staffList(database, store, user, search, at) {
   const offset = search.get('offset') ?? '0';
   if (!/^\d+$/.test(offset) || !Number.isSafeInteger(Number(offset))) throw invalid('invalid_chat_offset');
   const result = await database.query(`SELECT order_id,created_at,updated_at FROM client_shop_chat_threads
-    WHERE ($1::boolean=false OR flagged_at IS NOT NULL) ORDER BY updated_at DESC,order_id LIMIT $2 OFFSET $3`, [search.get('flagged') === '1', limit + 1, Number(offset)]);
+    WHERE ${activeOrderSql('client_shop_chat_threads.order_id')} AND ($1::boolean=false OR flagged_at IS NOT NULL) ORDER BY updated_at DESC,order_id LIMIT $2 OFFSET $3`, [search.get('flagged') === '1', limit + 1, Number(offset)]);
   const threads = [];
   for (const row of result.rows.slice(0, limit)) {
     const order = store.orders.find(order => order.id === row.order_id);
