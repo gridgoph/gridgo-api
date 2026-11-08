@@ -3,6 +3,12 @@ import { defaultPromotionSettings } from '../../src/promotion-settings.js';
 import { claimFounding } from '../../src/promotions.js';
 import { routeOrderMatch } from '../../src/order-match-routes.js';
 export const AT = '2026-10-27T01:00:00.000Z';
+/** Live money tests need a future Manila weekday, including when CI runs Sunday. */
+export function liveCheckoutDeadline(at = Date.now()) {
+  const day = new Date(new Date(at).getTime() + 8 * 3600000 + 7 * 86400000);
+  if (day.getUTCDay() === 0) day.setUTCDate(day.getUTCDate() + 1);
+  return `${day.toISOString().slice(0, 10)}T10:00:00.000Z`;
+}
 export function checkoutFixture({ percent = 100, amount = 20000 } = {}) {
   const store = fixture();
   store.settings.downpaymentPercent = percent;
