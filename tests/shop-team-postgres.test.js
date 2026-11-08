@@ -62,6 +62,15 @@ test('HTTP Staff reads own legacy multi-shop artwork and mockups without crossin
       s.orders[0][`${purpose}FileIds`] = ['own','foreign','unattributed'].map(key=>`${purpose}_${key}`);
     }
   });
+  // /health becomes available before boot-time MinIO recovery finishes.
+  // Retry only that readiness response; authorization failures must fail immediately.
+  let ready;
+  for (let attempt = 0; attempt < 200; attempt++) {
+    ready = await api('other','GET','/files/artwork_own',null,supplier);
+    if (ready.status !== 503 || ready.body.error !== 'storage_initializing') break;
+    await new Promise(resolve => setTimeout(resolve,25));
+  }
+  assert.equal(ready.status,200,bodyOf(ready));
   for (const who of ['supplier','other']) {
     const order = await api(who,'GET','/orders/order',null,supplier);
     assert.equal(order.status,200,bodyOf(order));
