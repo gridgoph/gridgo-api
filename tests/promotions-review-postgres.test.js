@@ -15,7 +15,9 @@ const DB = process.env.DATABASE_URL;
 async function setup(t, options) {
   const db = createDatabase({ DATABASE_URL: DB }); t.after(() => db.close());
   await resetDatabase(db, 'TRUNCATE users, platform_settings, voucher_campaigns, taxonomy_categories, accepted_file_formats RESTART IDENTITY CASCADE');
-  const s = checkoutFixture(options);
+  // These HTTP cases use the real clock; fixed-date promotion policy tests keep
+  // the published campaign dates in checkoutFixture's default configuration.
+  const s = checkoutFixture({...options,promotionEndsAt:new Date(Date.now()+30*86400000).toISOString()});
   for (const [fileId, purpose, ownerId] of [['refundQr','refund_qr','client'], ['refundReceipt','refund_receipt','ops'], ['pinProof','payment_proof','client'], ['finalProof','payment_proof','client']]) s.files.push({ fileId, purpose, ownerId, state: 'ready', objectKey: `private/${fileId}`, originalFilename: `${fileId}.png`, size: 100, declaredContentType: 'image/png', detectedContentType: 'image/png', createdAt: AT, references: [] });
   if (options?.riderRate !== undefined) s.settings.riderCommissionBps=options.riderRate;
   if (options?.far) s.orders[0].dropoff = {lat:7.06+8/111.195,lng:125.6,label:'Original far pin'};

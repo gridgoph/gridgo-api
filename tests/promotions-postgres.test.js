@@ -111,7 +111,8 @@ test('HTTP promotion permissions, claim race, expectedVersion and admin usage pr
   assert.equal((await api('client0', 'GET', '/admin/promotions')).status, 403);
   assert.equal((await api('client0', 'PATCH', '/admin/promotions', { expectedVersion: 1 })).status, 403);
   const before = await api('admin', 'GET', '/admin/promotions'); assert.equal(before.body.version, 1);
-  const setting = await api('admin', 'PATCH', '/admin/promotions', { expectedVersion: 1, founding: { slots: 1 } });
+  const setting = await api('admin', 'PATCH', '/admin/promotions', { expectedVersion: 1,
+    founding: { slots: 1, endsAt: new Date(Date.now()+30*86400000).toISOString() } });
   assert.equal(setting.status, 200); assert.equal(setting.body.version, 2);
   const race = await Promise.all([api('client0', 'POST', '/me/promotions/founding/claim', {}), api('client1', 'POST', '/me/promotions/founding/claim', {})]);
   assert.deepEqual(race.map(r => r.status).sort(), [200, 409]);
