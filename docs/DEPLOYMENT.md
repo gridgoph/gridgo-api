@@ -469,13 +469,19 @@ concurrent build procedure. Migration `1793892000000_operations_queue_reads`
 adds `claims_status_idx`, `issues_status_idx`, `issues_client_idx`,
 `escalations_order_idx` and `orders_arrived_packed_idx` through individual
 concurrent builds for filtered Operations queues and packed-arrival counts.
+Migration `1794157000000_order_removal_history_indexes` adds
+`credit_ledger_order_refs_idx`, `voucher_reservations_order_refs_idx`,
+`voucher_redemptions_order_refs_idx` and `voucher_ledger_order_refs_idx` with the
+same concurrent procedure. These GIN `jsonb_path_ops` indexes support batched
+order-reference containment on Super Admin detail/list reads without scanning
+unrelated financial history; no retained snapshot is rewritten.
 Apply `npm run migrate` (node-pg-migrate up) to the dev database after merge and before running this API release.
 `pgm.noTransaction()` makes node-pg-migrate leave its default single transaction
 for these migrations only. Earlier migrations and completed index builds can
 therefore remain committed if a later build fails. HTTP mutation transactions,
 advisory locks, audit and notification commits are unchanged.
 The existing unique partial `voucher_one_reservation` index already supports
-the reserved-voucher query; this migration adds no duplicate reservation index.
+reserved-voucher queries; the order-reference GIN indexes serve a separate lookup.
 
 A cancelled concurrent build can leave an invalid index. `IF NOT EXISTS` only
 checks its name and does not repair it. Before retrying an interrupted run,
@@ -497,7 +503,9 @@ WHERE n.nspname = 'public' AND c.relname IN (
   'promotion_invites_client_idx', 'notifications_order_type_idx',
   'file_references_reference_id_idx', 'files_saved_library_idx', 'files_saved_quota_idx',
   'claims_status_idx', 'issues_status_idx', 'issues_client_idx',
-  'escalations_order_idx', 'orders_arrived_packed_idx'
+  'escalations_order_idx', 'orders_arrived_packed_idx',
+  'credit_ledger_order_refs_idx', 'voucher_reservations_order_refs_idx',
+  'voucher_redemptions_order_refs_idx', 'voucher_ledger_order_refs_idx'
 ) ORDER BY c.relname;
 
 SELECT format('REINDEX INDEX CONCURRENTLY %I.%I;', n.nspname, c.relname)
@@ -510,7 +518,9 @@ WHERE n.nspname = 'public' AND NOT i.indisvalid AND c.relname IN (
   'promotion_invites_client_idx', 'notifications_order_type_idx',
   'file_references_reference_id_idx', 'files_saved_library_idx', 'files_saved_quota_idx',
   'claims_status_idx', 'issues_status_idx', 'issues_client_idx',
-  'escalations_order_idx', 'orders_arrived_packed_idx'
+  'escalations_order_idx', 'orders_arrived_packed_idx',
+  'credit_ledger_order_refs_idx', 'voucher_reservations_order_refs_idx',
+  'voucher_redemptions_order_refs_idx', 'voucher_ledger_order_refs_idx'
 )
 \gexec
 SQL
