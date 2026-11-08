@@ -30,6 +30,7 @@ unenrolled account, or:
   "checkedInToday": true,
   "runComplete": false,
   "stopped": false,
+  "productionApproved": false,
   "manilaDate": "2026-11-07",
   "nudge": {"trigger": "streak_3"}
 }
@@ -57,8 +58,11 @@ today. A gap resets `streak` to 0 and the next `day` to 1. A successful fourteen
 consecutive check-in permanently completes that enrollment: `runComplete=true`,
 `streak=day=14`, `stopped=true`. Later opens do not add check-ins. Production
 approval also sets `stopped=true` and stops new check-ins, without claiming the
-run completed. Apps cancel local reminders on `stopped` or unenrollment. Daily
-7PM and next-morning local reminders belong to the apps; no server push is sent.
+run completed. `productionApproved` is true only when production approval is set
+for the requested app, independently of `runComplete`. Apps must hide every
+feedback ask when it is true, including a day-14 feedback card already held
+locally after reporting `shown`. Apps cancel local reminders on `stopped` or
+unenrollment. Daily 7PM and next-morning local reminders belong to the apps; no server push is sent.
 
 `POST /me/tester-program/feedback` accepts:
 
@@ -180,5 +184,6 @@ opt-in clock, and must not label red days as resets of Google's clock.
 The shared spec's route and projection shapes are preserved. Clarifications for
 companion consumers: trigger strings above; successful staff/feedback writes use
 `200 {"ok":true}`; cooldown is rolling 72 hours; the 14 boxes freeze on completion;
-test Operations follows its existing default deny. No new client-visible fields
-or Google integration were added.
+test Operations follows its existing default deny. The additive
+`productionApproved` field distinguishes approval from run completion; no Google
+integration was added.
