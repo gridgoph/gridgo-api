@@ -1,4 +1,5 @@
 import { isReviewData } from './review-data.js';
+import { activeOrderSql } from './order-removal.js';
 /**
  * Super Admin pricing figures from GRIDGO's own rows.
  * Funnel events are only the ones the client posted. Nothing here rebuilds
@@ -216,7 +217,7 @@ export function funnelScopeMatches(event, scope) {
 
 function funnelScopeSql(scope, params) {
   const add = (value) => { params.push(value); return `$${params.length}`; };
-  const where = [];
+  const where = [activeOrderSql('e.order_id')];
   let join = "";
   if (scope.excludeReviewData) where.push(`NOT e.review_data AND NOT EXISTS (SELECT 1 FROM orders ro WHERE ro.id = e.order_id AND ro.review_data)`);
   if (scope.accountType) {

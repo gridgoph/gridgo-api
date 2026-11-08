@@ -1752,6 +1752,10 @@ export function publicOrderFor(order, user, store = null) {
   // The orders queue names the client. Only Operations and Super Admin receive
   // it. A shop, a rider, and the client keep the projection they already had.
   if (ops) publicRecord.clientName = clientNameFor(store, order.clientId);
+  // Typed removal confirmation is a Super Admin capability. Never trust an
+  // arbitrary historical orders.data contact field for this projection.
+  delete publicRecord.clientEmail;
+  if (user?.role === 'super_admin') publicRecord.clientEmail = store?.users?.find(row => row.id === order.clientId)?.email ?? null;
   return publicRecord;
 }
 

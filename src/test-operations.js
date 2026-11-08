@@ -159,7 +159,7 @@ export function testOperationsView(store, viewer) {
     else if (REFERENCE.has(key)) view[key] = value;
     else filter(key);
   }
-  for (const key of ['listOwnCatalogItems']) if (store[key]) Object.defineProperty(view, key, { value: store[key], enumerable: false });
+  for (const key of ['listOwnCatalogItems', 'removedBasketMemberships']) if (store[key]) Object.defineProperty(view, key, { value: store[key], enumerable: false });
   views.set(view, { store, originals, scalars: Object.fromEntries(Object.entries(view).filter(([key]) => !originals.has(key))) });
   return view;
 }
@@ -195,6 +195,10 @@ export function reviewSubject(store, { orderId, approvalCaseId, id, resource } =
   if (orderId) return order(orderId);
   if (approvalCaseId) return user((store.approvalCases || []).find(row => row.id === approvalCaseId)?.userId);
   if (!id) return ['notifications', 'identity'].includes(resource);
+  // Silent removal invalidates must refresh an already-open review queue even
+  // though the order itself is no longer readable. Never revive inbox rows.
+  if (['orders', 'jobs', 'dispatch', 'availability', 'claims', 'escalations', 'payouts'].includes(resource)
+    && store.removedReviewOrderIds?.has(id)) return true;
   if (order(id) || user(id)) return true;
   for (const key of ['orderJobs', 'claims', 'issues', 'escalations', 'refundRequests']) {
     const row = (store[key] || []).find(candidate => candidate.id === id);
