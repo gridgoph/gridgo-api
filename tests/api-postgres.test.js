@@ -92,9 +92,10 @@ async function startApi(extraEnv = {}) {
   throw new Error(`API did not become healthy:\n${output}`);
 }
 
-async function request(api, pathname, { method = "GET", subject, claims, body, headers = {} } = {}) {
+async function request(api, pathname, { method = "GET", subject, claims, body, headers = {}, signal } = {}) {
   const response = await fetch(`${api}${pathname}`, {
     method,
+    signal,
     headers: {
       ...(subject ? { Authorization: `Bearer ${token(subject, claims)}` } : {}),
       ...(body == null ? {} : { "Content-Type": "application/json" }),
@@ -625,7 +626,11 @@ test("legacy verification decisions keep approval cases and fixed projections co
     // The original CI failure acknowledged this decision before COMMIT, so the
     // next projection sometimes still read "approved". Hold COMMIT itself to
     // exercise that ordering deterministically, rather than relying on timing.
-    const commitGate = new pg.Client({ connectionString: DATABASE_URL });
+    const gateDatabaseOptions = {
+      connectionString: DATABASE_URL, connectionTimeoutMillis: 5_000,
+      statement_timeout: 5_000, query_timeout: 6_000,
+    };
+    const commitGate = new pg.Client(gateDatabaseOptions);
     let suspension;
     let suspended;
     try {
@@ -634,14 +639,14 @@ test("legacy verification decisions keep approval cases and fixed projections co
         SELECT pg_backend_pid() AS pid,
           pg_advisory_lock(hashtext('gridgo-test-verification-commit'))
       `);
-      await database.query(`
+      await commitGate.query(`
         CREATE FUNCTION gridgo_test_hold_verification_commit() RETURNS trigger
         LANGUAGE plpgsql AS $$ BEGIN
           PERFORM pg_advisory_xact_lock(hashtext('gridgo-test-verification-commit'));
           RETURN NEW;
         END $$
       `);
-      await database.query(`
+      await commitGate.query(`
         CREATE CONSTRAINT TRIGGER gridgo_test_hold_verification_commit
         AFTER UPDATE ON approval_cases DEFERRABLE INITIALLY DEFERRED
         FOR EACH ROW WHEN (NEW.id = 'case_supplier' AND NEW.status = 'suspended')
@@ -649,13 +654,14 @@ test("legacy verification decisions keep approval cases and fixed projections co
       `);
       suspension = request(instance.api, "/users/user_supplier/verification", {
         method: "POST", subject: "clerk_super", body: { status: "suspended", reason: "Quality hold" },
+        signal: AbortSignal.timeout(10_000),
       }).then((response) => { suspended = response; });
       // Observe the database lock, not a guessed delay. Attach a rejection
       // handler immediately; the original promise is awaited during cleanup.
       void suspension.catch(() => {});
       let commitBlocked = false;
       for (let attempt = 0; attempt < 200; attempt += 1) {
-        const { rows } = await database.query(`
+        const { rows } = await commitGate.query(`
           SELECT 1 FROM pg_stat_activity
           WHERE datname = current_database() AND query = 'COMMIT'
             AND $1::integer = ANY(pg_blocking_pids(pid))
@@ -664,17 +670,27 @@ test("legacy verification decisions keep approval cases and fixed projections co
         await new Promise((resolve) => setTimeout(resolve, 25));
       }
       assert.equal(commitBlocked, true, "suspension must reach the deferred commit gate");
-      const duringCommit = await request(instance.api, "/auth/me/supplier", { subject: "clerk_supplier" });
+      const duringCommit = await request(instance.api, "/auth/me/supplier", {
+        subject: "clerk_supplier", signal: AbortSignal.timeout(10_000),
+      });
       assert.equal(duringCommit.status, 200, JSON.stringify(duringCommit.body));
       assert.equal(duringCommit.body.approvalCase.status, "approved");
       assert.equal(suspended, undefined, "verification response must wait for COMMIT");
     } finally {
-      await commitGate.end(); // Releases the gate even if an assertion fails.
+      await commitGate.end(); // Release before awaiting even a timed-out POST.
       try {
         await suspension;
       } finally {
-        await database.query("DROP TRIGGER IF EXISTS gridgo_test_hold_verification_commit ON approval_cases");
-        await database.query("DROP FUNCTION IF EXISTS gridgo_test_hold_verification_commit()");
+        // Use a separate bounded connection: a stalled mutation must not leave
+        // DDL cleanup waiting indefinitely on its table or domain lock.
+        const cleanup = new pg.Client(gateDatabaseOptions);
+        try {
+          await cleanup.connect();
+          await cleanup.query("DROP TRIGGER IF EXISTS gridgo_test_hold_verification_commit ON approval_cases");
+          await cleanup.query("DROP FUNCTION IF EXISTS gridgo_test_hold_verification_commit()");
+        } finally {
+          await cleanup.end();
+        }
       }
     }
     assert.equal(suspended.status, 200, JSON.stringify(suspended.body));
