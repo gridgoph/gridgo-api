@@ -159,7 +159,7 @@ export function testOperationsView(store, viewer) {
     else if (REFERENCE.has(key)) view[key] = value;
     else filter(key);
   }
-  for (const key of ['listOwnCatalogItems']) if (store[key]) Object.defineProperty(view, key, { value: store[key], enumerable: false });
+  for (const key of ['listOwnCatalogItems', 'removedBasketMemberships']) if (store[key]) Object.defineProperty(view, key, { value: store[key], enumerable: false });
   views.set(view, { store, originals, scalars: Object.fromEntries(Object.entries(view).filter(([key]) => !originals.has(key))) });
   return view;
 }

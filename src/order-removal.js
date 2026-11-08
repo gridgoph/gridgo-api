@@ -2,6 +2,11 @@ import { identityHasMembership } from './authorization-context.js';
 
 export const ORDER_REMOVAL_ROUTE = /^\/ops\/orders\/([^/]+)\/remove$/;
 export const activeOrderSql = (expression) => `NOT EXISTS (SELECT 1 FROM order_removals removed WHERE removed.order_id = ${expression})`;
+const activeBasketSql = (expression) => `NOT EXISTS (SELECT 1 FROM order_basket_groups members
+  JOIN order_removals removed ON removed.order_id = members.order_id WHERE members.basket_id = ${expression})`;
+const activeOrderBasketSql = (expression) => `NOT EXISTS (SELECT 1 FROM order_basket_groups membership
+  WHERE membership.order_id = ${expression} AND NOT (${activeBasketSql('membership.basket_id')}))`;
+const activeOrderAndBasketSql = (expression) => `${activeOrderSql(expression)} AND ${activeOrderBasketSql(expression)}`;
 
 /** Every compatibility graph (including writers and sweeps) reads the same active
  * domain. Hidden rows are absent from both its baseline and current rows, so an
@@ -9,14 +14,16 @@ export const activeOrderSql = (expression) => `NOT EXISTS (SELECT 1 FROM order_r
 export function orderReadQuery({ name, columns }, where = '') {
   let predicate;
   if (name === 'orders') predicate = activeOrderSql('orders.id');
+  else if (name === 'order_invoices') predicate = activeOrderAndBasketSql('order_invoices.order_id');
   else if (name !== 'audit_log' && columns.includes('order_id')) predicate = activeOrderSql(`${name}.order_id`);
   else if (name === 'order_line_item_options') predicate = `NOT EXISTS (SELECT 1 FROM order_line_items parent
     JOIN order_removals removed ON removed.order_id = parent.order_id WHERE parent.id = order_line_item_options.order_line_item_id)`;
   else if (['refund_attempts', 'refund_payments', 'refund_events'].includes(name)) predicate = `NOT EXISTS (SELECT 1 FROM refund_requests parent
     JOIN order_removals removed ON removed.order_id = parent.order_id WHERE parent.id = ${name}.request_id)`;
-  else if (name === 'client_carts') predicate = activeOrderSql('client_carts.checked_out_order_id');
+  else if (name === 'client_carts') predicate = activeOrderAndBasketSql('client_carts.checked_out_order_id');
   else if (['client_cart_lines', 'checkout_visits', 'checkout_exit_prompts'].includes(name)) predicate = `NOT EXISTS (
-    SELECT 1 FROM client_carts parent JOIN order_removals removed ON removed.order_id = parent.checked_out_order_id WHERE parent.id = ${name}.cart_id)`;
+    SELECT 1 FROM client_carts parent WHERE parent.id = ${name}.cart_id
+      AND NOT (${activeOrderAndBasketSql('parent.checked_out_order_id')}))`;
   else if (name === 'sample_batch_drafts') predicate = `${activeOrderSql('sample_batch_drafts.sample_order_id')} AND ${activeOrderSql('sample_batch_drafts.batch_order_id')}`;
   else if (name === 'quote_requests') predicate = activeOrderSql("quote_requests.data->>'orderId'");
   else if (name === 'quote_replies') predicate = `NOT EXISTS (SELECT 1 FROM quote_requests parent
@@ -24,8 +31,7 @@ export function orderReadQuery({ name, columns }, where = '') {
   else if (name === 'refund_commands') predicate = activeOrderSql("refund_commands.response#>>'{body,refund,orderId}'");
   if (name === 'order_baskets' || name === 'order_basket_groups') {
     const basket = name === 'order_baskets' ? 'order_baskets.id' : 'order_basket_groups.basket_id';
-    predicate = `NOT EXISTS (SELECT 1 FROM order_basket_groups members JOIN order_removals removed
-      ON removed.order_id = members.order_id WHERE members.basket_id = ${basket})`;
+    predicate = activeBasketSql(basket);
   }
   // Nonrecursive same-name CTEs bind the active table for the entire scoped
   // query (including nested references); PostgreSQL inlines these predicates.
@@ -46,9 +52,16 @@ export async function attachOrderRemovalContext(database, store, { subjectId = n
   const { rows } = await database.query(`SELECT o.id, o.review_data,
     CASE WHEN ${holds} THEN ARRAY[o.client_id,o.supplier_id,o.rider_id] ELSE ARRAY[]::text[] END AS hold_owners
     FROM order_removals removed JOIN orders o ON o.id=removed.order_id WHERE ($1::text IS NULL OR o.id=$1)`, [subjectId]);
+  // Public basket rows stay hidden, but their immutable membership must still
+  // govern an active sibling's payment routes. No money or removed order graph
+  // is loaded into this private lookup.
+  const memberships = retention && rows.length ? (await database.query(`SELECT membership.order_id, b.id, b.client_id
+    FROM order_basket_groups membership JOIN order_baskets b ON b.id=membership.basket_id
+    WHERE ${activeOrderSql('membership.order_id')} AND NOT (${activeBasketSql('b.id')})`)).rows : [];
   Object.defineProperties(store, {
     removedReviewOrderIds: { value: new Set(rows.filter(row => row.review_data).map(row => row.id)) },
     removedVerificationHoldOwnerIds: { value: new Set(rows.flatMap(row => row.hold_owners).filter(Boolean)) },
+    removedBasketMemberships: { value: new Map(memberships.map(row => [row.order_id, { id: row.id, clientId: row.client_id }])) },
   });
   return store;
 }

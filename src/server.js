@@ -3241,7 +3241,14 @@ async function handleAuditedRequest(req, res) {
       return send(res, basketResponse.status, basketResponse.body);
     }
     if (req.method === "POST" && /^\/orders\/[^/]+\/payments\//.test(pathname)) {
-      const basket = basketForOrder(store, pathname.split("/")[2]);
+      const orderId = pathname.split("/")[2];
+      const unavailableBasket = store.removedBasketMemberships?.get(orderId);
+      if (unavailableBasket) {
+        if (unavailableBasket.clientId !== user.id && !isOps(user)) return send(res, 403, { error: "forbidden" });
+        return send(res, 409, { error: "basket_payment_unavailable",
+          message: "This basket includes a removed order and can no longer accept payment. Contact Operations for help." });
+      }
+      const basket = basketForOrder(store, orderId);
       if (basket) {
         if (basket.clientId !== user.id && !isOps(user)) return send(res, 403, { error: "forbidden" });
         return send(res, 409, { error: "basket_payment_required", basketId: basket.id });

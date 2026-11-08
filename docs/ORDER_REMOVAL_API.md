@@ -59,8 +59,13 @@ shop scheduling and matching workload. Order details and order-scoped chats,
 calls, receipts and exports return 404. Checked-out carts, associated quote and
 sample records are hidden. A shared basket and its combined receipt are hidden
 when a member is removed, so their immutable receipt cannot expose the removed
-group; unrelated orders remain present. Existing app URLs and response shapes
-remain compatible.
+group, regardless of its position. Its checked-out cart is hidden too. Active
+sibling orders remain readable, but per-order payment submit/confirm/reject
+returns `409 basket_payment_unavailable` with a plain-language message. Immutable
+basket membership is retained in a non-public guard lookup; no payment or
+receipt snapshot is rewritten. Client pricing privacy also uses the invoice's
+own basket marker, independently of the public basket graph. Existing app URLs
+and other response shapes remain compatible.
 
 The marker is inserted before the active graph is reloaded and saved, so save
 maintenance cannot act on the removed order. Direct lifecycle candidate queries,

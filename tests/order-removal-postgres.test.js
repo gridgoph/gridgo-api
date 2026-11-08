@@ -165,6 +165,70 @@ test('linked carts, quotes, samples, combined baskets and SQL reporting retain r
   }
 });
 
+for (const removedId of ['review', 'review_offer']) for (const paymentStatus of ['not_submitted', 'pending_confirmation']) {
+  test(`basket removal hides combined invoice/cart and refuses sibling payment actions: ${removedId}, ${paymentStatus}`, { skip }, async t => {
+    const { db, api } = await setup(t);
+    const orderIds = ['review', 'review_offer'], siblingId = orderIds.find(id => id !== removedId);
+    await db.transaction(async () => {
+      const store = await loadStore(db);
+      for (const order of store.orders.filter(row => orderIds.includes(row.id))) {
+        order.payments.initial = { amountMinor: 12000, status: paymentStatus, method: 'qr_manual' };
+        order.basketId = 'shared_basket';
+        order.state = paymentStatus === 'not_submitted' ? 'awaiting_initial_payment' : 'initial_payment_review';
+      }
+      store.files.push({ fileId: 'basket_remove_proof', ownerId: 'review_client', purpose: 'payment_proof', state: 'ready',
+        objectKey: 'private/basket_remove_proof', originalFilename: 'proof.png', declaredContentType: 'image/png',
+        detectedContentType: 'image/png', size: 100, createdAt: AT, references: [] });
+      store.baskets.push({ id: 'shared_basket', clientId: 'review_client', receiptOrderId: 'review', orderIds,
+        totalMinor: 24000, fulfillmentMode: 'delivery', deadline: '2099-01-01T00:00:00.000Z',
+        payment: { status: paymentStatus, method: 'qr_manual' }, createdAt: AT, updatedAt: AT });
+      store.carts.push({ id: 'shared_cart', clientId: 'review_client', state: 'checked_out', version: 1, serviceLevel: 'standard',
+        fulfillmentMode: 'delivery', checkedOutOrderId: 'review', createdAt: AT, updatedAt: AT, checkedOutAt: AT });
+      const groups = orderIds.map(orderId => ({ orderId, itemSubtotalMinor: 10000, serviceFeeMinor: 1000, serviceFeeRateBps: 1000,
+        deliveryFeeMinor: 1000, totalMinor: 12000, lines: [{ itemName: `Private ${orderId} product`, quantity: 10, unitPriceMinor: 1000, amountMinor: 10000 }] }));
+      store.orderInvoices.push({ orderId: 'review', invoiceNumber: 'BASKET-REMOVAL', issuedAt: AT,
+        snapshot: { basketId: 'shared_basket', itemSubtotalMinor: 20000, serviceFeeMinor: 2000, serviceFeeRateBps: 1000,
+          deliveryFeeMinor: 2000, totalMinor: 24000, groups } });
+      await saveStore(db, store);
+    });
+    const before = await api('review_client', 'GET', `/orders/${siblingId}/invoice`);
+    assert.equal(before.status, 200, JSON.stringify(before.body));
+    assert.equal(before.body.invoice.groups.length, 2);
+    assert.equal(before.body.invoice.itemSubtotalMinor, undefined, 'legacy combined invoice keeps client pricing privacy');
+    const retained = async () => Object.fromEntries(await Promise.all([
+      ['order_payments', "WHERE order_id IN ('review','review_offer') ORDER BY order_id,code"],
+      ['order_baskets', "WHERE id='shared_basket'"], ['order_basket_groups', "WHERE basket_id='shared_basket' ORDER BY position"],
+      ['order_invoices', "WHERE order_id='review'"], ['client_carts', "WHERE id='shared_cart'"],
+    ].map(async ([table, where]) => [table, (await db.query(`SELECT * FROM ${table} ${where}`)).rows])));
+    const rows = await retained();
+    assert.equal((await api('admin', 'POST', `/ops/orders/${removedId}/remove`, body)).status, 200);
+    for (const who of ['review_client', 'admin', 'ops', 'test_ops']) {
+      assert.equal((await api(who, 'GET', `/orders/${siblingId}/invoice`)).status, 404, `${who} combined invoice`);
+      assert.equal((await api(who, 'GET', '/baskets/shared_basket')).status, 404, `${who} basket`);
+      for (const action of ['submit', 'confirm', 'reject']) {
+        const response = await api(who, 'POST', `/orders/${siblingId}/payments/initial/${action}`,
+          { method: 'qr_manual', reference: 'BASKET-REMOVAL', proofFileId: 'basket_remove_proof', reason: 'Review rejected' });
+        if (who === 'test_ops' && action === 'submit') {
+          assert.equal(response.status, 403);
+          assert.equal(response.body.error, 'test_operations_forbidden', 'the existing test-Operations allowlist stays authoritative');
+          continue;
+        }
+        assert.equal(response.status, 409, `${who} ${action}: ${JSON.stringify(response.body)}`);
+        assert.equal(response.body.error, 'basket_payment_unavailable', `${who} ${action}`);
+        assert.ok(response.body.message);
+      }
+    }
+    assert.equal((await api('review_client', 'GET', '/me/carts/shared_cart')).status, 404, 'checked-out cart follows every basket group');
+    assert.equal((await api('review_client', 'GET', `/orders/${siblingId}`)).status, 200, 'active sibling remains readable');
+    assert.equal((await api('review_client', 'GET', `/orders/${removedId}`)).status, 404);
+    assert.equal((await api('review_supplier', 'POST', `/orders/${siblingId}/payments/initial/confirm`, {})).status, 403);
+    const active = await loadStore(db);
+    assert.ok(!JSON.stringify(active).includes('removedBasketMemberships'), 'payment guard facts stay non-public');
+    await db.transaction(async () => { const s = await loadStore(db); s.settings.promiseAllowanceMinutes++; await saveStore(db, s); });
+    assert.deepEqual(await retained(), rows, 'removal, refusals and unrelated saves retain immutable basket money and receipt snapshots');
+  });
+}
+
 test('removal emits orders invalidation, preserves history and suppresses pending order work without party notices', { skip }, async t => {
   const { db, api } = await setup(t);
   await db.transaction(async () => {
