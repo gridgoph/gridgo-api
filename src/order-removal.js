@@ -70,20 +70,29 @@ const related = (row, order) => row.orderId === order.id || row.data?.orderId ==
   || (row.orderIds || row.data?.orderIds || []).includes(order.id);
 const paidOrSubmitted = payment => payment && ['confirmed', 'pending_confirmation', 'submitted'].includes(payment.status);
 
+const ORDER_REMOVAL_MESSAGES = {
+  payout_released: 'This order has a released payout and must stay in the financial records.',
+  refund_activity: 'This order has a refund in progress or a completed refund and must stay in the financial records.',
+  payment_submitted: 'This order has a submitted or confirmed payment. Keep it for payment review and financial records.',
+  financial_activity: 'This order has financial activity and must stay in the financial records.',
+  shop_assigned: 'This order already has an assigned shop. Use the existing order recovery or cancellation process.',
+};
+
+// Stable reason codes shared by the Super Admin projection and mutation guard.
 export function orderRemovalBlock(store, order) {
   if ((order.payoutMilestones || []).some(row => row.status === 'released') || order.state === 'payout_released'
       || (store.refundSupplierPayouts || []).some(row => related(row, order) && row.status === 'released')) {
-    return 'This order has a released payout and must stay in the financial records.';
+    return 'payout_released';
   }
   if ((store.refundRequests || []).some(row => related(row, order) && !['rejected', 'withdrawn'].includes(row.status))) {
-    return 'This order has a refund in progress or a completed refund and must stay in the financial records.';
+    return 'refund_activity';
   }
   // Review marks alone never erase real money. Simulation is server-generated.
   const client = store.users.find(row => row.id === order.clientId);
   const simulated = order.reviewData === true && client?.reviewData === true;
   const payments = [...Object.values(order.payments || {}), ...(store.baskets || []).filter(row => related(row, order)).map(row => row.payment)];
   if (payments.some(payment => paidOrSubmitted(payment) && !(simulated && payment.simulated === true))) {
-    return 'This order has a submitted or confirmed payment. Keep it for payment review and financial records.';
+    return 'payment_submitted';
   }
   const finance = ['orderChangePayments', 'orderChangePayouts', 'deliveryPinPayments', 'refundSettlements',
     'refundSupplierPayouts', 'voucherReservations', 'voucherRedemptions', 'voucherLedger'];
@@ -92,10 +101,10 @@ export function orderRemovalBlock(store, order) {
       || (order.revenueAdjustments || []).length || order.voucherRedemptionId || order.voucherDiscountMinor > 0 || order.voucher?.amountMinor > 0
       || (store.orderChanges || []).some(row => related(row, order) && row.status === 'pending_confirmation')
       || order.deliveryPin?.change?.status === 'pending_confirmation') {
-    return 'This order has financial activity and must stay in the financial records.';
+    return 'financial_activity';
   }
   if (!simulated && (order.supplierId || (store.orderJobs || []).some(row => related(row, order) && row.supplierId))) {
-    return 'This order already has an assigned shop. Use the existing order recovery or cancellation process.';
+    return 'shop_assigned';
   }
   return null;
 }
@@ -114,7 +123,7 @@ export async function removeOrder({ database, store, user, orderId, body, at, au
     return { status: 400, body: { error: 'confirm_email_mismatch' } };
   }
   const blocked = orderRemovalBlock(store, order);
-  if (blocked) return { status: 409, body: { error: 'order_removal_blocked', message: blocked } };
+  if (blocked) return { status: 409, body: { error: 'order_removal_blocked', message: ORDER_REMOVAL_MESSAGES[blocked] } };
   // Reload AFTER the marker in the same locked transaction. Maintenance at the
   // save boundary must never process the removed order, and the fresh baseline
   // keeps its retained children out of diff-based deletes on every later save.

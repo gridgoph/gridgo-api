@@ -1,3 +1,5 @@
+import { orderRemovalBlock } from './order-removal.js';
+import { identityHasMembership } from './authorization-context.js';
 import { collectedVoucherFundingMinor } from './voucher-funding.js';
 import { DEFAULT_SAVED_FILES_LIMIT_BYTES } from './file-retention-policy.js';
 import { deliveryPackagePhotoId } from './delivery-package-photos.js';
@@ -1756,6 +1758,11 @@ export function publicOrderFor(order, user, store = null) {
   // arbitrary historical orders.data contact field for this projection.
   delete publicRecord.clientEmail;
   if (user?.role === 'super_admin') publicRecord.clientEmail = store?.users?.find(row => row.id === order.clientId)?.email ?? null;
+  delete publicRecord.removal;
+  if (store?.users && user?.role === 'super_admin' && identityHasMembership(user, 'super_admin')) {
+    const blockedReason = orderRemovalBlock(store, order);
+    publicRecord.removal = { allowed: blockedReason === null, blockedReason };
+  }
   return publicRecord;
 }
 

@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createDatabase } from '../src/database.js';
-import { loadStore, loadDeliveryStore, loadProductionSweepStore, saveStore } from '../src/postgres-store.js';
+import { loadStore, loadDeliveryStore, loadProductionSweepStore, loadHotReadStore, saveStore } from '../src/postgres-store.js';
 import { setupOperationsReads } from './fixtures/operations-reads.js';
 import { apiForTest } from './fixtures/reschedule-http.js';
 import { orderRemovalBlock } from '../src/order-removal.js';
+import { publicOrderFor } from '../src/operational-model.js';
 import { reconcileCalls, purgeClosedCalls } from '../src/order-calls.js';
 import { purgeClosedPickupChats } from '../src/pickup-chat.js';
 import { purgeClosedDeliveryChats } from '../src/delivery-chat.js';
@@ -297,4 +298,115 @@ test('real unpaid unassigned orders can be removed; submitted/confirmed money, s
   check({}, { voucherReservations: [{ data: { orderIds: ['review'] } }] });
   check({}, { orderChanges: [{ orderId: 'review', status: 'pending_confirmation' }] });
   check({ deliveryPin: { change: { status: 'pending_confirmation' } } });
+});
+
+test('Super Admin eligibility agrees with POST for persisted money, assignment and eligible fixture states', { skip }, async t => {
+  const { db, api, store } = await setup(t);
+  const base = store.orders.find(row => row.id === 'unpaid');
+  const cases = [
+    ['released', { state: 'payout_released' }, 'payout_released'],
+    ['refund', {}, 'refund_activity'],
+    ['paid', { payments: { ...base.payments, initial: { ...base.payments.initial, status: 'confirmed' } } }, 'payment_submitted'],
+    ['submitted', { payments: { ...base.payments, initial: { ...base.payments.initial, status: 'pending_confirmation' } } }, 'payment_submitted'],
+    ['basket', { payments: { ...base.payments,
+      initial: { ...base.payments.initial, status: 'pending_confirmation' } } }, 'payment_submitted'],
+    ['credit', {}, 'financial_activity'],
+    ['reservation', {}, 'financial_activity'],
+    ['redemption', {}, 'financial_activity'],
+    ['ledger', {}, 'financial_activity'],
+    ['shop', { supplierId: 'supplier' }, 'shop_assigned'],
+    ['job', {}, 'shop_assigned'],
+    ['eligible', {}, null],
+    ['simulated', { reviewData: true, clientId: 'review_client', supplierId: 'review_supplier', payments: {
+      ...base.payments, initial: { ...base.payments.initial, status: 'confirmed', simulated: true } } }, null],
+  ];
+  for (const [name, patch] of cases) store.orders.push({ ...structuredClone(base), ...patch, id: `eligibility_${name}` });
+  store.refundRequests.push({ ...structuredClone(store.refundRequests[0]), id: 'eligibility_refund', orderId: 'eligibility_refund' });
+  store.orderJobs.push({ ...structuredClone(store.orderJobs[0]), id: 'eligibility_job', orderId: 'eligibility_job' });
+  const basketOrder = store.orders.find(row => row.id === 'eligibility_basket');
+  store.orders.push({ ...structuredClone(basketOrder), id: 'eligibility_basket_sibling' });
+  store.baskets.push({ id: 'eligibility_basket', clientId: 'client', receiptOrderId: 'eligibility_basket',
+    orderIds: ['eligibility_basket', 'eligibility_basket_sibling'], totalMinor: 24000, fulfillmentMode: 'delivery', payment: { status: 'pending_confirmation', method: 'qr_manual' }, createdAt: AT, updatedAt: AT });
+  store.credits.client = { balanceMinor: 100, ledger: [{ id: 'eligibility_credit', orderId: 'eligibility_credit',
+    amountMinor: 100, balanceAfterMinor: 100, type: 'grant', at: AT, actorId: 'admin' }] };
+  store.carts.push({ id: 'eligibility_cart', clientId: 'client', state: 'draft', version: 1, serviceLevel: 'standard',
+    fulfillmentMode: 'delivery', createdAt: AT, updatedAt: AT });
+  const voucher = store.vouchers[0];
+  store.voucherReservations.push({ id: 'eligibility_reservation', voucherId: voucher.id, clientId: 'client', cartId: 'eligibility_cart',
+    status: 'consumed', expiresAt: '2099-01-01T00:00:00.000Z', createdAt: AT, data: { orderIds: ['eligibility_reservation'] } });
+  store.voucherRedemptions.push({ id: 'eligibility_redemption', voucherId: voucher.id, reservationId: 'eligibility_reservation', clientId: 'client',
+    amountMinor: 100, status: 'restored', createdAt: AT, data: { orderIds: ['eligibility_redemption'] } });
+  store.voucherLedger.push({ id: 'eligibility_ledger', voucherId: voucher.id, campaignId: voucher.campaignId, clientId: 'client',
+    kind: 'restored', amountMinor: 100, at: AT, data: { orderIds: ['eligibility_ledger'] } });
+  await db.transaction(() => saveStore(db, store));
+  const list = await api('admin', 'GET', '/orders?includeReviewData=1');
+  assert.equal(list.status, 200);
+  for (const who of ['admin', 'ops', 'client']) {
+    const basket = await api(who, 'GET', '/baskets/eligibility_basket');
+    assert.equal(basket.status, 200, who);
+    for (const group of basket.body.basket.groups) {
+      if (who === 'admin') assert.deepEqual(group.order.removal, { allowed: false, blockedReason: 'payment_submitted' });
+      else assert.equal(Object.hasOwn(group.order, 'removal'), false, who);
+    }
+  }
+  const messages = {
+    payout_released: 'This order has a released payout and must stay in the financial records.',
+    refund_activity: 'This order has a refund in progress or a completed refund and must stay in the financial records.',
+    payment_submitted: 'This order has a submitted or confirmed payment. Keep it for payment review and financial records.',
+    financial_activity: 'This order has financial activity and must stay in the financial records.',
+    shop_assigned: 'This order already has an assigned shop. Use the existing order recovery or cancellation process.',
+  };
+  for (const [name, patch, blockedReason] of cases) {
+    const orderId = `eligibility_${name}`;
+    const expected = { allowed: blockedReason === null, blockedReason };
+    const detail = await api('admin', 'GET', `/orders/${orderId}`);
+    assert.equal(detail.status, 200, name);
+    assert.deepEqual(detail.body.order.removal, expected, `${name} detail`);
+    assert.deepEqual(list.body.orders.find(row => row.id === orderId).removal, expected, `${name} list`);
+    const removed = await api('admin', 'POST', `/ops/orders/${orderId}/remove`, { reason: 'Eligibility regression',
+      confirmEmail: patch.clientId === 'review_client' ? 'review_client@example.invalid' : 'client@example.invalid' });
+    assert.equal(removed.status, expected.allowed ? 200 : 409, `${name}: ${JSON.stringify(removed.body)}`);
+    if (!expected.allowed) {
+      assert.equal(removed.body.error, 'order_removal_blocked', name);
+      assert.equal(removed.body.message, messages[blockedReason], name);
+    }
+  }
+});
+test('HTTP removal eligibility is absent for every non-Super Admin role', { skip }, async t => {
+  const { api } = await setup(t);
+  for (const [who, orderId] of [['ops', 'a_active'], ['test_ops', 'review'], ['client', 'a_active'],
+    ['supplier', 'a_active'], ['rider', 'a_active']]) {
+    const detail = await api(who, 'GET', `/orders/${orderId}`);
+    assert.equal(detail.status, 200, who);
+    assert.equal(Object.hasOwn(detail.body.order, 'removal'), false, who);
+    const list = await api(who, 'GET', '/orders?includeReviewData=1');
+    assert.equal(list.status, 200, who);
+    assert.ok(list.body.orders.every(order => !Object.hasOwn(order, 'removal')), who);
+  }
+  assert.equal((await api('staff', 'GET', '/orders/a_active')).status, 403);
+});
+
+test('scoped and full Super Admin reads agree on a retained basket transfer without a simulation marker', { skip }, async t => {
+  const db = createDatabase(process.env); t.after(() => db.close());
+  const store = await setupOperationsReads(db);
+  for (const order of store.orders.filter(row => ['review', 'review_offer'].includes(row.id))) {
+    order.payments.initial = { amountMinor: 12000, status: 'pending_confirmation', method: 'qr_manual', simulated: true };
+  }
+  store.baskets.push({ id: 'parity_basket', clientId: 'review_client', receiptOrderId: 'review', orderIds: ['review', 'review_offer'],
+    totalMinor: 24000, fulfillmentMode: 'delivery', payment: { status: 'pending_confirmation', method: 'qr_manual' }, createdAt: AT, updatedAt: AT });
+  await db.transaction(() => saveStore(db, store));
+  // Historical rows can lack the server marker even though new fixture saves
+  // always normalize it. No HTTP request/save runs between this edit and reads.
+  await db.query("UPDATE order_baskets SET payment = payment - 'simulated' WHERE id = 'parity_basket'");
+  for (const simulated of [false, true]) {
+    if (simulated) await db.query("UPDATE order_baskets SET payment = payment || '{\"simulated\":true}' WHERE id = 'parity_basket'");
+    const full = await loadStore(db);
+    const scoped = await loadHotReadStore(db, 'clerk_admin', '/orders/review');
+    const expected = simulated ? { allowed: true, blockedReason: null } : { allowed: false, blockedReason: 'payment_submitted' };
+    for (const graph of [full, scoped]) {
+      const order = graph.orders.find(row => row.id === 'review');
+      assert.deepEqual(publicOrderFor(order, { role: 'super_admin' }, graph).removal, expected);
+      assert.equal(orderRemovalBlock(graph, order), expected.blockedReason);
+    }
+  }
 });
