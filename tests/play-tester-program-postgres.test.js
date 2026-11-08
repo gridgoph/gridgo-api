@@ -69,7 +69,9 @@ test('a gap resets Day N, 14 straight days permanently complete a run, and Ops r
     s = checked(await checkin(call, `${shiftDate('2026-10-03', n)}T00:00:00Z`));
     assert.equal(s.streak, n + 1); assert.equal(s.day, n + 1); assert.equal(s.runComplete, n === 13);
   }
-  assert.equal(s.stopped, true); assert.equal(s.nudge.trigger, 'streak_14');
+  assert.equal(s.stopped, true); assert.equal(s.productionApproved, false); assert.equal(s.nudge.trigger, 'streak_14');
+  checked(await feedback(call, '2026-10-16T00:00:00Z', 'shown', 'streak_14'));
+  assert.equal(checked(await state(call, '2026-10-16T00:00:00Z')).productionApproved, false);
   const count = (await db.query('SELECT count(*) FROM tester_program_checkins')).rows[0].count;
   s = checked(await checkin(call, '2026-11-06T00:00:00Z'));
   assert.equal(s.streak, 14); assert.equal(s.stopped, true); assert.equal(s.checkedInToday, false);
@@ -81,16 +83,26 @@ test('a gap resets Day N, 14 straight days permanently complete a run, and Ops r
   assert.equal(dashboard.testers[0].days[0].date, '2026-10-03');
   assert.equal(dashboard.testers[0].days.at(-1).date, '2026-10-16');
   assert.equal(dashboard.testers[0].stoppedCheckingIn, false);
+  checked(await api('admin', 'PATCH', '/ops/testers/settings', { app: 'client', productionApprovedAt: '2026-10-16T00:00:00Z' }));
+  const approved = checked(await api('client', 'GET', '/me/tester-program?app=client'));
+  assert.equal(approved.runComplete, true); assert.equal(approved.productionApproved, true);
+  assert.equal(approved.nudge, null);
 });
 
 test('production approval stops check-ins and nudges only for its app; settings are validated and audited', { skip: !DB }, async t => {
-  const { db, api, call, enroll } = await setup(t); await enroll(); await enroll('supplier');
+  const { db, api, call, enroll } = await setup(t); await enroll(); await enroll('supplier'); await enroll('rider');
+  for (const app of ['client', 'supplier', 'rider']) {
+    assert.equal(checked(await api(app, 'GET', `/me/tester-program?app=${app}`)).productionApproved, false);
+  }
   const approved = '2026-10-01T00:00:00Z';
-  checked(await api('ops', 'PATCH', '/ops/testers/settings', { app: 'client', playClockStartDate: '2026-10-01', optedInCount: 13, productionApprovedAt: approved }));
+  checked(await api('admin', 'PATCH', '/ops/testers/settings', { app: 'client', playClockStartDate: '2026-10-01', optedInCount: 13, productionApprovedAt: approved }));
   const s = checked(await api('client', 'POST', '/me/tester-program/check-in', { app: 'client', version: '1', source: 'open' }));
-  assert.equal(s.stopped, true); assert.equal(s.runComplete, false); assert.equal(s.nudge, null);
+  assert.equal(s.stopped, true); assert.equal(s.productionApproved, true); assert.equal(s.runComplete, false); assert.equal(s.nudge, null);
   assert.equal((await db.query('SELECT count(*) FROM tester_program_checkins')).rows[0].count, 0);
   assert.equal(checked(await api('supplier', 'POST', '/me/tester-program/check-in', { app: 'supplier', version: '1', source: 'button' })).stopped, false);
+  for (const app of ['supplier', 'rider']) {
+    assert.equal(checked(await api(app, 'GET', `/me/tester-program?app=${app}`)).productionApproved, false);
+  }
   const dashboard = checked(await api('admin', 'GET', '/ops/testers?app=client'));
   assert.deepEqual(dashboard.stats, { activeToday: 0, fullStreak: 0, needed: 12, playClockStartDate: '2026-10-01', optedInCount: 13, productionApprovedAt: new Date(approved).toISOString() });
   for (const [values, error] of [[{ optedInCount: -1 }, 'invalid_opted_in_count'], [{ optedInCount: 1.5 }, 'invalid_opted_in_count'],
