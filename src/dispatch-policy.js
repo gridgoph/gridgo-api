@@ -1,6 +1,7 @@
 import { deliveryPinPaymentPending } from './delivery-pin-policy.js';
 import { operatingHours } from './operating-hours.js';
 import { isOpenAt } from './availability.js';
+import { shopDispatchOpen } from './shop-dispatch-hours.js';
 import { isContainedPickup } from "./operational-model.js";
 import { refundHold, refundSettlementFor } from "./refund-policy.js";
 import { rescheduleHold } from "./order-reschedule-policy.js";
@@ -13,7 +14,7 @@ export function dispatchWorkHeld(store, order) {
 
 /** The shared pool has no distance, zone, or vehicle restriction. */
 export function availableDispatch(order, store, at = new Date().toISOString()) {
-  return Boolean(order && (!order.operatingClock || isOpenAt(operatingHours(store.settings).schedule, at)) && order.state === "ready_for_dispatch" && !order.riderId
+  return Boolean(order && shopDispatchOpen(order, at) && (!order.operatingClock || isOpenAt(operatingHours(store.settings).schedule, at)) && order.state === "ready_for_dispatch" && !order.riderId
     && !isContainedPickup(order) && !dispatchWorkHeld(store, order));
 }
 

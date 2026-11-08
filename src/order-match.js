@@ -2,6 +2,7 @@ import { sameReviewData, reportOrderAllowed } from './review-data.js';
 import { isQuoteListing } from "./quote-listings.js";
 import { performanceTopPick } from './supplier-performance-policy.js';
 import { shopHoursStatus } from './shop-hours.js';
+import { hasWeekdayOverrides, nextShopDispatchAt } from './shop-dispatch-hours.js';
 import { operatingHours, reviewTiming, schedulingDay, deadlineDayReason, dispatchReadyAt } from './operating-hours.js';
 import { addOpeningMilliseconds } from './availability.js';
 import { shopProductionDayMinutes, displayProductionDayMinutes } from "./production-days.js";
@@ -258,8 +259,10 @@ export function shopFinishProjector(store, { supplierId, turnaroundHours, turnar
         preserveSeconds: true, queueMinutes: queue.minutes, turnaroundMinutes: duration * 60,
         units: Number.isSafeInteger(units) && units > 0 ? units : null, capacityDaily: capacityDaily || null });
       projection.review = review;
+      const dispatchStart = hasWeekdayOverrides(schedule)
+        ? nextShopDispatchAt(store.settings, schedule, projection.readyBy) : projection.readyBy;
       projection.promiseBy = dispatchReadyAt(store.settings, addOpeningMilliseconds(policy.schedule,
-        projection.readyBy, (sameDay ? policy.sameDayPromiseAllowanceMinutes : allowanceMinutesFrom(store.settings)) * 60000));
+        dispatchStart, (sameDay ? policy.sameDayPromiseAllowanceMinutes : allowanceMinutesFrom(store.settings)) * 60000));
       if (schedulingDay(projection.promiseBy) === schedulingDay(now) && deadlineDayReason(store.settings, projection.promiseBy, now)) {
         const tomorrow = new Date(Date.parse(`${schedulingDay(now)}T00:00:00+08:00`) + 86400000).toISOString();
         projection.promiseBy = dispatchReadyAt(store.settings, tomorrow);

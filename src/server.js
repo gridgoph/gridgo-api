@@ -92,6 +92,7 @@ import { originalDomainStore } from "./postgres-store.js";
 import { TEST_OPERATIONS_FORBIDDEN, isTestOperationsUser, mergeTestOperationsView, reviewSubject, testOperationsRouteAllowed, testOperationsView } from "./test-operations.js";
 import { hasRole, approvedRole, canAccessOrder, notificationVisible, EVENT_ROLES, invalidateFrameVisible } from "./notifications.js";
 import { availableDispatch, dispatchWorkHeld } from "./dispatch-policy.js";
+import { requireShopDispatchHours } from './shop-dispatch-hours.js';
 import http from "node:http";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -6583,6 +6584,7 @@ async function handleAuditedRequest(req, res) {
         || (order.state === 'needs_qa' && ['supplier_assigned', 'approved_for_matching', 'proof_approval', 'client_correction'].includes(next)))) {
         requireOperatingHours(store.settings, now(), next === 'rider_assigned' ? 'Dispatch' : 'Artwork review');
       }
+      if (next === 'rider_assigned') requireShopDispatchHours(order, store.settings, now());
       if (order.state === "proof_approval" && next === "approved_for_matching") {
         approveSample({ store, order, user, approval: body.approval, at: now(), id, req });
       }
@@ -7052,6 +7054,7 @@ async function handleAuditedRequest(req, res) {
         return send(res, 409, { error: "pickup_fulfillment_not_available" });
       }
       if (order.operatingClock) requireOperatingHours(store.settings, now(), "Dispatch");
+      requireShopDispatchHours(order, store.settings, now());
       order.riderId = user.id;
       order.riderAssignedAt = now();
       delete order.riderProgress;

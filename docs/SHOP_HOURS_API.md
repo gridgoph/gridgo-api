@@ -1,9 +1,11 @@
 # Shop hours
 
-Backend contract for report **4B4D2591**. Supplier, client and dashboard screens
-are companion releases. No schema migration is needed: weekly hours, closures
-and the current extension use `supplier_profiles.schedule` JSONB, temporary
-closure uses the existing `is_closed`, and order clocks use `orders.data`.
+Backend contract for reports **4B4D2591** and **BBD20275** (API issue 358).
+Supplier app/web screens are companion releases. Weekly hours, weekday overrides,
+closures and the current extension use `supplier_profiles.schedule` JSONB,
+temporary closure uses `is_closed`, and order clocks use `orders.data`.
+Apply forward migration `1794146000000_shop_weekday_hours` before this API:
+it adds a constraint for optional overrides, with no profile/order backfill.
 
 ## Supplier and dashboard routes
 
@@ -47,15 +49,70 @@ one open day. Asia/Manila (UTC+08:00) is fixed. Closure dates are real inclusive
 calendar dates, at most 100 ranges and 90 distinct dates in total. Invalid
 calendars return `400 invalid_shop_hours` with a displayable `message`.
 
-**Launch restriction approved for this release:** every base open day must have
-the same total open minutes. Unequal totals return
+Every **base** open day in `schedule.week` must still have the same total open
+minutes. Unequal base totals return
 `409 production_day_length_unavailable` with a displayable message. Shops may
-move opening/closing times while preserving that daily total. This preserves
-the existing meaning of day-based listing durations; shorter Saturdays require
-a later product decision. The response's `features` flags are all false:
-`multipleWindows`, `overnightWindows`, `riderShifts`, `hubDays`. This release
-accepts only one daytime window per day and exposes no switch to enable these
-advanced controls. Existing low-level split-window support remains compatible.
+move base opening/closing times while preserving that daily total. Different
+day lengths use `schedule.weekdayOverrides` below. `features.weekdayOverrides`
+is `true`; `multipleWindows`, `overnightWindows`, `riderShifts` and `hubDays`
+remain `false`. Only one daytime window per weekday can be edited. Existing
+low-level split-window support remains compatible.
+
+## Different hours for one weekday
+
+Suppliers on both app and web use the same existing `GET`/`PATCH /me/shop-hours`
+routes and profile version. Add `weekdayOverrides` to the full schedule from
+GET, leaving its `week`, offset and closures intact. Example: normal Mon–Sat
+08:00–18:00, Saturday instead 08:00–15:00:
+
+```json
+{
+  "expectedVersion": 2,
+  "schedule": {
+    "utcOffsetMinutes": 480,
+    "week": [
+      { "weekday": 1, "opensMinute": 480, "closesMinute": 1080 },
+      { "weekday": 2, "opensMinute": 480, "closesMinute": 1080 },
+      { "weekday": 3, "opensMinute": 480, "closesMinute": 1080 },
+      { "weekday": 4, "opensMinute": 480, "closesMinute": 1080 },
+      { "weekday": 5, "opensMinute": 480, "closesMinute": 1080 },
+      { "weekday": 6, "opensMinute": 480, "closesMinute": 1080 }
+    ],
+    "closures": [],
+    "weekdayOverrides": [{ "weekday": 6, "opensMinute": 480, "closesMinute": 900 }]
+  }
+}
+```
+
+Response: `200 { "hours": ... }` with the next `hours.version`, the same full
+schedule under `hours.schedule` (including `weekdayOverrides`), and the existing
+status fields. `hours.features.weekdayOverrides` is `true`. The override list is
+optional on legacy schedules; consumers treat an absent list as `[]`.
+
+- Each entry replaces that weekday's base window for scheduling and status.
+  The weekday must already be open in `week`; overrides cannot open an omitted
+  weekday, dated closure or temporarily closed shop for new work.
+- Use at most one entry per weekday (0 Sunday through 6 Saturday), at most seven.
+  Times are integer minutes after midnight in Asia/Manila: opening >= 0,
+  closing <= 1440 (24:00 end of day), and closing strictly after opening.
+  Strings, fractions, duplicate/closed weekdays, overnight windows, unknown
+  entry fields and `null` lists return `400 invalid_shop_hours`.
+- Sending the list replaces all overrides. Remove one entry to restore its base
+  hours; send `weekdayOverrides: []` to restore the whole base week. An older
+  editor that omits the field preserves saved overrides. When closing an
+  overridden weekday by removing it from `week`, remove its override in that
+  same request. This keeps stale overrides from reopening a closed day.
+- Keep sending the complete `schedule` for a schedule edit, including closures.
+  `expectedVersion` and the staff restrictions below are unchanged. Base schedule
+  edits, including override edits, clear a dated extension; an extension can
+  accompany the replacement and must extend the **effective** day's close.
+
+The base week remains the working-day duration divisor. A listing's one working
+day still means the same number of production minutes; a shorter Saturday
+provides fewer minutes and unfinished work continues in the next open window.
+No listing duration, price, payment or penalty policy is rewritten. For example,
+one hour of service time starting Saturday 14:30 at a shop closing at 15:00 and
+closed Sunday finishes Monday 08:30 (if Monday opens at 08:00).
 
 Staff may send only `expectedVersion`, `temporarilyClosed`, and `reason`;
 attempting to edit hours or extensions returns `403 forbidden`. A trimmed
@@ -116,10 +173,13 @@ The shared `projectShopFinish` remains the calculation for match listings,
 cart previews, checkout and recovery proposals:
 
 1. Wait for the next GRIDGO review window and consume configured review time.
-2. Consume queue and production in the shop's weekly hours, dated closures and
-   declared extension, retaining existing capacity-day constraints.
-3. Consume the existing delivery/promise allowance in GRIDGO operating hours,
-   which remain the delivery calendar at launch. Zero allowance still waits
+2. Consume queue and production in the shop's weekly hours, including weekday
+   overrides, dated closures and declared extension, retaining existing
+   capacity-day constraints.
+3. For a schedule with weekday overrides, wait for an opening shared by the
+   shop and GRIDGO dispatch (before its cutoff). Work finishing exactly at the
+   shop's close waits for the next overlap. Then consume the existing
+   delivery/promise allowance in GRIDGO operating hours. Zero allowance still waits
    for a dispatch opening before the configured cutoff. A result at/after cutoff rolls to the next eligible opening. Separate rider shifts and hub days remain off.
 
 No fee, delivery duration, payout share or money policy changes. The order's
@@ -128,7 +188,7 @@ Client listing/checkout `readyBy` continues to mean the client promise. The
 dashboard reads those same stored dates, not a fresh calculation from edited
 hours. Historical dates never change without the existing consent flow.
 
-Only orders created by this release get internal `shopClockVersion: 1`.
+Orders created since the original shop-hours release get internal `shopClockVersion: 1`.
 Checkout snapshots `shopClock` with the supplier ID, profile version and
 calendar. The legacy order-creation route waits until supplier assignment to
 snapshot it. Client-approved replacement snapshots the new supplier's calendar.
@@ -136,6 +196,18 @@ The snapshot governs the one-hour acceptance window, production inactivity
 grace/repeats, and production lateness. Closed time contributes zero. Rejected
 QA wait is credited in that same shop clock so staff review cannot create shop
 lateness. GRIDGO review/dispatch continue to use GRIDGO hours.
+
+For **new commitments whose `shopClock.schedule` contains weekday overrides**,
+unassigned rider offers and new dispatch assignment also require the shop to
+be open in that accepted calendar. Both rider `POST /dispatch/:id/accept` and
+staff `POST /orders/:id/transition` to `rider_assigned` enforce it. A closed shop
+returns `409 outside_shop_hours` with `nextDispatchAt` (the next shared shop/GRIDGO
+dispatch opening). The existing platform-hours gate continues to apply. An
+already assigned rider can finish inspection, pickup and transport under the
+existing proof rules after closing; hours never strand a handover in progress.
+Delivery can finish after the shop closes. Orders without overrides in their
+accepted snapshot keep the previous dispatch behavior. Later profile edits
+never attach overrides to an existing order or change its dispatch clock.
 
 No migration, read, hours edit or lifecycle sweep opts an older order into this
 policy. Orders with the earlier `operatingClock` retain it; older orders retain
@@ -162,3 +234,20 @@ Super Admin membership. Catalog/notification invalidations are queued before
 inside the hours handler. Historical audit rows cannot be edited or deleted.
 
 Tight/Secured/Rush dates and same-day review are defined in [Scheduling release 1](SCHEDULING_API.md). Express cannot bypass these hours.
+
+## Calendar readers
+
+`availability.js` resolves effective weekday windows once for status, opening
+time addition, elapsed service time and capacity-day walks. `shop-hours.js`
+uses those windows for status/extensions and snapshots them prospectively.
+`order-match.js` uses that same calendar for matching, deadline availability,
+cart/checkout and recovery ready-by estimates; supplier production-time previews
+reuse it. `shop-recovery.js` acceptance, `production-inactivity.js` timers,
+`production-penalties.js` elapsed time, on-time matching quality, and
+`supplier-performance.js` use the order's retained clocks. The policy/thresholds
+in those modules are unchanged. `production-days.js` and SQL
+`production_day_minutes` deliberately read only the base week for duration units.
+`shop-dispatch-hours.js`, `dispatch-policy.js` and server assignment routes gate
+new dispatch using the accepted override clock; filtered PostgreSQL offer reads,
+notifications and push reuse `availableDispatch`. Platform and hub calendars
+remain separate and do not accept shop weekday overrides.

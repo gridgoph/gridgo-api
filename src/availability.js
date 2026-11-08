@@ -119,6 +119,23 @@ export function validateShopSchedule(schedule) {
       fail(400, "invalid_schedule", "A closure cannot end before it starts.", { field: `closures[${index}]` });
     }
   }
+  if (Object.hasOwn(schedule, 'weekdayOverrides')) {
+    const overrides = schedule.weekdayOverrides;
+    if (offset !== 480 || !Array.isArray(overrides) || overrides.length > 7) {
+      fail(400, 'invalid_schedule', 'Weekday overrides need an Asia/Manila calendar and at most seven windows.', { field: 'weekdayOverrides' });
+    }
+    const seen = new Set();
+    for (const window of overrides) {
+      const { weekday, opensMinute, closesMinute } = window || {};
+      if (!window || Object.keys(window).some(key => !['weekday', 'opensMinute', 'closesMinute'].includes(key))
+        || !Number.isInteger(weekday) || !byWeekday.has(weekday) || seen.has(weekday)
+        || !Number.isInteger(opensMinute) || opensMinute < 0
+        || !Number.isInteger(closesMinute) || closesMinute > MINUTES_PER_DAY || closesMinute <= opensMinute) {
+        fail(400, 'invalid_schedule', 'Override each open weekday at most once, with one increasing daytime window.', { field: 'weekdayOverrides' });
+      }
+      seen.add(weekday);
+    }
+  }
   if (schedule.extension != null) {
     const { day, opensMinute, closesMinute } = schedule.extension;
     if (typeof day !== 'string' || !DAY_KEY.test(day) || !Number.isFinite(Date.parse(day))
@@ -164,13 +181,19 @@ function isClosed(schedule, dayKey) {
   );
 }
 
+/** Overrides replace an open weekday's base windows; they never open a closed day.
+ * The base week remains the production-day divisor for existing listing units. */
+export function weeklyWindows(schedule, weekday) {
+  const base = (schedule.week || []).filter(window => window.weekday === weekday);
+  const override = base.length && schedule.weekdayOverrides?.find(window => window.weekday === weekday);
+  return (override ? [override] : base).map(window => ({ ...window }))
+    .sort((left, right) => left.opensMinute - right.opensMinute);
+}
+
 /** Opening hours for one calendar day, earliest first. Empty when shut. */
 function windowsOn(schedule, dayKey, weekday) {
   if (isClosed(schedule, dayKey)) return [];
-  const windows = (schedule.week || [])
-    .filter((window) => window.weekday === weekday)
-    .map(window => ({ ...window }))
-    .sort((left, right) => left.opensMinute - right.opensMinute);
+  const windows = weeklyWindows(schedule, weekday);
   const extension = schedule.extension;
   if (extension?.day === dayKey && windows.length) {
     const last = windows.at(-1);
