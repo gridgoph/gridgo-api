@@ -3753,7 +3753,7 @@ async function handleAuditedRequest(req, res) {
 
     if (req.method === "GET" && pathname === "/admin/files/retention") {
       if (user.role !== "super_admin") return send(res, 403, { error: "forbidden" });
-      return send(res, 200, await fileRetention.run({ dryRun: true }));
+      return send(res, 200, await fileRetention.run({ dryRun: true, readStore: store }));
     }
 
     if (req.method === "DELETE" && /^\/(?:files|me\/files)\/[^/]+$/.test(pathname)) {
@@ -5812,6 +5812,8 @@ async function handleAuditedRequest(req, res) {
           catalog: (store.catalogItems || []).filter(item => !isQuoteListing(item)),
           users: store.users || [],
           audit: store.auditLog || [],
+          auditActivity: store.pricingAuditActivity,
+          readContext: store.pricingReadContext,
           refundRequests: store.refundRequests || [],
           refunds: store.refundSettlements || [],
           settings: store.settings || {},

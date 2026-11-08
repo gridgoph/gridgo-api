@@ -25,7 +25,18 @@ const issuer = 'https://benchmark.clerk.accounts.dev', party = 'http://localhost
 const samples = Number(process.env.PERF_SAMPLES || 10);
 const operationsPaths = ['/dispatch/offers', '/claims', '/claims/perf_claim', '/issues', '/issues/perf_issue', '/escalations',
   '/users', '/users?role=supplier', '/users/perf_client', '/users/perf_supplier/verification-documents', '/users/perf_supplier/payout-account',
-  '/audit?action=order.production_override', '/orders/perf_offer/audit', '/ops/catalog-items/perf_item_0'];
+  '/audit?action=order.production_override', '/orders/perf_offer/audit', '/ops/catalog-items/perf_item_0',
+  '/baskets', '/credits/balance?clientId=perf_client', '/ops/catalog-items', '/ops/catalog-items?limit=1', '/ops/catalog-items?q=Fixture',
+  '/approval-cases?status=approved', '/supplier-services', '/ops/shops/hours', '/ops/shops/performance',
+  '/ops/riders/locations', '/ops/orders/perf_offer/location-diagnostics', '/ops/special-instructions',
+  '/ops/reschedule-requests', '/ops/hub', '/ops/hub/escalations', '/ops/hub/unclaimed', '/ops/hub/handouts',
+  '/ops/hub/receipt-scans', '/staff/me', '/admin/staff', '/admin/staff/roles', '/admin/staff/invites',
+  '/ops/finance/supplier-invoices?month=2026-11', '/ops/organizations', '/ops/vouchers?clientId=perf_client',
+  '/admin/voucher-campaigns', '/admin/voucher-redemptions', '/admin/promotions', '/ops/founding-testers',
+  '/ops/tester-invites', '/ops/tester-rewards', '/admin/survey-responses', '/admin/pricing-feedback',
+  '/admin/checkout-exit-feedback', '/admin/shop-rankings', '/admin/pricing', '/admin/featured-prints',
+  '/admin/season-windows', '/admin/season-windows/push-settings', '/ops/client-shop-chats',
+  '/refund-requests', '/admin/files/retention'];
 const baseRows = Number(process.env.PERF_BASE_ROWS || 10000);
 function token(subject = 'clerk_perf_ops') {
   const now = Math.floor(Date.now() / 1000);
@@ -43,7 +54,7 @@ async function fixture() {
   const at = new Date().toISOString();
   await database.transaction(async () => {
     const store = await loadStore(database);
-    for (const role of ['ops_admin', 'client', 'rider']) {
+    for (const role of ['ops_admin', 'super_admin', 'client', 'rider']) {
       const id = role === 'ops_admin' ? 'perf_ops' : `perf_${role}`;
       store.users.push({ id, clerkUserId: `clerk_${id}`, email: `${id}@example.test`, name: id, role, accountType: role === 'client' ? 'individual' : undefined, verificationStatus: role === 'rider' ? 'unverified' : undefined, createdAt: at });
       store.userRoleMemberships.push({ userId: id, role, createdAt: at });
@@ -105,7 +116,7 @@ async function readerRows() {
   const operations = {};
   for (const path of operationsPaths) {
     const url = new URL(path, 'http://benchmark.invalid');
-    operations[path] = await count(db => loadHotReadStore(db, 'clerk_perf_ops', url.pathname, { searchParams: url.searchParams }));
+    operations[path] = await count(db => loadHotReadStore(db, path.startsWith('/admin/') || path.startsWith('/approval-cases') ? 'clerk_perf_super_admin' : 'clerk_perf_ops', url.pathname, { searchParams: url.searchParams }));
   }
   return {
     full: await count(loadStore),
@@ -182,7 +193,7 @@ async function measure(scale) {
     await new Promise(resolve => setTimeout(resolve, 1000));
     const supplierPaths = ['/me/catalog-items', '/me/supplier-readiness', '/me/supplier-profile', '/me/shop-hours', '/me/supplier-services'];
     const paths = ['/notifications', '/settings', '/taxonomy', '/auth/me/ops', '/auth/me', '/ops/product-type-requests', '/ops/catalog-reviews', '/ops/shop-failures', '/ops/colour-price-checks', '/me', '/auth/me/client', '/auth/me?client', '/me/files', ...supplierPaths, ...operationsPaths];
-    const subjectFor = path => supplierPaths.includes(path) ? 'clerk_perf_supplier'
+    const subjectFor = path => path.startsWith('/admin/') || path.startsWith('/approval-cases') ? 'clerk_perf_super_admin' : supplierPaths.includes(path) ? 'clerk_perf_supplier'
       : ['/me', '/auth/me/client', '/auth/me?client', '/me/files'].includes(path) ? 'clerk_perf_client' : 'clerk_perf_ops';
     for (const path of paths) {
       const warm = await fetch(`http://127.0.0.1:${port}${path}`, { headers: { Authorization: `Bearer ${token(subjectFor(path))}` } });

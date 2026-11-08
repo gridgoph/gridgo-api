@@ -635,7 +635,7 @@ function withoutReporter(report) {
 
 async function reviewIssueReports({
   method, path, base, url, res, send, database, storage, readPatch, staffActor = null, canManageTrackerLink = false, aiReviewer = false,
-  reporterFacts = null,
+  reporterFacts = null, prepareReporterFacts = null,
 }) {
   const project = (report) => {
     const visible = canManageTrackerLink ? report : withoutGithubLinks(report);
@@ -676,6 +676,7 @@ async function reviewIssueReports({
       status, since: sinceRaw, limit, before, priority: priorityRaw === "true",
       validities: listParam(url, "validity", ISSUE_VALIDITIES), triageCategories, label, aiReviewed: booleanParam(url, "aiReviewed"),
     });
+    if (prepareReporterFacts) reporterFacts = await prepareReporterFacts(reports.map(r => r.reporter?.id).filter(Boolean));
     send(res, 200, { reports: reports.map(project), counts: await reportCounts(database), triageCounts: await triageCounts(database) });
     return true;
   }
@@ -742,6 +743,7 @@ async function reviewIssueReports({
     if (!updated) throw notFound;
   }
   const report = await findIssueReport(database, storage, id);
+  if (prepareReporterFacts && report?.reporter) reporterFacts = await prepareReporterFacts([report.reporter.id]);
   if (!report) throw notFound;
   send(res, 200, project(report));
   return true;
@@ -827,6 +829,7 @@ export async function routeStaffIssueReports({ req, res, pathname, url, user, re
       method: req.method, path, base: STAFF_BASE, url, res, send, database, storage, staffActor: user,
       canManageTrackerLink: identityHasMembership(user, "super_admin"),
       reporterFacts: store ? (reporterId) => reporterRewardFacts(store, reporterId) : null,
+      prepareReporterFacts: store?.prepareIssueReporterFacts,
       readPatch: () => readBody(req),
     })) return true;
     throw new ReportError(404, "not_found", `No ${req.method} route for ${pathname}.`);
