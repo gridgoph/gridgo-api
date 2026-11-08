@@ -70,6 +70,13 @@ is absent for Operations (including test Operations), clients, shops, riders and
 staff. It is computed from current database facts, never historical order JSON.
 Targeted Super Admin order reads load the relevant basket payment, credit and
 voucher facts as well as the order's payment, payout, refund and job records.
+Migration `1794157000000_order_removal_history_indexes` builds four concurrent
+GIN indexes for the batched JSON containment lookup, covering root and nested
+scalar/array order references. Apply it before this API release; see the
+[concurrent-build recovery procedure](DEPLOYMENT.md#targeted-read-indexes-and-interrupted-builds).
+The growth regression in `tests/order-removal-growth-postgres.test.js` checks the
+actual Super Admin detail query plans and shared-buffer work after 100,000
+unrelated records per financial-history table, as well as all reference forms.
 
 Show the Remove order action only when `removal.allowed` is `true`; otherwise
 show the short explanation. Eligibility is a current read, not a reservation:

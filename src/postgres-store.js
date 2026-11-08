@@ -1511,12 +1511,16 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
     await read('order_basket_groups', `WHERE basket_id IN
       (SELECT basket_id FROM order_basket_groups WHERE order_id = ANY($1::text[]))`, [orderIds]);
     await read('order_baskets', 'WHERE id = ANY($1::text[])', [loaded.order_basket_groups.map(row => row.basket_id)]);
-    const linked = `WHERE data->>'orderId' = ANY($1::text[]) OR data->'orderIds' ?| $1::text[]
-      OR data#>>'{data,orderId}' = ANY($1::text[]) OR data#>'{data,orderIds}' ?| $1::text[]`;
-    await read('credit_ledger', linked, [orderIds]);
+    // Containment uses each history table's order_refs GIN index. Preserve
+    // scalar/array references both at the snapshot root and inside legacy data.
+    const references = orderIds.flatMap(orderId => [
+      { orderId }, { orderIds: [orderId] }, { data: { orderId } }, { data: { orderIds: [orderId] } },
+    ]).map(reference => JSON.stringify(reference));
+    const linked = 'WHERE data @> ANY($1::jsonb[])';
+    await read('credit_ledger', linked, [references]);
     await read('credit_accounts', 'WHERE user_id = ANY($1::text[])', [loaded.credit_ledger.map(row => row.user_id)]);
     for (const name of ['voucher_reservations', 'voucher_redemptions', 'voucher_ledger']) {
-      await read(name, linked, [orderIds]);
+      await read(name, linked, [references]);
     }
   }
   await read('order_line_item_options', 'WHERE order_line_item_id = ANY($1::text[])', [loaded.order_line_items.map(row => row.id)]);
