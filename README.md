@@ -4,6 +4,8 @@ Custom backend for GRIDGO clients, suppliers, riders, Operations, and Super Admi
 
 Exact cancellation quotes, gathered problem evidence and manual fault decisions are documented in [Refunds and fault](docs/REFUNDS_AND_FAULT_API.md).
 
+Super Admin test-order cleanup, exact-email confirmation, retained history and financial guards are documented in [Recorded order removal](docs/ORDER_REMOVAL_API.md).
+
 Immutable checkout/sample approvals, private signature evidence and PDF downloads are documented in [Approval proof](docs/APPROVAL_PROOF_API.md). Enforcement defaults off until the companion apps ship.
 
 Pilot door-delivery acknowledgement receipts, automatic AR numbering, rider reads and client PDF downloads are documented in [Acknowledgement receipts](docs/ACKNOWLEDGEMENT_RECEIPTS_API.md).

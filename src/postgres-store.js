@@ -1,3 +1,4 @@
+import { orderReadQuery, activeOrderSql, attachOrderRemovalContext } from './order-removal.js';
 import { artworkFileIdsFor } from './artwork-attachments.js';
 import { parseCatalogListQuery } from './catalog-routes.js';
 import { notificationVisible, parseNotificationListLimit, canAccessOrder, hasRole } from './notifications.js';
@@ -877,13 +878,14 @@ export async function loadStore(database) {
   if (!database.inTransaction()) return database.snapshot(() => loadStore(database));
   const loaded = {};
   for (const table of TABLES) {
-    loaded[table.name] = (await database.query(`SELECT ${table.columns.join(", ")} FROM ${table.name}`)).rows;
+    loaded[table.name] = (await database.query(orderReadQuery(table))).rows;
   }
   const store = storeFromRows(loaded, {
     legalPenaltyGate: await loadLegalPenaltyGate(database),
     supplierPerformanceLaunchedAt: (await database.query("SELECT launched_at FROM supplier_performance_launch WHERE singleton")).rows[0]?.launched_at || null,
     surveyLaunchedAt: (await database.query("SELECT launched_at FROM survey_launch WHERE singleton")).rows[0]?.launched_at || null,
   });
+  await attachOrderRemovalContext(database, store, { retention: true });
   Object.defineProperty(store, "listOwnCatalogItems", {
     value: (params) => listOwnCatalogItems(database, params),
     enumerable: false,
@@ -898,7 +900,7 @@ function readGraph(database) {
   async function read(name, where, values = []) {
     const table = TABLES.find(table => table.name === name);
     if (!table) throw new Error(`Unknown read graph table: ${name}`);
-    loaded[name] = (await database.query(`SELECT ${table.columns.join(', ')} FROM ${name} ${where}`, values)).rows;
+    loaded[name] = (await database.query(orderReadQuery(table, where), values)).rows;
   }
   function finish(options = {}) {
     const store = storeFromRows(loaded, { ...options, writable: false });
@@ -958,7 +960,9 @@ export async function loadDeliveryStore(database, { userIds = [], notificationId
     await read('users', 'WHERE id = ANY($1::text[])', [ownerIds]);
     const seasonIds = loaded.notifications.map(row => row.data?.seasonWindowId).filter(Boolean);
     if (seasonIds.length) await read('season_windows', 'WHERE id = ANY($1::text[])', [seasonIds]);
-    return graph.finish();
+    const store = graph.finish();
+    if (subjectId) await attachOrderRemovalContext(database, store, { subjectId });
+    return store;
   });
 }
 
@@ -1490,7 +1494,7 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
     // Preserve the existing 403 for a real, inaccessible detail without
     // hydrating its private graph. Test operations still sees hidden rows as 404.
     if (detail) store.orderReadForbidden = (await database.query(
-      `SELECT EXISTS (SELECT 1 FROM orders WHERE id = $1 ${reviewOnly ? 'AND review_data' : ''}) AS present`,
+      `SELECT EXISTS (SELECT 1 FROM orders WHERE ${activeOrderSql('orders.id')} AND id = $1 ${reviewOnly ? 'AND review_data' : ''}) AS present`,
       [pathname.split('/')[2]],
     )).rows[0].present;
     return store;
@@ -1555,7 +1559,7 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
     // not merely the opened order. Return only counts for the visible shops.
     const counts = await database.query(`SELECT event->'supplierId' AS supplier, count(*)::int AS count
       FROM orders CROSS JOIN LATERAL jsonb_array_elements(COALESCE(NULLIF(data#>'{shopHandover,arrivedPacked}', 'null'::jsonb), '[]'::jsonb)) event
-      WHERE data#>'{shopHandover,arrivedPacked}' IS NOT NULL
+      WHERE ${activeOrderSql('orders.id')} AND data#>'{shopHandover,arrivedPacked}' IS NOT NULL
         AND data#>'{shopHandover,arrivedPacked}' @> ANY($2::jsonb[])
         AND event->'supplierId' = ANY($1::jsonb[]) ${dispatch && reviewOnly ? 'AND review_data' : reviewScope}
       GROUP BY event->'supplierId'`, [[...new Set(loaded.orders.map(row => JSON.stringify(row.supplier_id)))],
@@ -1792,7 +1796,7 @@ export async function loadNotificationStore(database, clerkSubject, { lastEventI
     const loaded = Object.fromEntries(TABLES.map(table => [table.name, []]));
     async function read(name, where = '', values = []) {
       const table = TABLES.find(table => table.name === name);
-      loaded[name] = (await database.query(`SELECT ${table.columns.join(', ')} FROM ${name} ${where}`, values)).rows;
+      loaded[name] = (await database.query(orderReadQuery(table, where), values)).rows;
     }
     await read('users', 'WHERE clerk_user_id = $1', [clerkSubject]);
     if (loaded.users.length === 1) {

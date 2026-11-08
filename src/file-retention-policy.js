@@ -62,9 +62,10 @@ export function fileRelationships(store, file) {
     || Object.entries(CASE_TERMINALS).some(([collection, terminal]) => (store[collection] || []).some((row) =>
       !terminal.includes(row.status) && (orderIds.has(row.orderId) || contains(row, file.fileId))));
   // Verification evidence may be material to a case on any of its owner's orders.
-  const ownerHold = verification(file) && Object.entries(CASE_TERMINALS).some(([collection, terminal]) =>
-    (store[collection] || []).some((row) => !terminal.includes(row.status) && (store.orders || []).some((order) =>
-      order.id === row.orderId && [order.clientId, order.supplierId, order.riderId].includes(file.ownerId))));
+  const ownerHold = verification(file) && (store.removedVerificationHoldOwnerIds?.has(file.ownerId)
+    || Object.entries(CASE_TERMINALS).some(([collection, terminal]) =>
+      (store[collection] || []).some((row) => !terminal.includes(row.status) && (store.orders || []).some((order) =>
+        order.id === row.orderId && [order.clientId, order.supplierId, order.riderId].includes(file.ownerId)))));
   return { orders: orders.filter(Boolean), unresolved, held: held || ownerHold, activeCart };
 }
 

@@ -195,6 +195,10 @@ export function reviewSubject(store, { orderId, approvalCaseId, id, resource } =
   if (orderId) return order(orderId);
   if (approvalCaseId) return user((store.approvalCases || []).find(row => row.id === approvalCaseId)?.userId);
   if (!id) return ['notifications', 'identity'].includes(resource);
+  // Silent removal invalidates must refresh an already-open review queue even
+  // though the order itself is no longer readable. Never revive inbox rows.
+  if (['orders', 'jobs', 'dispatch', 'availability', 'claims', 'escalations', 'payouts'].includes(resource)
+    && store.removedReviewOrderIds?.has(id)) return true;
   if (order(id) || user(id)) return true;
   for (const key of ['orderJobs', 'claims', 'issues', 'escalations', 'refundRequests']) {
     const row = (store[key] || []).find(candidate => candidate.id === id);
