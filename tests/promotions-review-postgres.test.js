@@ -29,8 +29,10 @@ async function cart(api, s, quantities=[1]) {
   const made = await ok(api,'client','POST','/me/carts',{fulfillmentMode:'delivery',defaultDropoff:s.orders[0].dropoff},201);
   const path = `/me/carts/${made.cart.id}`;
   // These live HTTP money tests need a feasible deadline whenever CI runs.
-  const deadline = new Date(Date.now() + 7 * 24 * 3600000).toISOString();
-  for (const [n,quantity] of quantities.entries()) await ok(api,'client','POST',`${path}/lines`,{catalogItemId:`item_${n?'replacement':'supplier'}`,quantity,optionIds:[],artworkFileId:'artwork',deadline},201);
+  const deadline = new Date(Date.now() + 7 * 24 * 3600000);
+  // A Sunday run would otherwise request the following closed Sunday (Manila).
+  if (new Date(deadline.getTime() + 8 * 3600000).getUTCDay() === 0) deadline.setUTCDate(deadline.getUTCDate() + 1);
+  for (const [n,quantity] of quantities.entries()) await ok(api,'client','POST',`${path}/lines`,{catalogItemId:`item_${n?'replacement':'supplier'}`,quantity,optionIds:[],artworkFileId:'artwork',deadline:deadline.toISOString()},201);
   return path;
 }
 async function remedy(api, orderId, {clientCaused=false,totalMinor=0,shopEntitlementMinor=0,cashDestination=false}={}) {
