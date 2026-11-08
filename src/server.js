@@ -306,6 +306,8 @@ import {
 } from "./tracker.js";
 import {
   loadDeviceTokenStore,
+  loadTesterProgramIdentityStore,
+  appendTesterProgramAudit,
   loadNotificationStore,
   loadInboxStore,
   loadDeliveryStore,
@@ -319,6 +321,7 @@ import {
   saveDeviceTokenStore,
   saveStore,
 } from "./postgres-store.js";
+import { isTesterProgramRoute, routeTesterProgram as routePlayTesterProgram } from './tester-program.js';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PORT = Number(process.env.PORT || 8787);
@@ -2446,6 +2449,22 @@ async function handleAuditedRequest(req, res) {
       const { mutated } = applyClerkWebhookEvent(store, event);
       if (mutated) await save(store);
       return send(res, 200, { ok: true });
+    }
+
+    if (isTesterProgramRoute(pathname)) {
+      res.setHeader('Cache-Control', 'private, no-store');
+      const verified = await verifiedClerkClaimsFor(req);
+      const identityStore = await loadTesterProgramIdentityStore(database, verified?.claims?.sub || null);
+      const auth = await authenticateRequest(req, identityStore);
+      if (!auth.user) return send(res, auth.status || 401, authFailureBody(auth));
+      const held = accountHoldDenial(auth.user);
+      if (held) return send(res, 403, held);
+      const role = req.headers['x-gridgo-role'];
+      if (role && (!EVENT_ROLES.includes(role) || !hasRole(identityStore, auth.user.id, role))) return send(res, 403, { error: 'forbidden' });
+      const user = selectActorRole(identityStore, auth.user, role || auth.user.role, { restrictMemberships: Boolean(role) });
+      const result = await routePlayTesterProgram({ req, url, user, database, readBody, now,
+        auditEvent: entry => appendTesterProgramAudit(database, entry, now()) });
+      return send(res, result.status, result.body);
     }
 
     await expireElapsedIssueWindows();

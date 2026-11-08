@@ -4,7 +4,9 @@ import { createDatabase } from '../src/database.js';
 import { loadStore, saveStore } from '../src/postgres-store.js';
 import { resetDatabase } from './fixtures/reset-database.js';
 import { apiForTest } from './fixtures/reschedule-http.js';
-import { checkoutFixture, AT } from './helpers/promotion-checkout.mjs';
+import { checkoutFixture, liveCheckoutDeadline, AT } from './helpers/promotion-checkout.mjs';
+import { projectListingGroup } from '../src/order-match.js';
+import { fitsDeadline } from '../src/availability.js';
 import { collectedSupplierPrincipalMinor } from '../src/operational-model.js';
 import { claimFounding, inviteFriend } from '../src/promotions.js';
 import { id, audit } from './fixtures/reschedule.js';
@@ -29,12 +31,23 @@ async function cart(api, s, quantities=[1]) {
   const made = await ok(api,'client','POST','/me/carts',{fulfillmentMode:'delivery',defaultDropoff:s.orders[0].dropoff},201);
   const path = `/me/carts/${made.cart.id}`;
   // These live HTTP money tests need a feasible deadline whenever CI runs.
-  const deadline = new Date(Date.now() + 7 * 24 * 3600000);
-  // A Sunday run would otherwise request the following closed Sunday (Manila).
-  if (new Date(deadline.getTime() + 8 * 3600000).getUTCDay() === 0) deadline.setUTCDate(deadline.getUTCDate() + 1);
-  for (const [n,quantity] of quantities.entries()) await ok(api,'client','POST',`${path}/lines`,{catalogItemId:`item_${n?'replacement':'supplier'}`,quantity,optionIds:[],artworkFileId:'artwork',deadline:deadline.toISOString()},201);
+  const deadline = liveCheckoutDeadline();
+  for (const [n,quantity] of quantities.entries()) await ok(api,'client','POST',`${path}/lines`,{catalogItemId:`item_${n?'replacement':'supplier'}`,quantity,optionIds:[],artworkFileId:'artwork',deadline},201);
   return path;
 }
+test('live money-test deadlines stay feasible across Manila midnight and every weekday', () => {
+  const s = checkoutFixture();
+  const times = ['2026-11-07T15:59:59.999Z', '2026-11-07T16:00:00.000Z',
+    ...Array.from({ length: 7 }, (_, day) => `2026-11-${String(8 + day).padStart(2, '0')}T15:59:59.999Z`)];
+  for (const now of times) {
+    const deadline = liveCheckoutDeadline(now);
+    assert.ok(Date.parse(deadline) > Date.parse(now) + 6 * 86400000, now);
+    for (const supplier of ['supplier', 'replacement']) {
+      const { projection } = projectListingGroup(s, [{ catalogItemId: `item_${supplier}`, quantity: 10, optionIds: [] }], { now, deadline });
+      assert.equal(fitsDeadline(projection, deadline), true, `${supplier} at ${now}: ${projection.scheduling.reason}`);
+    }
+  }
+});
 async function remedy(api, orderId, {clientCaused=false,totalMinor=0,shopEntitlementMinor=0,cashDestination=false}={}) {
   let {refund} = await ok(api,'client','POST',`/orders/${orderId}/refund-requests`,{kind:'cancellation',reason:'Order cannot continue',...(cashDestination?{destination:{provider:'gcash',accountName:'Client',qrFileId:'refundQr',ownershipConfirmed:true}}:{})},201);
   ({refund} = await ok(api,'ops','POST',`/refund-requests/${refund.id}/review`,{expectedVersion:refund.version,reason:'Reviewed the order and obligations',...(cashDestination?{destinationVerified:true}:{})}));

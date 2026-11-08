@@ -10,7 +10,7 @@ import { enforceReviewData, labelReviewNotifications, reviewReportView } from '.
 import { performanceTable, performanceRows, loadPerformanceRows } from './supplier-performance-store.js';
 import { parsePaperSize } from './print-layout.js';
 import { canonicalColourPricing } from './colour-pricing.js';
-import { finalizeAuditEntries } from './audit.js';
+import { appendAudit, finalizeAuditEntries } from './audit.js';
 import { supplierInvoiceTable, supplierInvoiceRows, loadSupplierInvoiceRows } from './supplier-invoice-store.js';
 import { sampleBatchTable, sampleBatchRows, loadSampleBatchRows } from './sample-batch-store.js';
 import { surveyTable, surveyRows, loadSurveyRows } from './survey-store.js';
@@ -1601,6 +1601,28 @@ async function readQuoteGraph(graph, ids, pathname, status) {
     await read('supplier_profiles', 'WHERE user_id = ANY($1::text[])', [suppliers]);
   }
   return graph.finish();
+}
+
+/** Identity only: tester telemetry must not load orders or run lifecycle work. */
+export async function loadTesterProgramIdentityStore(database, clerkSubject) {
+  return database.snapshot(async () => {
+    const graph = readGraph(database);
+    await graph.read('users', 'WHERE clerk_user_id = $1', [clerkSubject]);
+    await readIdentity(graph, graph.loaded.users.map(row => row.id));
+    return graph.finish();
+  });
+}
+
+/** Tester administration appends evidence without running domain save hooks. */
+export async function appendTesterProgramAudit(database, entry, at) {
+  if (!database.inWriteTransaction()) throw new Error('Tester audit requires a write transaction');
+  const store = { users: [entry.actor], auditLog: [] };
+  appendAudit(store, entry, { at });
+  finalizeAuditEntries(store, null);
+  const { id, at: eventAt, actorId, actorRole, action, entityType, entityId, orderId, ...data } = store.auditLog[0];
+  await database.query(`INSERT INTO audit_log(id,at,actor_id,actor_role,action,entity_type,entity_id,order_id,position,data)
+    SELECT $1,$2,$3,$4,$5,$6,$7,$8,COALESCE(max(position),-1)+1,$9 FROM audit_log`,
+  [id, eventAt, actorId, actorRole, action, entityType, entityId, orderId, data]);
 }
 
 export async function loadHotReadStore(database, clerkSubject, pathname, { after = '', status = null, sessionHash = null, role, includeReviewData = false, searchParams = new URLSearchParams() } = {}) {
