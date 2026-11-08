@@ -1,3 +1,6 @@
+import { recordOrderActions } from './shop-order-actions.js';
+import { shopMembershipsFor, selectedShop, assertActiveShop, shopSummary, staffRouteAllowed, identityShopRoute,
+  supplierShopActor, notifyShopStaff, routeShopTeam, claimShopInvite, discoverShopInvites, isShopStaff, actorUserId, assertStaffFile } from './shop-team.js';
 import { routeTesterProgram } from './tester-program-routes.js';
 import { isQuoteListing } from "./quote-listings.js";
 import { routeQuoteRequests, expireQuoteRequests, quoteValidityDays, quoteSaveError } from "./quote-requests.js";
@@ -90,7 +93,7 @@ import { pushStats } from "./push-stats.js";
 import { deriveDomainEvents, notifyAdmins } from "./domain-events.js";
 import { originalDomainStore } from "./postgres-store.js";
 import { TEST_OPERATIONS_FORBIDDEN, isTestOperationsUser, mergeTestOperationsView, reviewSubject, testOperationsRouteAllowed, testOperationsView } from "./test-operations.js";
-import { hasRole, approvedRole, canAccessOrder, notificationVisible, EVENT_ROLES, invalidateFrameVisible } from "./notifications.js";
+import { hasRole, hasSupplierAppAccess, approvedRole, canAccessOrder, notificationVisible, EVENT_ROLES, invalidateFrameVisible } from "./notifications.js";
 import { availableDispatch, dispatchWorkHeld } from "./dispatch-policy.js";
 import http from "node:http";
 import crypto from "node:crypto";
@@ -501,7 +504,9 @@ async function save(view) {
     }
   }
   deriveMissingAudit(store, originalDomainStore(store));
+  recordOrderActions(store, originalDomainStore(store));
   deriveDomainEvents(store, originalDomainStore(store), {createId:id,at:now()});
+  notifyShopStaff(store, originalDomainStore(store), { id });
   labelReviewNotifications(store, originalDomainStore(store));
   const previousNotificationIds = originalNotificationIds(store);
   const createdNotifications = (store.notifications || []).filter(
@@ -1038,6 +1043,54 @@ async function authenticateRequest(req, store) {
   return auth;
 }
 
+function wantsShop(req, store, user, role) {
+  if (!user || (role && role !== 'supplier')) return false;
+  return role === 'supplier' || req.headers['x-gridgo-shop-id'] || user.role === 'supplier'
+    || (user.role === 'staff' && shopMembershipsFor(store, user.id).length);
+}
+function shopBootstrap(req, store, user, pathname) {
+  if (!wantsShop(req, store, user, pathname === '/auth/me/supplier' ? 'supplier' : req.headers['x-gridgo-role'])) return null;
+  const member = selectedShop(store, user, req.headers['x-gridgo-shop-id']);
+  if (!member) return null;
+  if (member.status === 'removed') assertActiveShop(member);
+  const held = accountHoldDenial(user);
+  if (held) throw Object.assign(new Error(held.error), { status: 403, code: held.error });
+  if (member.userId === member.shopId && member.role === 'owner' && member.status === 'active') return null;
+  return { user: { id: user.id, name: user.name, role: 'supplier' }, shop: shopSummary(store, member),
+    memberships: [{ role: 'supplier' }], approvalCases: [] };
+}
+function shopRequestActor(req, store, user, role) {
+  if (!wantsShop(req, store, user, role)) return null;
+  const member = selectedShop(store, user, req.headers['x-gridgo-shop-id']);
+  if (!member) return null;
+  assertActiveShop(member);
+  // Existing Owners without an explicit app role keep the legacy role resolver.
+  if (member.role === 'owner' && member.shopId === user.id && !role) return null;
+  const pathname = new URL(req.url, 'http://localhost').pathname;
+  if (member.role === 'staff' && !staffRouteAllowed(req.method, pathname)) {
+    throw Object.assign(new Error('shop_owner_required'), { status: 403, code: 'shop_owner_required' });
+  }
+  if (identityShopRoute(pathname)) {
+    // Inbox/device ownership always remains the signed-in person's, not the shop.
+    const actor = new Proxy(user, { get(target, key) {
+      if (key === 'role') return 'supplier';
+      if (key === 'shopRole') return member.role;
+      if (key === 'shopId') return member.shopId;
+      return target[key];
+    } });
+    return actor;
+  }
+  return supplierShopActor(store, user, member);
+}
+function requestActor(req, store, user, role) {
+  const held = user && accountHoldDenial(user);
+  if (held) throw Object.assign(new Error(held.error), { status: 403, code: held.error });
+  const actor = shopRequestActor(req, store, user, role)
+    || selectActorRole(store, user, role, { restrictMemberships: Boolean(role) });
+  if (actor) setAuditActor(actor);
+  return actor;
+}
+
 /**
  * First time GRIDGO accepts each verified session, for every role.
  * Session fingerprints and the monotonic timestamp commit together, outside
@@ -1080,6 +1133,8 @@ async function verifyClerkBeforeMutation(req, pathname) {
   const verified = await verifiedClerkClaimsFor(req);
   const needsClerkProfile = [
     "/auth/staff/redeem",
+    "/auth/shop-invites",
+    "/auth/shop-invites/claim",
     "/auth/clerk/activate",
     "/auth/clerk/enroll/supplier",
     "/auth/clerk/enroll/rider",
@@ -1957,7 +2012,7 @@ async function publicOrder(order, user, orderStore, unreadCounts = null, signing
   const record = publicOrderFor(order, user, orderStore);
   const fileStore = orderFileReadStore(orderStore);
   if (record.pickupChat) record.pickupChat.unread = unreadCounts
-    ? unreadCounts.get(order.id) ?? 0 : await pickupChatUnread(database, order, user.id);
+    ? unreadCounts.get(order.id) ?? 0 : await pickupChatUnread(database, order, actorUserId(user));
   const signing = {
     findFile: (fileId) => findFile(orderStore, fileId),
     authorizeRead: (file) => authorizeFileRead(user, fileStore, file),
@@ -2261,7 +2316,7 @@ async function handleAuditedRequest(req, res) {
       res.gridgoCorsHeaders = {
         "Access-Control-Allow-Origin": requestOrigin,
         "Access-Control-Allow-Credentials": "true",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization, Last-Event-ID, Idempotency-Key, X-GRIDGO-Role, X-GRIDGO-App, If-Match",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, Last-Event-ID, Idempotency-Key, X-GRIDGO-Role, X-GRIDGO-Shop-Id, X-GRIDGO-App, If-Match",
         "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
         Vary: "Origin",
       };
@@ -2448,9 +2503,14 @@ async function handleAuditedRequest(req, res) {
     }
 
     await expireElapsedIssueWindows();
-    const notificationRead = req.method === 'GET' && ['/notifications', '/notifications/stream'].includes(pathname);
-    const hotRead = req.method === 'GET' && isHotReadPath(pathname);
+    let notificationRead = req.method === 'GET' && ['/notifications', '/notifications/stream'].includes(pathname);
+    let hotRead = req.method === 'GET' && isHotReadPath(pathname);
     const notificationClaims = notificationRead || hotRead ? await verifiedClerkClaimsFor(req) : null;
+    if ((hotRead || notificationRead) && notificationClaims?.claims?.sub) {
+      const team = await database.query(`SELECT 1 FROM shop_memberships m JOIN users u ON u.id=m.user_id
+        WHERE u.clerk_user_id=$1 AND (m.shop_id<>m.user_id OR m.status<>'active' OR m.role<>'owner') LIMIT 1`, [notificationClaims.claims.sub]);
+      if (team.rowCount) { hotRead = false; notificationRead = false; }
+    }
     let store = notificationRead
       ? await (pathname === '/notifications' ? loadInboxStore : loadNotificationStore)(database, notificationClaims?.claims?.sub || null, {
         limit: url.searchParams.get('limit'), role: url.searchParams.get('role') || req.headers['x-gridgo-role'], replay: pathname === '/notifications/stream',
@@ -2498,6 +2558,17 @@ async function handleAuditedRequest(req, res) {
       return send(res, 200, { staff: result.staff });
     }
 
+    if (req.method === 'POST' && ['/auth/shop-invites', '/auth/shop-invites/claim'].includes(pathname)) {
+      const verified = await verifiedClerkClaimsFor(req);
+      if (!verified?.claims?.sub) return send(res, 401, { error: 'unauthorized' });
+      const clerkUser = req.gridgoClerkUser?.clerkUser;
+      if (!clerkUser || clerkUser.id !== verified.claims.sub) return send(res, 502, { error: 'clerk_unavailable' });
+      res.setHeader('Cache-Control', 'private, no-store');
+      if (pathname === '/auth/shop-invites') return send(res, 200, { invites: discoverShopInvites(store, clerkUser, now()) });
+      const result = claimShopInvite({ store, claims: verified.claims, clerkUser, body: await readBody(req), id, at: now(), audit });
+      await save(store);
+      return send(res, 200, result);
+    }
     // ---- auth ----
     if (req.method === "POST" && ["/auth/login", "/auth/signup"].includes(pathname)) {
       return send(res, 404, { error: "not_found", path: pathname });
@@ -2505,6 +2576,8 @@ async function handleAuditedRequest(req, res) {
     if (req.method === "GET" && pathname === "/auth/me") {
       const auth = await authenticateRequest(req, store);
       if (!auth.user) return send(res, auth.status || 401, authFailureBody(auth));
+      const supplierBootstrap = shopBootstrap(req, store, auth.user, pathname);
+      if (supplierBootstrap) { res.setHeader('Cache-Control', 'private, no-store'); return send(res, 200, supplierBootstrap); }
       res.setHeader('Cache-Control', 'private, no-store');
       let clerkUser = null;
       try {
@@ -2557,6 +2630,8 @@ async function handleAuditedRequest(req, res) {
     if (req.method === "GET" && fixedAuthRole) {
       const auth = await authenticateRequest(req, store);
       if (!auth.user) return send(res, auth.status || 401, authFailureBody(auth));
+      const supplierBootstrap = fixedAuthRole === 'supplier' ? shopBootstrap(req, store, auth.user, pathname) : null;
+      if (supplierBootstrap) { res.setHeader('Cache-Control', 'private, no-store'); return send(res, 200, supplierBootstrap); }
       if (!contextHasMembership(auth.authorization, fixedAuthRole)) {
         if (fixedAuthRole === "supplier") {
           return send(res, 403, {
@@ -2573,7 +2648,7 @@ async function handleAuditedRequest(req, res) {
       await recordStaffSignIn(req, store, { ...auth.user, role: fixedAuthRole });
       if (fixedAuthRole === 'client') store = await refreshFoundingTester(store, auth.user.id);
       res.setHeader('Cache-Control', 'private, no-store');
-      return send(res, 200, fixedAuthProjection(store, auth, fixedAuthRole));
+      return send(res, 200, { ...fixedAuthProjection(store, auth, fixedAuthRole), ...(fixedAuthRole === 'supplier' ? { shop: shopSummary(store, selectedShop(store, auth.user, req.headers['x-gridgo-shop-id'])) } : {}) });
     }
 
     if (req.method === "POST" && pathname === "/auth/clerk/client-available") {
@@ -2699,6 +2774,12 @@ async function handleAuditedRequest(req, res) {
 
     const auth = await authenticateRequest(req, store);
     let user = auth.user;
+    const teamResponse = await routeShopTeam({ req, url, store, user, readBody, id, now, audit });
+    if (teamResponse) {
+      res.setHeader('Cache-Control', 'private, no-store');
+      if (teamResponse.mutated) await save(store);
+      return send(res, teamResponse.status, teamResponse.body);
+    }
     // All authenticated transition refusals, including common work/identity guards,
     // commit an audit before responding. Reload discards unsaved partial route edits.
     if (user && req.method === 'POST' && /^\/orders\/[^/]+\/transition$/.test(pathname)) {
@@ -2737,17 +2818,21 @@ async function handleAuditedRequest(req, res) {
     if (user) {
       const held = accountHoldDenial(user);
       if (held) return send(res, 403, held);
-      if (eventRole && (!EVENT_ROLES.includes(eventRole) || !hasRole(store,user.id,eventRole))) return send(res,403,{error:'forbidden'});
-      const auditSurface = pathname === '/audit' || /^\/orders\/[^/]+\/audit$/.test(pathname);
-      const inferredRole = !eventRole && auditSurface && isOps(user) ? (isSuper(user) ? 'super_admin' : 'ops_admin')
-        : !eventRole && !isOps(user) && (pathname === '/dispatch/offers' || (req.method === 'POST' && pathname.startsWith('/dispatch'))) && hasRole(store,user.id,'rider') ? 'rider'
-        : !eventRole && pathname === '/jobs' && hasRole(store,user.id,'supplier') ? 'supplier' : user.role;
-      const selectedRole = eventRole || inferredRole;
-      // Actor projection is never written into users.role. Other legacy user-field
-      // writes still target the actual row through this proxy.
-      user = selectActorRole(store, user, selectedRole, { restrictMemberships: Boolean(eventRole) });
+      const teamActor = shopRequestActor(req, store, user, eventRole);
+      if (teamActor) user = teamActor;
+      else {
+        if (eventRole && (!EVENT_ROLES.includes(eventRole) || !hasRole(store,user.id,eventRole))) return send(res,403,{error:'forbidden'});
+        const auditSurface = pathname === '/audit' || /^\/orders\/[^/]+\/audit$/.test(pathname);
+        const inferredRole = !eventRole && auditSurface && isOps(user) ? (isSuper(user) ? 'super_admin' : 'ops_admin')
+          : !eventRole && !isOps(user) && (pathname === '/dispatch/offers' || (req.method === 'POST' && pathname.startsWith('/dispatch'))) && hasRole(store,user.id,'rider') ? 'rider'
+          : !eventRole && pathname === '/jobs' && hasRole(store,user.id,'supplier') ? 'supplier' : user.role;
+        const selectedRole = eventRole || inferredRole;
+        // Actor projection is never written into users.role. Other legacy user-field
+        // writes still target the actual row through this proxy.
+        user = selectActorRole(store, user, selectedRole, { restrictMemberships: Boolean(eventRole) });
+      }
       if (/^\/(orders|jobs|dispatch|payouts|claims|issues|escalations|refund-requests)(\/|$)/.test(pathname)) {
-        if (!hasRole(store,user.id,selectedRole) || (['supplier','rider'].includes(selectedRole) && !approvedRole(store,user.id,selectedRole))) return send(res,403,{error:'forbidden'});
+        if (!hasRole(store,user.id,user.role) || (['supplier','rider'].includes(user.role) && !approvedRole(store,user.id,user.role))) return send(res,403,{error:'forbidden'});
       }
     }
 
@@ -3384,6 +3469,7 @@ async function handleAuditedRequest(req, res) {
           );
         }
         const purpose = String(fields.purpose || "");
+        assertStaffFile(user, store, null, { upload: true, purpose });
         authorizeFileUpload(user, purpose);
         if (fields.saveToMyFiles !== undefined && !['true', 'false'].includes(fields.saveToMyFiles)) {
           throw new AttachmentError(400, 'invalid_saved_file_choice', 'Send saveToMyFiles as true or false.');
@@ -3423,14 +3509,12 @@ async function handleAuditedRequest(req, res) {
 
         await enqueueMutation(async () => {
           const latestStore = await load();
-          const latestUser = selectActorRole(
-            latestStore, (await authenticateRequest(req, latestStore)).user, eventRole,
-            { restrictMemberships: Boolean(eventRole) },
-          );
+          const latestUser = requestActor(req, latestStore, (await authenticateRequest(req, latestStore)).user, eventRole);
           if (!latestUser) {
             throw new AttachmentError(401, "unauthorized", "Your sign-in expired. Sign in and upload the file again.");
           }
           authorizeFileUpload(latestUser, purpose);
+          pending.createdByUserId = actorUserId(latestUser);
           latestStore.files.push(pending);
           if (saveToMyFiles) {
             setFileSaved(latestStore, latestUser, fileId, true, createdAt, { pendingUpload: true });
@@ -3455,10 +3539,7 @@ async function handleAuditedRequest(req, res) {
         try {
           const ready = await enqueueMutation(async () => {
             const latestStore = await load();
-            const latestUser = selectActorRole(
-              latestStore, (await authenticateRequest(req, latestStore)).user, eventRole,
-              { restrictMemberships: Boolean(eventRole) },
-            );
+            const latestUser = requestActor(req, latestStore, (await authenticateRequest(req, latestStore)).user, eventRole);
             const latestFile = findFile(latestStore, fileId);
             if (!latestUser || latestUser.id !== pending.ownerId || !latestFile) {
               throw new AttachmentError(
@@ -3505,8 +3586,7 @@ async function handleAuditedRequest(req, res) {
       res.setHeader('Cache-Control', 'private, no-store, max-age=0');
       try {
         const authorize = async (current, file) => {
-          const actor = selectActorRole(current, (await authenticateRequest(req, current)).user, eventRole,
-            { restrictMemberships: Boolean(eventRole) });
+          const actor = requestActor(req, current, (await authenticateRequest(req, current)).user, eventRole);
           authorizeFileRead(actor, current, file);
         };
         await authorize(store, findFile(store, fileId));
@@ -3575,8 +3655,7 @@ async function handleAuditedRequest(req, res) {
         res.setHeader('Cache-Control', 'private, no-store');
         await enqueueMutation(async () => {
           const latest = await load();
-          const latestUser = selectActorRole(latest, (await authenticateRequest(req, latest)).user, eventRole,
-            { restrictMemberships: Boolean(eventRole) });
+          const latestUser = requestActor(req, latest, (await authenticateRequest(req, latest)).user, eventRole);
           const latestFile = findFile(latest, file.fileId);
           authorizeFileRead(latestUser, latest, latestFile);
           const orderIds = [...new Set((latestFile.references || []).filter(ref => ref.type === 'order').map(ref => ref.id))];
@@ -3607,10 +3686,7 @@ async function handleAuditedRequest(req, res) {
       }
       return await enqueueMutation(async () => {
         const latestStore = await load();
-        const latestUser = selectActorRole(
-          latestStore, (await authenticateRequest(req, latestStore)).user, eventRole,
-          { restrictMemberships: Boolean(eventRole) },
-        );
+        const latestUser = requestActor(req, latestStore, (await authenticateRequest(req, latestStore)).user, eventRole);
         if (!latestUser) {
           throw new AttachmentError(401, "unauthorized", "Your sign-in expired. Sign in and attach the file again.");
         }
@@ -3672,7 +3748,7 @@ async function handleAuditedRequest(req, res) {
             latestTarget.record.timeline.push({
               at: attachedAt,
               state: latestTarget.record.state,
-              by: latestUser.id,
+              by: actorUserId(latestUser),
               note: `Proof of Fulfilment attached for ${latestTarget.milestoneCode}`,
               fileId: latestFile.fileId,
               milestoneCode: latestTarget.milestoneCode,
@@ -3688,7 +3764,7 @@ async function handleAuditedRequest(req, res) {
               read: false, at: attachedAt,
             });
             if (riderPackingFlow(order)) {
-              const evidence = { at: attachedAt, by: latestUser.id, fileId: latestFile.fileId, inspectionId: order.pickupChecklist.inspectionId };
+              const evidence = { at: attachedAt, by: actorUserId(latestUser), fileId: latestFile.fileId, inspectionId: order.pickupChecklist.inspectionId };
               (order.shopHandover ||= {}).packingPhotos ||= [];
               order.shopHandover.packingPhotos.push(evidence);
               audit(latestStore, { actor: latestUser, action: 'order.rider_packing_photo', entityType: 'order', entityId: order.id,
@@ -3730,10 +3806,7 @@ async function handleAuditedRequest(req, res) {
       const fileId = pathname.split('/')[libraryRoute ? 3 : 2];
       if (libraryRoute) ownLibraryFile(store, user, fileId, { savedOnly: true });
       const deleted = await fileRetention.deleteEarly(fileId, async (latestStore) => {
-        const latestUser = selectActorRole(
-          latestStore, (await authenticateRequest(req, latestStore)).user, eventRole,
-          { restrictMemberships: Boolean(eventRole) },
-        );
+        const latestUser = requestActor(req, latestStore, (await authenticateRequest(req, latestStore)).user, eventRole);
         if (latestUser && accountHoldDenial(latestUser)) throw new AttachmentError(403, "forbidden");
         if (libraryRoute) ownLibraryFile(latestStore, latestUser, fileId, { savedOnly: true });
         return latestUser;
@@ -3786,7 +3859,7 @@ async function handleAuditedRequest(req, res) {
         });
       }
       const appRole = body.appRole || null;
-      if (appRole && (!EVENT_ROLES.includes(appRole) || !hasRole(store,user.id,appRole))) return send(res,403,{error:'forbidden'});
+      if (appRole && (!EVENT_ROLES.includes(appRole) || !(appRole === 'supplier' ? hasSupplierAppAccess(store, user.id) : hasRole(store,user.id,appRole)))) return send(res,403,{error:'forbidden'});
       const tokenProvider = body.tokenProvider || "fcm";
       if (!['fcm','apns'].includes(tokenProvider) || (tokenProvider === 'apns' && platform !== 'ios')) return send(res,400,{error:'invalid_token_provider'});
       // Absent means a build that predates the field: an APK install.
@@ -3833,6 +3906,7 @@ async function handleAuditedRequest(req, res) {
 
     // ---- notifications ----
     if (req.method === "GET" && pathname === "/notifications/stream") {
+      const streamShopId = user.shopId || (user.role === 'supplier' ? selectedShop(store, auth.user, req.headers['x-gridgo-shop-id'])?.shopId : null);
       const lastEventId = String(req.headers["last-event-id"] || "").trim();
       let resumeIndex = -1;
       if (lastEventId) {
@@ -3856,14 +3930,21 @@ async function handleAuditedRequest(req, res) {
       res.write("retry: 5000\n\n");
 
       const writeNotification = (notification, committedStore = store) => {
-        if (notification.push === false || !notificationVisible(committedStore, notification, user.id, eventRole)) return;
+        if (notification.push === false || !notificationVisible(committedStore, notification, user.id, eventRole, { shopId: streamShopId })) return;
         res.write(formatNotificationEvent(notification, orderFromNotification(committedStore, notification)));
       };
       const unsubscribe = notificationEvents.subscribe(user.id, writeNotification);
       const unsubscribeInvalidate = notificationEvents.subscribeInvalidate(user.id, (payload, committedStore = store) => {
         if (!invalidateFrameVisible(payload.resource, eventRole)) return;
         if (testOperations && !reviewSubject(committedStore, payload)) return;
-        if (eventRole && !hasRole(committedStore,user.id,eventRole) && payload.resource !== 'identity') return;
+        if (streamShopId && payload.resource === 'identity') {
+          const current = shopMembershipsFor(committedStore, user.id).find(m => m.shopId === streamShopId);
+          if (!current || current.status !== 'active') {
+            res.write('event: access_revoked\ndata: {"error":"shop_access_removed"}\n\n');
+            res.end(); return;
+          }
+        }
+        if (eventRole && !(eventRole === 'supplier' ? hasSupplierAppAccess(committedStore, user.id) : hasRole(committedStore,user.id,eventRole)) && payload.resource !== 'identity') return;
         if (payload.resource === 'calls' && !['delivery', 'pickup'].some(pair => callParty(
           { id: user.id, role: eventRole || user.role }, (committedStore.orders || []).find(o => o.id === payload.id), committedStore, pair))) return;
         if (payload.resource === 'location' && payload.id && !canAccessOrder(committedStore,user.id,(committedStore.orders || []).find(o=>o.id===payload.id),{role:eventRole,location:true})) return;
@@ -3884,10 +3965,18 @@ async function handleAuditedRequest(req, res) {
       // stream is bounded by NOTIFICATION_STREAM_MAX_MS so a revoked session
       // still has to present a fresh token to reconnect.
       const openedAt = Date.now();
-      const heartbeat = setInterval(() => {
+      const heartbeat = setInterval(async () => {
+        if (streamShopId) {
+          try {
+            const current = await database.query('SELECT status FROM shop_memberships WHERE shop_id=$1 AND user_id=$2', [streamShopId, user.id]);
+            if (current.rows[0]?.status !== 'active') {
+              res.write('event: access_revoked\ndata: {"error":"shop_access_removed"}\n\n'); res.end(); return;
+            }
+          } catch { res.end(); return; }
+        }
         if (Date.now() - openedAt >= NOTIFICATION_STREAM_MAX_MS) { res.end(); return; }
         res.write(`: heartbeat ${now()}\n\n`);
-      }, NOTIFICATION_HEARTBEAT_MS);
+      }, streamShopId ? Math.min(NOTIFICATION_HEARTBEAT_MS, 25_000) : NOTIFICATION_HEARTBEAT_MS);
       heartbeat.unref();
       let closed = false;
       const cleanup = () => {
@@ -3903,7 +3992,7 @@ async function handleAuditedRequest(req, res) {
     }
 
     if (req.method === "GET" && pathname === "/notifications") {
-      return send(res, 200, listInbox(store, user.id, { limit: url.searchParams.get("limit"), role:eventRole }));
+      return send(res, 200, listInbox(store, user.id, { limit: url.searchParams.get("limit"), role:eventRole, shopId: user.shopId }));
     }
 
     if (req.method === "PATCH" && pathname === "/notifications/read-all") {
@@ -3919,7 +4008,7 @@ async function handleAuditedRequest(req, res) {
       let updatedCount = 0;
       for (let index = 0; index <= snapshotIndex; index += 1) {
         const notification = store.notifications[index];
-        if (!notificationVisible(store,notification,user.id,eventRole) || notification.read) continue;
+        if (!notificationVisible(store,notification,user.id,eventRole, { shopId: user.shopId }) || notification.read) continue;
         notification.read = true;
         updatedCount += 1;
       }
@@ -3932,7 +4021,7 @@ async function handleAuditedRequest(req, res) {
       const notification = store.notifications.find((candidate) => candidate.id === notificationId);
       if (!notification) return send(res, 404, { error: "notification_not_found" });
       if (notification.userId !== user.id) return send(res, 403, { error: "forbidden" });
-      if (!notificationVisible(store, { ...notification, deletedAt: null }, user.id, eventRole)) {
+      if (!notificationVisible(store, { ...notification, deletedAt: null }, user.id, eventRole, { shopId: user.shopId })) {
         return send(res, 403, { error: "forbidden" });
       }
       if (notification.deletedAt != null) return send(res, 404, { error: "notification_not_found" });
@@ -3950,7 +4039,7 @@ async function handleAuditedRequest(req, res) {
       const notification = store.notifications.find((candidate) => candidate.id === notificationId);
       if (!notification) return send(res, 404, { error: "notification_not_found" });
       if (notification.userId !== user.id) return send(res, 403, { error: "forbidden" });
-      if (!notificationVisible(store, { ...notification, deletedAt: null }, user.id, eventRole)) {
+      if (!notificationVisible(store, { ...notification, deletedAt: null }, user.id, eventRole, { shopId: user.shopId })) {
         return send(res, 403, { error: "forbidden" });
       }
       if (notification.deletedAt == null) {
@@ -4032,7 +4121,7 @@ async function handleAuditedRequest(req, res) {
       if (!order.supplierId || timing.finishedAt || timing.pendingReview || !["payment_authorized", "production", "supplier_self_qc"].includes(order.state)
           || !productionLatenessTier(order, now(), false)) return send(res, 409, { error: "production_deadline_not_missed" });
       if (!order.productionNoCommunication) {
-        order.productionNoCommunication = { at: now(), by: user.id, reason };
+        order.productionNoCommunication = { at: now(), by: actorUserId(user), reason };
         audit(store, { actor: user, action: "production_lapse.no_communication", entityType: "order", entityId: order.id, orderId: order.id, reason });
         assessProductionLapses(store, { at: now(), createId: id, orderId: order.id });
         await save(store);
@@ -4297,7 +4386,7 @@ async function handleAuditedRequest(req, res) {
         reason: body.reason || "Pilot Credits grant",
         orderId: null,
         at: now(),
-        actorId: user.id,
+        actorId: actorUserId(user),
       };
       acct.ledger.push(entry);
       store.credits[clientId] = acct;
@@ -5243,7 +5332,7 @@ async function handleAuditedRequest(req, res) {
         createdAt: ts,
         updatedAt: ts,
         issueId: null,
-        timeline: [{ at: ts, action: body.hold === false ? "raised" : "raised_and_held", by: user.id, note: body.reason }],
+        timeline: [{ at: ts, action: body.hold === false ? "raised" : "raised_and_held", by: actorUserId(user), note: body.reason }],
       };
       store.claims.push(claim);
       order.payoutHold = claim.status === "payout_held";
@@ -5251,7 +5340,7 @@ async function handleAuditedRequest(req, res) {
       order.timeline.push({
         at: ts,
         state: order.state,
-        by: user.id,
+        by: actorUserId(user),
         note: claim.status === "payout_held" ? `Claim raised; payout held: ${body.reason}` : `Claim raised: ${body.reason}`,
       });
       audit(store, {
@@ -5296,12 +5385,12 @@ async function handleAuditedRequest(req, res) {
       claim.heldAt = ts;
       claim.heldBy = user.id;
       claim.updatedAt = ts;
-      claim.timeline.push({ at: ts, action: "hold", by: user.id, note: body.reason });
+      claim.timeline.push({ at: ts, action: "hold", by: actorUserId(user), note: body.reason });
       const order = store.orders.find((o) => o.id === claim.orderId);
       if (order) {
         order.payoutHold = true;
         order.updatedAt = ts;
-        order.timeline.push({ at: ts, state: order.state, by: user.id, note: `Payout held: ${body.reason}` });
+        order.timeline.push({ at: ts, state: order.state, by: actorUserId(user), note: `Payout held: ${body.reason}` });
       }
       audit(store, {
         actor: user,
@@ -5331,7 +5420,7 @@ async function handleAuditedRequest(req, res) {
       claim.releasedAt = ts;
       claim.releasedBy = user.id;
       claim.updatedAt = ts;
-      claim.timeline.push({ at: ts, action: "release", by: user.id, note: body.reason });
+      claim.timeline.push({ at: ts, action: "release", by: actorUserId(user), note: body.reason });
       const order = store.orders.find((o) => o.id === claim.orderId);
       if (order) {
         // clear hold only if no other active hold claims
@@ -5340,7 +5429,7 @@ async function handleAuditedRequest(req, res) {
         );
         order.payoutHold = other;
         order.updatedAt = ts;
-        order.timeline.push({ at: ts, state: order.state, by: user.id, note: `Payout hold released: ${body.reason}` });
+        order.timeline.push({ at: ts, state: order.state, by: actorUserId(user), note: `Payout hold released: ${body.reason}` });
       }
       audit(store, {
         actor: user,
@@ -5534,7 +5623,7 @@ async function handleAuditedRequest(req, res) {
       order.timeline.push({
         at: ts,
         state: order.state,
-        by: user.id,
+        by: actorUserId(user),
         note: `Material issue reported: ${issue.description}`,
       });
       audit(store, {
@@ -5628,7 +5717,7 @@ async function handleAuditedRequest(req, res) {
         order.timeline.push({
           at: ts,
           state: order.state,
-          by: user.id,
+          by: actorUserId(user),
           note: `Issue ${issue.status}: ${issue.resolution}`,
         });
         order.updatedAt = ts;
@@ -5642,7 +5731,7 @@ async function handleAuditedRequest(req, res) {
           claim.releasedAt = ts;
           claim.releasedBy = user.id;
           claim.updatedAt = ts;
-          claim.timeline.push({ at: ts, action: "release", by: user.id, note: claim.releaseReason });
+          claim.timeline.push({ at: ts, action: "release", by: actorUserId(user), note: claim.releaseReason });
           if (order) {
             const other = (store.claims || []).some(
               (c) => c.id !== claim.id && c.orderId === order.id && (c.status === "open" || c.status === "payout_held"),
@@ -5710,7 +5799,7 @@ async function handleAuditedRequest(req, res) {
         order.timeline.push({
           at: resolvedAt,
           state: order.state,
-          by: user.id,
+          by: actorUserId(user),
           note: `Pickup escalation resolved; repeat all six checks: ${resolution}`,
         });
         store.notifications.push({
@@ -5832,7 +5921,7 @@ async function handleAuditedRequest(req, res) {
       order.timeline.push({
         at: releasedAt,
         state: order.state,
-        by: user.id,
+        by: actorUserId(user),
         note: reference
           ? `${milestoneCode} supplier payout milestone released, reference ${reference}`
           : `${milestoneCode} supplier payout milestone released`,
@@ -5977,7 +6066,7 @@ async function handleAuditedRequest(req, res) {
       order.timeline.push({
         at: submittedAt,
         state: order.state,
-        by: user.id,
+        by: actorUserId(user),
         note: `${installmentCode === "initial" ? "Initial online payment" : "Final online payment"} submitted for Operations confirmation`,
       });
       audit(store, {
@@ -6050,7 +6139,7 @@ async function handleAuditedRequest(req, res) {
       order.timeline.push({
         at: rejectedAt,
         state: order.state,
-        by: user.id,
+        by: actorUserId(user),
         note: `${installmentCode === "initial" ? "Initial online payment" : "Final online payment"} rejected by Operations: ${reason}`,
       });
       audit(store, {
@@ -6087,7 +6176,7 @@ async function handleAuditedRequest(req, res) {
       }
       const body = await readBody(req);
       const confirmedAt = now();
-      if (installmentCode === 'initial') confirmVoucher(store, [order], { id, at: confirmedAt, actorId: user.id });
+      if (installmentCode === 'initial') confirmVoucher(store, [order], { id, at: confirmedAt, actorId: actorUserId(user) });
       const previousState = order.state;
       installment.status = "confirmed";
       installment.confirmedAt = confirmedAt;
@@ -6114,7 +6203,7 @@ async function handleAuditedRequest(req, res) {
       order.timeline.push({
         at: confirmedAt,
         state: order.state,
-        by: user.id,
+        by: actorUserId(user),
         note: `${installmentCode === "initial" ? "Initial online payment" : "Final online payment"} confirmed manually by Operations`,
       });
       if (order.state !== previousState) {
@@ -6298,7 +6387,7 @@ async function handleAuditedRequest(req, res) {
         deliveryPhotoFileIds: [],
         createdAt: ts,
         updatedAt: ts,
-        timeline: [{ at: ts, state: body.submit ? "submitted" : "draft", by: user.id, note: body.submit ? "Submitted" : "Draft saved" }],
+        timeline: [{ at: ts, state: body.submit ? "submitted" : "draft", by: actorUserId(user), note: body.submit ? "Submitted" : "Draft saved" }],
       };
       store.orders.unshift(order);
       await save(store);
@@ -6405,7 +6494,7 @@ async function handleAuditedRequest(req, res) {
       }
       // qaHold is display-only for Operations and Super Admin: nothing reads it as a gate yet.
       if (body.action === "hold") {
-        order.qaHold = { at: now(), by: user.id, reason: planned.reason };
+        order.qaHold = { at: now(), by: actorUserId(user), reason: planned.reason };
         order.updatedAt = order.qaHold.at;
       }
       const recorded = qaClientActionAudit(body.action, { note: planned.reason, threadId: posted.thread.id });
@@ -6423,6 +6512,11 @@ async function handleAuditedRequest(req, res) {
       const order = store.orders.find((o) => o.id === orderId);
       if (!order) return send(res, 404, { error: "order_not_found" });
       const next = body.state;
+      if (isShopStaff(user) && (Object.keys(body).some(key => !['state', 'note', 'reason', 'specialInstructionsRead'].includes(key))
+        || !['supplier_accepted', 'payment_authorized', 'approved_for_matching', 'production', 'supplier_self_qc', 'ready_for_dispatch', 'awaiting_collection'].includes(next))) {
+        return send(res, 403, { error: 'shop_owner_required' });
+      }
+
       const releasingProhibitedItem = prohibitedItemHold(order) && next === 'needs_qa' && isOps(user);
       const cancellingProhibitedReview = next === 'cancelled' && isReviewData(order)
         && (body.reasonCode === 'prohibited_item' || prohibitedItemHold(order));
@@ -6464,7 +6558,7 @@ async function handleAuditedRequest(req, res) {
         if (next === 'approved_for_matching') {
           const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
           if (!reason || reason.length > 2000) return send(res, 400, { error: 'shop_cancel_reason_required' });
-          recordShopFailure(store, order, { kind: 'declined', reason, at: now(), createId: id, actorId: user.id });
+          recordShopFailure(store, order, { kind: 'declined', reason, at: now(), createId: id, actorId: actorUserId(user) });
           await save(store);
           return send(res, 200, { order: await publicOrder(order, user, store) });
         }
@@ -6598,7 +6692,7 @@ async function handleAuditedRequest(req, res) {
             : [!productionPhotoFiles(store, order).length && 'production_photo_required',
               next === 'ready_for_dispatch' && !packingPhotoFiles(store, order).length && 'packing_photo_required'].filter(Boolean);
           if (readiness.receiptScan.required && !readiness.receiptScan.attached) skippedChecks.push('receipt_scan_required');
-          const forced = { at: now(), by: user.id, role: user.role, from: order.state, to: next,
+          const forced = { at: now(), by: actorUserId(user), role: user.role, from: order.state, to: next,
             reasonCode: body.reasonCode, note: body.reason.trim(), skippedChecks };
           (order.forcedSteps ||= []).push(forced);
           audit(store, {
@@ -6631,9 +6725,10 @@ async function handleAuditedRequest(req, res) {
         }
       }
       if (['supplier_accepted', 'payment_authorized'].includes(next) && order.shopAcceptance) {
-        order.shopAcceptance.status = 'accepted'; order.shopAcceptance.acceptedAt = now();
+        order.shopAcceptance.status = 'accepted'; order.shopAcceptance.acceptedAt = now(); order.shopAcceptance.acceptedBy = actorUserId(user);
       }
       if (next === "supplier_accepted") {
+        if (isShopStaff(user)) return send(res, 403, { error: 'shop_owner_required' });
         if (user.role !== "supplier" || !approvedRole(store,user.id,"supplier") || order.supplierId !== user.id) {
           return send(res, 403, {
             error: "forbidden",
@@ -6722,7 +6817,7 @@ async function handleAuditedRequest(req, res) {
         order.timeline.push({
           at: acceptedAt,
           state: "supplier_accepted",
-          by: user.id,
+          by: actorUserId(user),
           note: `Supplier issued final quote version ${quoteVersion}`,
         });
         order.state = "awaiting_checkout";
@@ -6836,7 +6931,7 @@ async function handleAuditedRequest(req, res) {
         order.timeline.push({
           at: committedAt,
           state: order.state,
-          by: user.id,
+          by: actorUserId(user),
           note: `Client accepted quote version ${quote.version}`,
         });
         audit(store, {
@@ -6927,7 +7022,7 @@ async function handleAuditedRequest(req, res) {
         audit(store, { actor: user, action: request.action, entityType: "order", entityId: order.id,
           orderId: order.id, reason: request.reason, detail: request.detail });
       }
-      order.timeline.push({ at: order.updatedAt, state: next, by: user.id, note: body.note || "",
+      order.timeline.push({ at: order.updatedAt, state: next, by: actorUserId(user), note: body.note || "",
         ...(next === "out_for_delivery" ? outsideHoursMark(order, store.settings, order.updatedAt) : {}) });
       if (next === "ready_for_dispatch" || next === "rider_assigned") {
         syncJobsWithOrder(store, order, order.updatedAt);
@@ -6963,7 +7058,7 @@ async function handleAuditedRequest(req, res) {
         const photos = finishedProductPhotos(store, order).filter(file => !(order.shopHandover.attempts || [])
           .some(attempt => attempt.finished.photoFileIds.includes(file.fileId)));
         if (!photos.length) return send(res, 409, { error: 'finished_product_photo_required' });
-        order.shopHandover.finished = { at, by: user.id, supplierId: order.supplierId, photoFileIds: photos.map(file => file.fileId) };
+        order.shopHandover.finished = { at, by: actorUserId(user), supplierId: order.supplierId, photoFileIds: photos.map(file => file.fileId) };
         order.shopHandover.review = null;
         order.state = 'supplier_self_qc';
         requestDeliveryPin(store, order, { at, id, audit, user });
@@ -6974,7 +7069,7 @@ async function handleAuditedRequest(req, res) {
         if (body.decision === 'rejected' && (typeof body.note !== 'string' || !body.note.trim())) return send(res, 400, { error: 'production_review_note_required' });
         const reviewPhotos = finishedProductPhotos(store, order);
         if (!order.shopHandover.finished.photoFileIds.every(fileId => reviewPhotos.some(file => file.fileId === fileId))) return send(res, 409, { error: 'finished_product_photo_required' });
-        order.shopHandover.review = { at, by: user.id, decision: body.decision, note: typeof body.note === 'string' ? body.note.trim().slice(0, 2000) : '' };
+        order.shopHandover.review = { at, by: actorUserId(user), decision: body.decision, note: typeof body.note === 'string' ? body.note.trim().slice(0, 2000) : '' };
         (order.shopHandover.attempts ||= []).push({ finished: structuredClone(order.shopHandover.finished), review: structuredClone(order.shopHandover.review) });
         if (body.decision === 'rejected') { order.state = 'production'; order.shopHandover.finished = null; }
         store.notifications.push({ id: id('ntf'), userId: order.supplierId, appRole: 'supplier', type: 'order_finished_reviewed',
@@ -6983,7 +7078,7 @@ async function handleAuditedRequest(req, res) {
         notifyAdmins(store, 'order_finished_reviewed', 'Finished-product review recorded', order, `review:${at}`, { createId: id, at });
       }
       order.updatedAt = at;
-      order.timeline.push({ at, state: order.state, by: user.id, note: review ? `Finished-product review: ${body.decision}` : 'Finished, unpacked products submitted for review' });
+      order.timeline.push({ at, state: order.state, by: actorUserId(user), note: review ? `Finished-product review: ${body.decision}` : 'Finished, unpacked products submitted for review' });
       audit(store, { actor: user, action: review ? 'order.production_review' : 'order.production_finished', entityType: 'order', entityId: order.id,
         orderId: order.id, detail: { finished: order.shopHandover.finished, review: order.shopHandover.review, attempt: order.shopHandover.attempts?.at(-1) || null } });
       notifyOrderParties(store, order, { createId: id, at });
@@ -7057,7 +7152,7 @@ async function handleAuditedRequest(req, res) {
       delete order.riderProgress;
       order.state = "rider_assigned";
       order.updatedAt = now();
-      order.timeline.push({ at: order.updatedAt, state: order.state, by: user.id, note: "Rider accepted" });
+      order.timeline.push({ at: order.updatedAt, state: order.state, by: actorUserId(user), note: "Rider accepted" });
       syncJobsWithOrder(store, order, order.updatedAt);
       notifyOrderParties(store, order, { createId: id, at: order.updatedAt });
       queueOrderInvalidate(store, order, ["dispatch", "orders", "jobs"]);
@@ -7199,7 +7294,7 @@ async function handleAuditedRequest(req, res) {
         order.timeline.push({
           at: checkedAt,
           state: order.state,
-          by: user.id,
+          by: actorUserId(user),
           note: `Pickup blocked and escalated: ${failedCheckCodes.join(", ")}`,
           escalationId: escalation.id,
           ...outsideHoursMark(order, store.settings, checkedAt),
@@ -7307,7 +7402,7 @@ async function handleAuditedRequest(req, res) {
       order.timeline.push({
         at: checkedAt,
         state: "picked_up",
-        by: user.id,
+        by: actorUserId(user),
         note: `All six pickup checks passed; ${signerName} signed the handoff on the rider's phone`,
         fileId: signatureFileId,
         ...outsideHoursMark(order, store.settings, checkedAt),
@@ -7526,7 +7621,7 @@ async function handleAuditedRequest(req, res) {
         order.timeline.push({
           at: deliveredAt,
           state: "awaiting_collection",
-          by: user.id,
+          by: actorUserId(user),
           note: "Left at GRIDGO Office for the client to collect",
           fileId: evidenceFileId,
           ...outsideHoursMark(order, store.settings, deliveredAt),

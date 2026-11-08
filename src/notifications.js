@@ -120,7 +120,7 @@ export function publicNotification(notification, order) {
 export function listInbox(store, userId, options = {}) {
   const cap = parseNotificationListLimit(options.limit);
   const owned = (store.notifications || [])
-    .filter((notification) => notificationVisible(store, notification, userId, options.role))
+    .filter((notification) => notificationVisible(store, notification, userId, options.role, { shopId: options.shopId }))
     .sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
   const ordersById = new Map((store.orders || []).map((order) => [order.id, order]));
   return {
@@ -328,6 +328,12 @@ export const EVENT_ROLES = Object.freeze(['client', 'supplier', 'rider', 'ops_ad
 export function hasRole(store, userId, role) {
   return (store.userRoleMemberships || []).some(m => m.userId === userId && m.role === role);
 }
+/** Supplier app access is separate from a supplier business membership. */
+export function hasSupplierAppAccess(store, userId) {
+  const memberships = (store.shopMemberships || []).filter(m => m.userId === userId);
+  return memberships.some(m => m.status === 'active' && hasRole(store, m.shopId, 'supplier'))
+    || (!memberships.some(m => m.shopId === userId) && hasRole(store, userId, 'supplier'));
+}
 export function approvedRole(store, userId, role) {
   if (!hasRole(store, userId, role)) return false;
   if (!['supplier', 'rider'].includes(role)) return true;
@@ -342,6 +348,12 @@ export function eligibleRiderIds(store) {
 }
 export function canAccessOrder(store, userId, order, {role, location = false, offer = false} = {}) {
   if (!order) return false;
+  if (!role || role === 'supplier') {
+    const person = store.users?.find(row => row.id === userId);
+    if ((person?.accountStatus || 'active') === 'active' && (store.shopMemberships || []).some(m => m.userId === userId && m.userId !== m.shopId && m.status === 'active'
+      && approvedRole(store, m.shopId, 'supplier') && supplierArtworkReleased(order)
+      && (order.supplierId === m.shopId || (!order.supplierId && !location && (store.orderJobs || []).filter(job => job.orderId === order.id && job.state !== 'cancelled').length > 1 && store.orderJobs?.some(job => job.orderId === order.id && job.supplierId === m.shopId && job.state !== 'cancelled'))))) return true;
+  }
   const roles = role ? [role] : EVENT_ROLES;
   return roles.some(r => {
     if (!hasRole(store,userId,r)) return false;
@@ -352,12 +364,21 @@ export function canAccessOrder(store, userId, order, {role, location = false, of
     return r === 'rider' && (order.riderId === userId || (!location && offer && sameReviewData(order, store.users?.find(u => u.id === userId)) && availableDispatch(order, store)));
   });
 }
-export function notificationVisible(store, notification, userId, role) {
+export function notificationVisible(store, notification, userId, role, { shopId = null } = {}) {
   if (!notification || notification.userId !== userId || notification.deletedAt != null) return false;
   // Test operations receive staff inbox rows only about review orders and accounts.
   if (isTestOperationsUser(store, userId) && !reviewSubject(store, notification)) return false;
-  if (role && !hasRole(store,userId,role)) return false;
+  if (role && !(role === 'supplier' ? hasSupplierAppAccess(store, userId) : hasRole(store,userId,role))) return false;
   const requiredRole = notification.appRole || (notification.type?.startsWith('shop_') ? 'supplier' : notification.type?.startsWith('ops_') ? 'ops_admin' : null);
+  // A former Owner keeps the business user ID; role demotion must also hide
+  // their historical money notifications. Selected Staff context never mixes
+  // in notices for another shop the same person happens to own.
+  const staffContext = (store.shopMemberships || []).find(m => m.userId === userId && m.shopId === (shopId || userId) && m.role === 'staff');
+  if (staffContext && (!requiredRole || requiredRole === 'supplier') && (!role || role === 'supplier')) {
+    if (staffContext.status !== 'active' || notification.type !== 'shop_job_assigned'
+      || (notification.shopId || orderFromNotification(store, notification)?.supplierId) !== staffContext.shopId) return false;
+  }
+
   const legacySuperSeesOps = requiredRole === "ops_admin"
     && (!role || role === "super_admin")
     && !hasRole(store, userId, "ops_admin")
@@ -367,7 +388,7 @@ export function notificationVisible(store, notification, userId, role) {
     // get a super_admin-appRole copy and must not see the ops copy in that inbox.
     if (!legacySuperSeesOps) return false;
   }
-  if (requiredRole && !hasRole(store,userId,requiredRole) && !(requiredRole==='ops_admin'&&hasRole(store,userId,'super_admin'))) return false;
+  if (requiredRole && !(requiredRole === 'supplier' ? hasSupplierAppAccess(store, userId) : hasRole(store,userId,requiredRole)) && !(requiredRole==='ops_admin'&&hasRole(store,userId,'super_admin'))) return false;
   if (notification.audienceRoles && !(role ? notification.audienceRoles.includes(role) && hasRole(store,userId,role) : notification.audienceRoles.some(r=>hasRole(store,userId,r)))) return false;
   if (notification.approvalCaseId) {
     const c = (store.approvalCases || []).find(c => c.id === notification.approvalCaseId);

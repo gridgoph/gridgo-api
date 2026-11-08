@@ -1,3 +1,4 @@
+import { actorUserId } from './shop-team.js';
 import { rescheduleHold } from './order-reschedule-policy.js';
 import { supplierArtworkReleased } from './artwork-gates.js';
 import { publicRecovery } from './shop-recovery-projection.js';
@@ -47,7 +48,7 @@ function reserveDifferenceRefund(store, order, move, { user, at, id, audit, dest
     deliveryEvidence: 'No delivery change.', disposition: 'price_adjustment', shopEntitlementMinor: move.pricing.newPriceMinor, riderEntitlementMinor: 0,
     principalMinor: amount, feeMinor: 0, deliveryMinor: 0, platformDeliveryMinor: 0, totalMinor: amount,
     snapshot: { moveId: move.id, recoveryId: move.recoveryId, originalPriceMinor: move.pricing.originalPriceMinor, newPriceMinor: move.pricing.newPriceMinor } });
-  store.refundEvents.push({ id: id('revent'), requestId: request.id, requestVersion: 1, actorId: user.id,
+  store.refundEvents.push({ id: id('revent'), requestId: request.id, requestVersion: 1, actorId: actorUserId(user),
     kind: 'shop_move_credit_reserved', reason: request.reason, createdAt: at, data: { moveId: move.id, recoveryId: move.recoveryId } });
   move.refundRequestId = request.id; move.refundStatus = 'reserved';
   audit(store, { actor: user, action: 'refund.shop_move_credit_reserved', entityType: 'refund_request', entityId: request.id,
@@ -102,7 +103,7 @@ export async function routeShopRecovery({ req, url, store, user, readBody, now, 
     if (!reason || reason.length > 2000) fail(400, 'shop_cancel_reason_required');
     const reasonCode = body.reasonCode ?? null;
     if (reasonCode !== null && (typeof reasonCode !== 'string' || !/^[a-z][a-z0-9_]{0,63}$/.test(reasonCode))) fail(400, 'invalid_shop_reason_code');
-    recordShopFailure(store, order, { reasonCode, kind: match[2] === 'decline' ? 'declined' : 'cancelled', reason, at, createId: id, actorId: user.id });
+    recordShopFailure(store, order, { reasonCode, kind: match[2] === 'decline' ? 'declined' : 'cancelled', reason, at, createId: id, actorId: actorUserId(user) });
   } else if (match[3] === 'start') {
     // Operations opens a recovery for lateness, a GRIDGO-caused move or a client-caused move.
     if (!ops) fail(403, 'forbidden');
@@ -113,7 +114,7 @@ export async function routeShopRecovery({ req, url, store, user, readBody, now, 
     if (body.cause === 'late' && !(LATE_STATES.has(order.state) && (order.productionReassignmentEligible === true || productionLatenessTier(order, at, false)))) {
       fail(409, 'shop_late_not_eligible');
     }
-    recordShopFailure(store, order, { kind: body.cause, reason, at, createId: id, actorId: user.id, actorRole: user.role });
+    recordShopFailure(store, order, { kind: body.cause, reason, at, createId: id, actorId: actorUserId(user), actorRole: user.role });
   } else {
     if (!ownClient) fail(403, 'forbidden');
     const recovery = order.shopRecovery;
@@ -180,7 +181,7 @@ export async function routeShopRecovery({ req, url, store, user, readBody, now, 
       }
       const move = { id: id('shop_move'), recoveryId: recovery.id, at, kind: recovery.kind || null, fault,
         fromSupplierId: recovery.originalSupplierId, toSupplierId: fresh.supplierId, optionId: chosen.optionId || null,
-        choice: chosen === proposed ? 'replacement' : 'alternative', paysDifference: pricing.clientPaysMinor > 0, actorId: user.id,
+        choice: chosen === proposed ? 'replacement' : 'alternative', paysDifference: pricing.clientPaysMinor > 0, actorId: actorUserId(user),
         status: 'applied', pricing, gridgoCoverMinor: pricing.gridgoCoverMinor, refundMinor: pricing.refundMinor,
         clientPaysMinor: pricing.clientPaysMinor, refundRequestId: null, refundStatus: null, topUpChangeRequestId: null };
       // The substitute is paid on its own price: cheaper reduces the stages, GRIDGO's cover raises them.

@@ -1,3 +1,4 @@
+import { staffOrderProjection } from './shop-staff-order.js';
 import { collectedVoucherFundingMinor } from './voucher-funding.js';
 import { DEFAULT_SAVED_FILES_LIMIT_BYTES } from './file-retention-policy.js';
 import { deliveryPackagePhotoId } from './delivery-package-photos.js';
@@ -1242,6 +1243,7 @@ function minimizePartyContact(value, rider = false) {
 export function publicOrderFor(order, user, store = null) {
   if (!order) return null;
   const publicRecord = clone(order);
+  delete publicRecord.actions;
   delete publicRecord.deliveryReminder;
   if (['ops_admin', 'super_admin'].includes(user?.role)
     || user?.role === 'rider' && user.id === order.riderId
@@ -1752,6 +1754,10 @@ export function publicOrderFor(order, user, store = null) {
   // The orders queue names the client. Only Operations and Super Admin receive
   // it. A shop, a rider, and the client keep the projection they already had.
   if (ops) publicRecord.clientName = clientNameFor(store, order.clientId);
+  if (ops || assignedSupplier) publicRecord.actions = (store?.orderActions || []).filter(row => row.orderId === order.id)
+    .sort((a, b) => a.at.localeCompare(b.at) || a.id.localeCompare(b.id))
+    .map(row => ({ id: row.id, at: row.at, action: row.action, actor: { userId: row.actorUserId, name: row.actorName, role: row.actorRole } }));
+  if (user?.shopRole === 'staff') return staffOrderProjection(publicRecord);
   return publicRecord;
 }
 
