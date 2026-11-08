@@ -9,6 +9,7 @@ import net from "node:net";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import os from "node:os";
+import pg from "pg";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 
 import { createDatabase } from "../src/database.js";
@@ -621,9 +622,61 @@ test("legacy verification decisions keep approval cases and fixed projections co
     assert.equal(approvedProjection.body.capabilities.receiveJobOffers, true);
     assert.equal(approvedProjection.body.capabilities.acceptJobs, true);
 
-    const suspended = await request(instance.api, "/users/user_supplier/verification", {
-      method: "POST", subject: "clerk_super", body: { status: "suspended", reason: "Quality hold" },
-    });
+    // The original CI failure acknowledged this decision before COMMIT, so the
+    // next projection sometimes still read "approved". Hold COMMIT itself to
+    // exercise that ordering deterministically, rather than relying on timing.
+    const commitGate = new pg.Client({ connectionString: DATABASE_URL });
+    let suspension;
+    let suspended;
+    try {
+      await commitGate.connect();
+      const { rows: [{ pid }] } = await commitGate.query(`
+        SELECT pg_backend_pid() AS pid,
+          pg_advisory_lock(hashtext('gridgo-test-verification-commit'))
+      `);
+      await database.query(`
+        CREATE FUNCTION gridgo_test_hold_verification_commit() RETURNS trigger
+        LANGUAGE plpgsql AS $$ BEGIN
+          PERFORM pg_advisory_xact_lock(hashtext('gridgo-test-verification-commit'));
+          RETURN NEW;
+        END $$
+      `);
+      await database.query(`
+        CREATE CONSTRAINT TRIGGER gridgo_test_hold_verification_commit
+        AFTER UPDATE ON approval_cases DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW WHEN (NEW.id = 'case_supplier' AND NEW.status = 'suspended')
+        EXECUTE FUNCTION gridgo_test_hold_verification_commit()
+      `);
+      suspension = request(instance.api, "/users/user_supplier/verification", {
+        method: "POST", subject: "clerk_super", body: { status: "suspended", reason: "Quality hold" },
+      }).then((response) => { suspended = response; });
+      // Observe the database lock, not a guessed delay. Attach a rejection
+      // handler immediately; the original promise is awaited during cleanup.
+      void suspension.catch(() => {});
+      let commitBlocked = false;
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        const { rows } = await database.query(`
+          SELECT 1 FROM pg_stat_activity
+          WHERE datname = current_database() AND query = 'COMMIT'
+            AND $1::integer = ANY(pg_blocking_pids(pid))
+        `, [pid]);
+        if (rows.length) { commitBlocked = true; break; }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      assert.equal(commitBlocked, true, "suspension must reach the deferred commit gate");
+      const duringCommit = await request(instance.api, "/auth/me/supplier", { subject: "clerk_supplier" });
+      assert.equal(duringCommit.status, 200, JSON.stringify(duringCommit.body));
+      assert.equal(duringCommit.body.approvalCase.status, "approved");
+      assert.equal(suspended, undefined, "verification response must wait for COMMIT");
+    } finally {
+      await commitGate.end(); // Releases the gate even if an assertion fails.
+      try {
+        await suspension;
+      } finally {
+        await database.query("DROP TRIGGER IF EXISTS gridgo_test_hold_verification_commit ON approval_cases");
+        await database.query("DROP FUNCTION IF EXISTS gridgo_test_hold_verification_commit()");
+      }
+    }
     assert.equal(suspended.status, 200, JSON.stringify(suspended.body));
     const suspendedProjection = await request(instance.api, "/auth/me/supplier", { subject: "clerk_supplier" });
     assert.equal(suspendedProjection.body.approvalCase.status, "suspended");
