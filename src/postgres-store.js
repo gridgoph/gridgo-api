@@ -1,6 +1,7 @@
 import { orderReadQuery, activeOrderSql, attachOrderRemovalContext } from './order-removal.js';
 import { artworkFileIdsFor } from './artwork-attachments.js';
-import { parseCatalogListQuery } from './catalog-routes.js';
+import { parseCatalogListQuery, parseStaffCatalogQuery } from './catalog-routes.js';
+import { isStaffDeskRead, readStaffDesk } from './staff-desk-reads.js';
 import { notificationVisible, parseNotificationListLimit, canAccessOrder, hasRole } from './notifications.js';
 import { isTestOperationsUser, testOperationsView } from './test-operations.js';
 import { identityHasMembership, selectActorRole } from './authorization-context.js';
@@ -1334,8 +1335,9 @@ const USER_READ = /^\/users(?:\/[^/]+(?:\/(?:verification-documents|payout-accou
 const AUDIT_READ = /^\/audit$|^\/orders\/[^/]+\/audit$/;
 const STAFF_ITEM_READ = /^\/ops\/catalog-items\/[^/]+$/;
 const ORDER_DETAIL_READ = /^\/orders\/[^/]+$/;
+const BASKET_READ = /^\/baskets(?:\/[^/]+(?:\/invoice)?)?$/;
 const QUOTE_READ = /^\/(me|ops)\/quote-requests(?:\/([^/]+))?$/;
-export function isHotReadPath(pathname) { return pathname === '/dispatch/offers' || OPS_QUEUE_READ.test(pathname) || USER_READ.test(pathname) || AUDIT_READ.test(pathname) || STAFF_ITEM_READ.test(pathname) || pathname === '/me/files' || HOT_READ_PATHS.has(pathname) || ORDER_DETAIL_READ.test(pathname) || isCatalogReadPath(pathname) || isOwnCatalogReadPath(pathname) || isCartReadPath(pathname) || MATCH_READ_PATHS.has(pathname) || FILE_READ.test(pathname) || QUOTE_READ.test(pathname); }
+export function isHotReadPath(pathname) { return BASKET_READ.test(pathname) || isStaffDeskRead(pathname) || pathname === '/dispatch/offers' || OPS_QUEUE_READ.test(pathname) || USER_READ.test(pathname) || AUDIT_READ.test(pathname) || STAFF_ITEM_READ.test(pathname) || pathname === '/me/files' || HOT_READ_PATHS.has(pathname) || ORDER_DETAIL_READ.test(pathname) || isCatalogReadPath(pathname) || isOwnCatalogReadPath(pathname) || isCartReadPath(pathname) || MATCH_READ_PATHS.has(pathname) || FILE_READ.test(pathname) || QUOTE_READ.test(pathname); }
 
 /** Queue SQL narrows candidates only; the existing role/review views and
  * handlers remain authoritative for visibility, ordering and errors.
@@ -1435,7 +1437,7 @@ async function readUserDirectory(graph, ids, pathname, params, role) {
  * In particular, an unassigned multi-shop order and a held dispatch offer need
  * their jobs/refund facts before visibility can be decided.
  */
-async function readOrderGraph(database, graph, pathname, { role, includeReviewData }) {
+async function readOrderGraph(database, graph, pathname, { role, includeReviewData, candidateIds = null, reportCollection = false }) {
   const { loaded, read } = graph;
   const identityStore = graph.finish();
   const raw = identityStore.users[0];
@@ -1459,12 +1461,14 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
       (SELECT order_id FROM order_jobs WHERE supplier_id = $1 AND state <> 'cancelled')))`;
     else if (selected === 'rider') ownership = `(rider_id = $1 OR (state = 'ready_for_dispatch' AND rider_id IS NULL AND review_data = $2))`;
   }
+  if (candidateIds) ownership = 'TRUE';
   // Keep $1 typed even on a staff/empty read, where ownership uses no parameter.
   let where = `WHERE $1::text IS NOT NULL AND (${ownership})`;
   if (dispatch || (selected === 'rider' && pathname !== '/jobs' && hasRole(identityStore, raw.id, selected))) values.push(raw.reviewData === true);
-  const reviewScope = dispatch ? '' : reviewOnly ? 'AND review_data' : staff && !detail && !includeReviewData ? 'AND NOT review_data' : '';
+  const reviewScope = dispatch ? '' : reviewOnly ? 'AND review_data' : staff && (!detail || reportCollection) && !includeReviewData ? 'AND NOT review_data' : '';
   where += ` ${reviewScope}`;
-  if (detail) { values.push(pathname.split('/')[2]); where += ` AND id = $${values.length}`; }
+  if (candidateIds) { values.push(candidateIds); where += ` AND id = ANY($${values.length}::text[])`; }
+  if (detail && !candidateIds) { values.push(pathname.split('/')[2]); where += ` AND id = $${values.length}`; }
   await read('orders', where, values);
   await read('platform_settings', 'WHERE singleton');
   let orderIds = loaded.orders.map(row => row.id);
@@ -1478,7 +1482,7 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
   }
   const candidates = graph.finish();
   const policyStore = reviewOnly ? testOperationsView(candidates, actor) : candidates;
-  const visible = new Set(policyStore.orders.filter(order => dispatch
+  const visible = new Set(policyStore.orders.filter(order => candidateIds ? true : dispatch
     ? (order.reviewData === (raw.reviewData === true) && availableDispatch(order, policyStore))
       || (!isContainedPickup(order) && !dispatchWorkHeld(policyStore, order) && order.state === 'rider_assigned' && order.riderId === raw.id)
     : pathname === '/jobs'
@@ -1493,7 +1497,7 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
     const store = graph.finish();
     // Preserve the existing 403 for a real, inaccessible detail without
     // hydrating its private graph. Test operations still sees hidden rows as 404.
-    if (detail) store.orderReadForbidden = (await database.query(
+    if (detail && !candidateIds) store.orderReadForbidden = (await database.query(
       `SELECT EXISTS (SELECT 1 FROM orders WHERE ${activeOrderSql('orders.id')} AND id = $1 ${reviewOnly ? 'AND review_data' : ''}) AS present`,
       [pathname.split('/')[2]],
     )).rows[0].present;
@@ -1573,7 +1577,7 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
     else if (staff && !detail && !dispatch) fileStore = reviewReportView(fileStore, includeReviewData);
     store.orderFileReadContext = { orders: fileStore.orders, orderJobs: fileStore.orderJobs, orderLineItems: fileStore.orderLineItems };
   }
-  if ((detail || dispatch) && ['ops_admin', 'super_admin'].includes(selected)) {
+  if ((detail || dispatch) && (['ops_admin', 'super_admin'].includes(selected) || (candidateIds && staff))) {
     // This existing staff-only field counts events across the reporting view,
     // not merely the opened order. Return only counts for the visible shops.
     const counts = await database.query(`SELECT event->'supplierId' AS supplier, count(*)::int AS count
@@ -1585,6 +1589,31 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
         [...new Set(loaded.orders.map(row => JSON.stringify([{ supplierId: row.supplier_id }])))] ]);
     store.shopArrivedPackedCounts = new Map(counts.rows.map(row => [row.supplier, row.count]));
   }
+  return store;
+}
+
+/** Baskets are one shared payment boundary; this is a read-only projection.
+ * Each basket hydrates its own groups through the existing order decoder.
+ */
+async function readBasketGraph(database, graph, ids, pathname, params, options) {
+  const { loaded,read }=graph,identity=graph.finish(),raw=identity.users[0];
+  if (!raw || (options.role && !hasRole(identity,raw.id,options.role))) return identity;
+  const actor=selectActorRole(identity,raw,options.role || raw.role,{restrictMemberships:Boolean(options.role)});
+  const staff=['ops_admin','super_admin'].some(role=>identityHasMembership(actor,role));
+  if (!staff && !identityHasMembership(actor,'client')) return identity;
+  const id=pathname.split('/')[2],reviewOnly=isTestOperationsUser(identity,raw.id),values=[raw.id];
+  let where=staff?'WHERE $1::text IS NOT NULL':'WHERE client_id=$1';
+  if(id){values.push(sqlReadText(id));where+=' AND id=$2';}
+  if(reviewOnly || (staff && !id && !options.includeReviewData)) where+=` AND NOT EXISTS (SELECT 1 FROM order_basket_groups g JOIN orders o ON o.id=g.order_id WHERE g.basket_id=order_baskets.id AND o.review_data=${reviewOnly?'false':'true'})`;
+  await read('order_baskets',where,values);
+  const baskets=loaded.order_baskets;
+  await read('order_basket_groups','WHERE basket_id = ANY($1::text[])',[baskets.map(r=>r.id)]);
+  const groups=loaded.order_basket_groups;
+  const store=await readOrderGraph(database,graph,'/orders/basket-read',{...options,candidateIds:groups.map(r=>r.order_id),reportCollection:!id});
+  loaded.order_baskets=baskets;loaded.order_basket_groups=groups;
+  await read('order_invoices','WHERE order_id = ANY($1::text[])',[baskets.map(r=>r.receipt_order_id)]);
+  const projection=graph.finish();
+  store.baskets=projection.baskets;store.orderInvoices=projection.orderInvoices;
   return store;
 }
 
@@ -1655,6 +1684,11 @@ export async function loadHotReadStore(database, clerkSubject, pathname, { after
     await read('users', 'WHERE clerk_user_id = $1', [clerkSubject]);
     const ids = loaded.users.map(row => row.id);
     await readIdentity(graph, ids);
+    if (BASKET_READ.test(pathname)) return readBasketGraph(database, graph, ids, pathname, searchParams, { role, includeReviewData });
+    if (isStaffDeskRead(pathname)) {
+      if (pathname === '/staff/me' && sessionHash) await read('audit_log', "WHERE actor_id = ANY($1::text[]) AND action = 'staff.sign_in' AND data->'detail'->>'sessionHash' = $2 LIMIT 1", [ids, sessionHash]);
+      return readStaffDesk(database, graph, ids, pathname, searchParams, { role, readIdentity, readCatalogItemContext, readCatalogueGraph, parseStaffCatalogQuery, newGraph: () => readGraph(database) });
+    }
     if (OPS_QUEUE_READ.test(pathname)) return readOperationsQueue(graph, ids, pathname, searchParams, role);
     if (USER_READ.test(pathname)) return readUserDirectory(graph, ids, pathname, searchParams, role);
     if (AUDIT_READ.test(pathname)) {

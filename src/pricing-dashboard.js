@@ -547,7 +547,7 @@ function matches(order, index, filters) {
 }
 
 /** Orders kept by the dashboard filters, each indexed once (no per-order scans). */
-function pricingSelection({ orders = [], lines = [], catalog = [], users = [], query = {} }) {
+function pricingSelection({ orders = [], lines = [], catalog = [], users = [], query = {}, readContext = null }) {
   orders = orders.filter(order => !isReviewData(order));
   const filters = {
     category: query.category || "",
@@ -559,8 +559,8 @@ function pricingSelection({ orders = [], lines = [], catalog = [], users = [], q
   for (const line of lines) if (!firstLine.has(line.orderId)) firstLine.set(line.orderId, line);
   const catalogById = new Map(catalog.map((item) => [item.id, item]));
   const usersById = new Map(users.map((user) => [user.id, user]));
-  const firstOrderAt = new Map();
-  for (const order of orders) {
+  const firstOrderAt = readContext?.firstOrderAt || new Map();
+  for (const order of readContext?.firstOrderAt ? [] : orders) {
     if (!order.createdAt) continue;
     const prior = firstOrderAt.get(order.clientId);
     if (!prior || order.createdAt < prior) firstOrderAt.set(order.clientId, order.createdAt);
@@ -583,6 +583,7 @@ function dashboardContext(input) {
   const ranges = pricingRanges(input.query, input.now);
   const { filters, selected } = pricingSelection(input);
   const scope = funnelScope({ filters, orders: input.orders, users: input.users, selectedOrderIds: selected.map((row) => row.order.id) });
+  if (input.readContext?.scope) Object.assign(scope, input.readContext.scope);
   scope.excludeReviewData = true;
   scope.reviewOrderIds = (input.orders || []).filter(isReviewData).map(row => row.id);
   const nowMs = Number.isFinite(Date.parse(input.now)) ? Date.parse(input.now) : Date.now();
@@ -596,12 +597,12 @@ function dashboardContext(input) {
  */
 export function pricingDashboard(input) {
   const {
-    audit = [], refundRequests = [], refunds = [], events = [], funnel = null,
+    audit = [], auditActivity = null, refundRequests = [], refunds = [], events = [], funnel = null,
     settings = {}, version = null, query = {}, now,
   } = input;
   const { ranges, filters, selected, scope, nowMs } = dashboardContext(input);
   const paymentFeeBps = Number.isInteger(settings.pricingPaymentFeeBps) ? settings.pricingPaymentFeeBps : null;
-  const ops = opsActivity(audit);
+  const ops = auditActivity ? new Map(auditActivity.map(row => [row.order_id, { count: row.count, first: row.at ? Date.parse(row.at) : null }])) : opsActivity(audit);
   const slice = (range, summary) => periodReport(
     selected.filter((row) => inRange(row.order.createdAt, range.from, range.to)),
     summary ?? funnelFromEvents(events, range, scope, nowMs),

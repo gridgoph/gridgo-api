@@ -475,6 +475,15 @@ Migration `1794157000000_order_removal_history_indexes` adds
 same concurrent procedure. These GIN `jsonb_path_ops` indexes support batched
 order-reference containment on Super Admin detail/list reads without scanning
 unrelated financial history; no retained snapshot is rewritten.
+Migration `1794173000000_staff_desk_reads` adds the catalogue staff-page,
+service-owner, assignment/latest-fix, received-sample and reschedule/hub-desk
+indexes. `1794173100000_staff_retention_reads` adds the private announcement
+image-reference lookup. Both use the same individual concurrent build procedure.
+Migration `1794173200000_staff_cursor_collation` adds the ICU comparison used
+only for opaque staff-catalogue cursors containing non-identifier characters;
+normal generated-ID cursors retain the existing page index/collation.
+`1794173300000_staff_report_reads` concurrently adds the pricing date-range
+and monthly-completion candidate indexes.
 Apply `npm run migrate` (node-pg-migrate up) to the dev database after merge and before running this API release.
 `pgm.noTransaction()` makes node-pg-migrate leave its default single transaction
 for these migrations only. Earlier migrations and completed index builds can
@@ -505,7 +514,12 @@ WHERE n.nspname = 'public' AND c.relname IN (
   'claims_status_idx', 'issues_status_idx', 'issues_client_idx',
   'escalations_order_idx', 'orders_arrived_packed_idx',
   'credit_ledger_order_refs_idx', 'voucher_reservations_order_refs_idx',
-  'voucher_redemptions_order_refs_idx', 'voucher_ledger_order_refs_idx'
+  'voucher_redemptions_order_refs_idx', 'voucher_ledger_order_refs_idx',
+  'catalog_staff_page_idx', 'supplier_services_owner_idx',
+  'location_pings_assignment_latest_idx', 'location_pings_received_samples_idx',
+  'orders_reschedule_desk_idx', 'orders_hub_escalation_desk_idx',
+  'orders_hub_unclaimed_desk_idx', 'notifications_image_reference_idx',
+  'orders_pricing_created_idx', 'orders_pricing_completed_idx', 'orders_pricing_timeline_idx'
 ) ORDER BY c.relname;
 
 SELECT format('REINDEX INDEX CONCURRENTLY %I.%I;', n.nspname, c.relname)
@@ -520,7 +534,12 @@ WHERE n.nspname = 'public' AND NOT i.indisvalid AND c.relname IN (
   'claims_status_idx', 'issues_status_idx', 'issues_client_idx',
   'escalations_order_idx', 'orders_arrived_packed_idx',
   'credit_ledger_order_refs_idx', 'voucher_reservations_order_refs_idx',
-  'voucher_redemptions_order_refs_idx', 'voucher_ledger_order_refs_idx'
+  'voucher_redemptions_order_refs_idx', 'voucher_ledger_order_refs_idx',
+  'catalog_staff_page_idx', 'supplier_services_owner_idx',
+  'location_pings_assignment_latest_idx', 'location_pings_received_samples_idx',
+  'orders_reschedule_desk_idx', 'orders_hub_escalation_desk_idx',
+  'orders_hub_unclaimed_desk_idx', 'notifications_image_reference_idx',
+  'orders_pricing_created_idx', 'orders_pricing_completed_idx', 'orders_pricing_timeline_idx'
 )
 \gexec
 SQL
