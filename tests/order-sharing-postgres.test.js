@@ -6,7 +6,7 @@ import { loadStore, saveStore } from '../src/postgres-store.js';
 import { fixture, id } from './fixtures/reschedule.js';
 import { resetDatabase } from './fixtures/reset-database.js';
 import { apiForTest } from './fixtures/reschedule-http.js';
-import { syncSurveys } from '../src/surveys.js';
+import { syncSurveys, submitSurvey } from '../src/surveys.js';
 import { publicOrderFor } from '../src/operational-model.js';
 import { retentionDecision } from '../src/file-retention-policy.js';
 import { gatherIssueEvidence } from '../src/issue-evidence.js';
@@ -261,10 +261,17 @@ test('PostgreSQL weekly dashboard counts Manila delivery cohorts and deduplicate
       if (index !== 0) store.deliveryReminders.push({ orderId, clientId: 'client', riderId, deliveredAt,
         protocolVersion: remindedClient ? 1 : 0, remindedClient, clientAgreedToPhoto: false, packagePhotoFileId: null });
     }
-    syncSurveys(store, { at: new Date().toISOString(), id });
+    // Seed historical answers at the cohort's clock: the real survey launch
+    // and seven-day response window must not age out these fixed ISO weeks.
+    const surveyAt = '2026-10-26T03:00:00.000Z';
+    store.surveyLaunchedAt = '2026-10-25T00:00:00.000Z';
+    syncSurveys(store, { at: surveyAt, id });
+    for (const index of [1, 2, 4]) {
+      const order = store.orders.find(row => row.id === `delivery-${index}`);
+      submitSurvey(store, order, answers, { at: surveyAt, id });
+    }
     await saveStore(db, store);
   });
-  for (const index of [1, 2, 4]) assert.equal((await api('client', 'POST', `/orders/delivery-${index}/survey`, answers)).status, 200);
   for (const [index, action] of [[1, 'share'], [1, 'share'], [2, 'send_to_friend'], [3, 'share'], [4, 'share']]) {
     assert.equal((await api('client', 'POST', `/orders/delivery-${index}/share/taps`, { eventId: crypto.randomUUID(), action })).status, 200);
   }
