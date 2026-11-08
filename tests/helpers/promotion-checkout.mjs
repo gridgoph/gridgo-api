@@ -9,12 +9,13 @@ export function liveCheckoutDeadline(at = Date.now()) {
   if (day.getUTCDay() === 0) day.setUTCDate(day.getUTCDate() + 1);
   return `${day.toISOString().slice(0, 10)}T10:00:00.000Z`;
 }
-export function checkoutFixture({ percent = 100, amount = 20000 } = {}) {
+export function checkoutFixture({ percent = 100, amount = 20000, promotionEndsAt } = {}) {
   const store = fixture();
   store.settings.downpaymentPercent = percent;
   store.settings.serviceFeeSchedule = { version: 2, rounding: 'half_up_once', brackets: [{ upToMinor: 200000, rateBps: 4500 }, { upToMinor: 2000000, rateBps: 2500 }, { upToMinor: null, rateBps: 1500 }] };
   store.promotionSettings = [{ id: 'launch', version: 1, settings: defaultPromotionSettings() }];
   store.promotionSettings[0].settings.founding.amountMinor = amount;
+  if (promotionEndsAt) store.promotionSettings[0].settings.founding.endsAt = promotionEndsAt;
   for (const [fileId, purpose] of [['artwork', 'artwork'], ['receipt', 'payment_proof']]) store.files.push({ fileId, purpose, ownerId: 'client', state: 'ready', objectKey: `private/${fileId}`, originalFilename: `${fileId}.pdf`, size: 100,
     declaredContentType: 'application/pdf', detectedContentType: 'application/pdf', artworkCheck: { status: 'passed', checkedAt: AT }, createdAt: AT, references: [] });
   claimFounding(store, 'client', { id, at: AT });
