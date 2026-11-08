@@ -616,6 +616,22 @@ async function placedOrder(t, { catalogItemId = "item_supplier_a", fulfillmentMo
   return { api, call, database, orderId: checkout.body.order.id, address, output: () => instance.output() };
 }
 
+test("client order list and detail expose the snapshotted subcategory for reorder", { skip: !DATABASE_URL }, async (t) => {
+  const { call, database, orderId } = await placedOrder(t);
+  const stored = (await loadStore(database)).orderLineItems.find(line => line.orderId === orderId);
+  assert.equal(stored.artworkGuidance.subcategoryCode, "flyers");
+  const client = { subject: "clerk_client" };
+  const detail = await call(`/orders/${orderId}`, client);
+  const list = await call("/orders", client);
+  assert.equal(detail.status, 200);
+  assert.equal(list.status, 200);
+  assert.equal(detail.body.order.productionItems[0].subcategoryCode, "flyers");
+  assert.equal(list.body.orders.find(order => order.id === orderId).productionItems[0].subcategoryCode, "flyers");
+  const staff = await call(`/orders/${orderId}`, { subject: "clerk_ops" });
+  assert.equal(staff.status, 200);
+  assert.equal(Object.hasOwn(staff.body.order.productionItems[0], "subcategoryCode"), false);
+});
+
 /**
  * The order lifecycle, end to end and in order: money, then artwork, then the
  * shop. Every step here used to be unreachable -- a checkout order landed at

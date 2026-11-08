@@ -756,6 +756,39 @@ test("production items show every assigned line and options without payment evid
 });
 
 
+test("client production items expose only the stored subcategory for reorder", () => {
+  const order = { id: "reorder", clientId: "client", supplierId: "supplier", riderId: "rider", timeline: [] };
+  const store = {
+    catalogItems: [{ id: "listing", subcategoryCode: "brochures" }],
+    orderLineItems: [{ id: "line", orderId: order.id, sourceCatalogItemId: "listing", quantity: 2,
+      artworkGuidance: { subcategoryCode: "flyers" } }],
+    orderLineItemOptions: [{ orderLineItemId: "line", groupNameSnapshot: "Size", optionLabelSnapshot: "A4" }],
+  };
+  const before = structuredClone({ order, store });
+  const item = publicOrderFor(order, { id: "client", role: "client" }, store).productionItems[0];
+  assert.equal(item.subcategoryCode, "flyers");
+  assert.deepEqual(item.options, [{ groupName: "Size", label: "A4" }]);
+  for (const role of ["supplier", "rider", "ops_admin", "super_admin"]) {
+    assert.equal(Object.hasOwn(publicOrderFor(order, { id: role, role }, store).productionItems[0], "subcategoryCode"), false);
+  }
+  assert.deepEqual(publicOrderFor(order, { id: "another-client", role: "client" }, store).productionItems, []);
+  assert.deepEqual({ order, store }, before);
+});
+
+test("client production items without a stored subcategory return null without guessing", () => {
+  const order = { id: "legacy", clientId: "client", productId: "flyers", timeline: [] };
+  const store = {
+    catalogItems: [{ id: "listing", subcategoryCode: "flyers" }],
+    orderLineItems: [undefined, null, {}, { subcategoryCode: null }, { subcategoryCode: 42 }]
+      .map((artworkGuidance, index) => ({ id: `line-${index}`, orderId: order.id, sourceCatalogItemId: "listing",
+        quantity: 1, artworkGuidance })),
+  };
+  const items = publicOrderFor(order, { id: "client", role: "client" }, store).productionItems;
+  assert.equal(items.length, 5);
+  assert.deepEqual(items.map(item => item.subcategoryCode), [null, null, null, null, null]);
+  assert.deepEqual(publicOrderFor(order, { id: "client", role: "client" }).productionItems, []);
+});
+
 test("production line visibility follows jobs ahead of legacy primary party ids", () => {
   const order = { id: "mixed", clientId: "client", supplierId: "supplier-a", riderId: "rider-a", timeline: [] };
   const store = {
