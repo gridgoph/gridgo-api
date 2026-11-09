@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import webpush from 'web-push';
-import { hasRole } from './notifications.js';
+import { hasSupplierAppAccess } from './notifications.js';
 
 // Subscription URLs are caller input. Only browser push services may receive
 // server requests; no redirects, arbitrary ports or credential-bearing URLs.
@@ -62,7 +62,7 @@ export async function unregisterWebSubscription(database, userId, endpoint) {
 
 export async function routeWebPush({ database, store, user, method, pathname, body, userAgent, delivery }) {
   if (!user) return { status: 401, body: { error: 'unauthorized' } };
-  if (!hasRole(store, user.id, 'supplier')) return { status: 403, body: { error: 'forbidden' } };
+  if (!hasSupplierAppAccess(store, user.id)) return { status: 403, body: { error: 'forbidden' } };
   if (method === 'GET' && pathname === '/web-push/public-key') {
     return delivery.configured
       ? { status: 200, body: { publicKey: delivery.publicKey } }

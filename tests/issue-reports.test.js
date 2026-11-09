@@ -892,6 +892,7 @@ test("a new public report notifies each Operations and Super Admin membership on
     await database.query(`DELETE FROM issue_reports WHERE issue = $1`, ["The reports desk does not refresh."]);
     await database.query(`DELETE FROM notifications WHERE user_id LIKE $1`, [`${prefix}%`]);
     await database.query(`DELETE FROM user_role_memberships WHERE user_id LIKE $1`, [`${prefix}%`]);
+    await database.query(`DELETE FROM shop_memberships WHERE user_id LIKE $1`, [`${prefix}%`]);
     await database.query(`DELETE FROM users WHERE id LIKE $1`, [`${prefix}%`]);
   }
   t.after(async () => {

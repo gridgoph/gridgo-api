@@ -1,3 +1,4 @@
+import { staffPageBody } from './staff-list-pages.js';
 import { notifyAdmins } from './domain-events.js';
 import { authorizationContextFor, contextHasMembership } from './authorization-context.js';
 import { createHash, randomBytes } from 'node:crypto';
@@ -70,7 +71,7 @@ export async function routeStaffAccess({ req, url, store, user, readBody, now, i
     notifyAdmins(store, action.replaceAll('.', '_'), 'Staff access updated', null, id('staff_event'), { createId: id, at });
   };
   if (path === '/admin/staff/roles') {
-    if (req.method === 'GET') return { status: 200, body: { roles: store.staffRoles } };
+    if (req.method === 'GET') return { status: 200, body: staffPageBody(store, url, { roles: store.staffRoles }) };
     if (req.method === 'POST') {
       const body = await readBody(req);
       if (typeof body.code !== 'string' || !/^[a-z][a-z0-9_]{1,39}$/.test(body.code) || typeof body.name !== 'string' || !body.name.trim() || body.name.length > 80 || typeof body.canHandout !== 'boolean') staffError(400, 'invalid_staff_role');
@@ -81,7 +82,7 @@ export async function routeStaffAccess({ req, url, store, user, readBody, now, i
     }
   }
   if (path === '/admin/staff/invites') {
-    if (req.method === 'GET') return { status: 200, body: { invites: store.staffInvites.map(({ codeHash, ...row }) => row) } };
+    if (req.method === 'GET') return { status: 200, body: staffPageBody(store, url, { invites: store.staffInvites.map(({ codeHash, ...row }) => row) }) };
     if (req.method === 'POST') {
       const body = await readBody(req);
       if (!store.staffRoles.some(r => r.code === body.roleCode)) staffError(400, 'invalid_staff_role');
@@ -101,7 +102,7 @@ export async function routeStaffAccess({ req, url, store, user, readBody, now, i
     if (!invite.revokedAt) { invite.revokedAt = at; record('staff.invite_revoked', invite.id, {}); }
     return { status: 200, body: { ok: true }, mutated: true };
   }
-  if (path === '/admin/staff' && req.method === 'GET') return { status: 200, body: { staff: store.staffProfiles.map(p => ({ ...p, name: store.users.find(u => u.id === p.userId)?.name })) } };
+  if (path === '/admin/staff' && req.method === 'GET') return { status: 200, body: staffPageBody(store, url, { staff: store.staffProfiles.map(p => ({ ...p, name: store.users.find(u => u.id === p.userId)?.name })) }) };
   const profilePath = path.match(/^\/admin\/staff\/([^/]+)$/);
   if (profilePath && req.method === 'PATCH') {
     const profile = store.staffProfiles.find(p => p.userId === profilePath[1]);

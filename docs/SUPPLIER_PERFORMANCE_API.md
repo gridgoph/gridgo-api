@@ -5,6 +5,9 @@ ships separately from the supplier app and dashboard views. All responses are
 private and require Clerk authentication with database memberships. No client
 release is required for the matching change.
 
+The outer `/ops/shops/performance` shop list supports optional
+[`limit`/`cursor` pages](STAFF_LIST_PAGINATION_API.md). Each selected shop's complete histories and metric inputs are retained.
+
 ## Warnings only
 
 From the migration's immutable rollout timestamp, **no new production deduction

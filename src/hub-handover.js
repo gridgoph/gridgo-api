@@ -1,3 +1,4 @@
+import { staffPageBody } from './staff-list-pages.js';
 import { assertRefundWorkAllowed } from './refund-policy.js';
 import { randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import { publicHubPickup } from './hub-pickup.js';
@@ -140,8 +141,8 @@ export async function routeHubHandover(context) {
       .sort((a, b) => `${b.at}|${b.fileId}`.localeCompare(`${a.at}|${a.fileId}`)).slice(0, limit);
     return { status: 200, body: { scans: rows, nextCursor: rows.length === limit ? `${rows.at(-1).at}|${rows.at(-1).fileId}` : null } };
   }
-  if (req.method === 'GET' && path === '/ops/hub/escalations') return { status: 200, body: { escalations: store.orders.filter(o => o.handover?.escalation).map(o => ({ ...summary(o), escalation: o.handover.escalation })) } };
-  if (req.method === 'GET' && path === '/ops/hub/unclaimed') return { status: 200, body: { orders: store.orders.filter(o => o.state === 'awaiting_collection' && o.handover?.qrToken).map(summary) } };
+  if (req.method === 'GET' && path === '/ops/hub/escalations') return { status: 200, body: staffPageBody(store, url, { escalations: store.orders.filter(o => o.handover?.escalation).map(o => ({ ...summary(o), escalation: o.handover.escalation })) }) };
+  if (req.method === 'GET' && path === '/ops/hub/unclaimed') return { status: 200, body: staffPageBody(store, url, { orders: store.orders.filter(o => o.state === 'awaiting_collection' && o.handover?.qrToken).map(summary) }) };
   if (req.method === 'GET' && ['/staff/hub/handouts', '/ops/hub/handouts'].includes(path)) {
     const rows = (store.hubHandouts || []).filter(r => path.startsWith('/ops/') || r.staffId === user.id);
     const staffTotals = Object.values(rows.reduce((all, row) => { const entry = all[row.staffId] ||= { staffId: row.staffId, name: row.staffName, count: 0 }; entry.count++; return all; }, {}));

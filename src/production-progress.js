@@ -82,6 +82,6 @@ export function supplierProgressTimeline(order) {
     if (entry.by === order.clientId || entry.state === 'delivered') note = progress || 'Client updated order';
     note = note.replace(/\b(production_started|packaging_qc|issue_window|printing|retention)\b/g,
       code => payoutStageLabel(code));
-    return { at: entry.at, state: entry.state, note };
+    return { at: entry.at, state: entry.state, note, ...(entry.actor ? { actor: entry.actor } : {}) };
   });
 }

@@ -2,6 +2,9 @@
 
 Backend contract for supplier issue 101. All routes require a Clerk bearer and current database membership. Dual-role callers should send `X-Gridgo-Role`. Mutations, request history, audit, notifications and money/work holds commit under the domain transaction lock.
 
+The Operations queue supports optional [`limit`/`cursor` pagination](STAFF_LIST_PAGINATION_API.md).
+`totalRequests` retains the complete supplier scope across statuses; unpaged responses remain complete.
+
 ## App and dashboard endpoints
 
 | Caller | Method and path | JSON body / query |

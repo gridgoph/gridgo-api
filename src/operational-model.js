@@ -1,3 +1,4 @@
+import { staffOrderProjection } from './shop-staff-order.js';
 import { orderRemovalBlock } from './order-removal.js';
 import { riderPacksMinimumBuilds, validateRiderPacksMinimumBuilds } from './app-builds.js';
 import { identityHasMembership } from './authorization-context.js';
@@ -1247,6 +1248,7 @@ function minimizePartyContact(value, rider = false) {
 export function publicOrderFor(order, user, store = null) {
   if (!order) return null;
   const publicRecord = clone(order);
+  delete publicRecord.actions;
   delete publicRecord.deliveryReminder;
   if (['ops_admin', 'super_admin'].includes(user?.role)
     || user?.role === 'rider' && user.id === order.riderId
@@ -1766,6 +1768,10 @@ export function publicOrderFor(order, user, store = null) {
     const blockedReason = orderRemovalBlock(store, order);
     publicRecord.removal = { allowed: blockedReason === null, blockedReason };
   }
+  if (ops || assignedSupplier) publicRecord.actions = (store?.orderActions || []).filter(row => row.orderId === order.id)
+    .sort((a, b) => a.at.localeCompare(b.at) || a.id.localeCompare(b.id))
+    .map(row => ({ id: row.id, at: row.at, action: row.action, actor: { userId: row.actorUserId, name: row.actorName, role: row.actorRole } }));
+  if (user?.shopRole === 'staff') return staffOrderProjection(publicRecord);
   return publicRecord;
 }
 

@@ -1,3 +1,4 @@
+import { STAFF_LIST_PAGE } from './staff-list-pages.js';
 import { isReviewData } from './review-data.js';
 
 // Test operations: an ops_admin identity whose own account is review data. It runs the
@@ -124,6 +125,7 @@ export function testOperationsView(store, viewer) {
   const visible = { users: new Set((store.users || []).filter(row => isReviewData(row) || row.id === viewer.id).map(row => row.id)) };
   visible.orders = new Set((store.orders || []).filter(isReviewData).map(row => row.id));
   const view = {};
+  if (store[STAFF_LIST_PAGE]) view[STAFF_LIST_PAGE] = store[STAFF_LIST_PAGE];
   const originals = new Map();
   const keep = (key, row) => {
     if (key === 'users') return visible.users.has(row.id);

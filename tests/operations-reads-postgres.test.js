@@ -98,7 +98,8 @@ test('Operations scoped reads reject saves and keep identical SQL/rows under unr
   const database = createDatabase(process.env); t.after(() => database.close()); await setupOperationsReads(database);
   const paths = ['/dispatch/offers', '/claims?orderId=a_active', '/claims/claim_a_active', '/issues?orderId=a_active', '/issues/issue_a_active',
     '/escalations?orderId=a_active', '/users?role=supplier', '/users/client', '/users/supplier/verification-documents', '/users/supplier/payout-account', '/audit', '/orders/a_active/audit', '/ops/catalog-items/item_supplier'];
-  const budgets = [34, 6, 6, 7, 7, 6, 10, 24, 10, 11, 4, 5, 27];
+  // Dispatch's Operations projection now includes one order-scoped actor-history read.
+  const budgets = [35, 6, 6, 7, 7, 6, 10, 24, 10, 11, 4, 5, 27];
   let beforeClientOrderIds;
   async function sample(reverseClientOrders = false) {
     const out = {};

@@ -1,3 +1,4 @@
+import { staffPageBody, STAFF_LIST_PAGE } from './staff-list-pages.js';
 import { changesFor, supplementTotals } from './order-change-policy.js';
 import { recoveryHeld, startShopAcceptance } from './shop-recovery.js';
 import { approvedRole, hasRole, privilegedAdminMemberships, queueOrderInvalidate, queueInvalidate } from './notifications.js';
@@ -82,10 +83,10 @@ export async function routeOrderReschedule({ req, url, store, user, readBody, no
     const supplierId = ops(user) ? url.searchParams.get('supplierId') : user.id;
     const status = url.searchParams.get('status');
     const selected = rows.filter((order) => !supplierId || order.rescheduleRequest.supplierId === supplierId);
-    return { status: 200, body: { totalRequests: selected.length,
+    return { status: 200, body: staffPageBody(store, url, { totalRequests: store[STAFF_LIST_PAGE]?.totalRequests ?? selected.length,
       requests: selected.filter((order) => !status || order.rescheduleRequest.status === status)
         .sort((a, b) => b.rescheduleRequest.requestedAt.localeCompare(a.rescheduleRequest.requestedAt))
-        .map((order) => publicReschedule(order, user)) } };
+        .map((order) => publicReschedule(order, user)) }) };
   }
   const order = store.orders.find((row) => row.id === match[1]);
   if (!order) fail(404, 'order_not_found', 'Order not found.');

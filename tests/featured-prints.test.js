@@ -244,6 +244,7 @@ test('PostgreSQL HTTP: roles, signed anonymous public read, version race, audit,
               : row.userId ? row.userId === fixtureRow.userId : row.supplierServiceId === fixtureRow.supplierServiceId));
         }
         store.notifications = store.notifications.filter(row => !userIds.includes(row.userId));
+        store.shopMemberships = store.shopMemberships.filter(row => !userIds.includes(row.userId) && !userIds.includes(row.shopId));
         store.supplierPaymentTerms = store.supplierPaymentTerms.filter(row => !userIds.includes(row.supplierId));
         if (originalSettings) store.settings = originalSettings;
         await saveStore(database, store);
