@@ -40,7 +40,7 @@ test('earlier pending foreign incidents preserve the own performance consequence
     return {response:{status:response.status,body:response.body},before};
   };
   const full=await run(true),scoped=await run(false);
-  assert.equal(full.before.event.data.topPickHiddenUntil,'2026-11-16T03:59:59.000Z');
+  assert.equal(full.before.event.data.topPickHiddenUntil,new Date(SAVE_AT-1000+7*86400000).toISOString());
   assert.equal(full.before.event.data.rosterReviewTriggered,true);
   assert.deepEqual(scoped,full);
 });

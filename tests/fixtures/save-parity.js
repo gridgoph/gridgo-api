@@ -3,8 +3,22 @@ import { setupOrders } from './order-reads.js';
 import { loadStore, saveStore } from '../../src/postgres-store.js';
 import { syncSupplierPerformance } from '../../src/supplier-performance.js';
 import { AT } from './reschedule.js';
+import { createDatabase } from '../../src/database.js';
 
-export const SAVE_AT = Date.parse('2026-11-09T04:00:00.000Z');
+async function saveClock() {
+  const original = Date.parse('2026-11-09T04:00:00.000Z');
+  if (!process.env.DATABASE_URL) return original;
+  const db = createDatabase(process.env);
+  try {
+    const { rows } = await db.query('SELECT launched_at FROM supplier_performance_launch WHERE singleton');
+    // Both parity runs share one frozen clock. Even the one-hour-earlier
+    // foreign incidents must follow this database's immutable launch timestamp.
+    return Math.max(original, Date.parse(rows[0].launched_at) + 2*3600000);
+  } finally {
+    await db.close();
+  }
+}
+export const SAVE_AT = await saveClock();
 export async function setupSaveParity(db) {
   await setupOrders(db);
   await db.transaction(async () => {
