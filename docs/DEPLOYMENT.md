@@ -507,6 +507,16 @@ before the revised scoped-save code; it adds no index or new duration formula.
 Migration `1794190500000_staff_list_pages` adds the opt-in staff list keyset/filter
 indexes with the same individual concurrent build procedure. See
 [staff pagination](STAFF_LIST_PAGINATION_API.md) for route coverage and legacy compatibility.
+Migration `1794217000000_reschedule_request_counts` initializes exact per-shop/global
+reschedule totals once under the domain lock and order/removal table locks.
+Transition-table triggers maintain insert/update deltas per statement; deletion,
+logical removal and truncate triggers preserve visibility and rollback semantics.
+`1794217010000_mixed_list_pages`, `1794217020000_aggregate_page_indexes`,
+`1794217030000_colour_worker_reads` and `1794217040000_ranking_clock_reads`
+add individual concurrent indexes for mixed lists, aggregate pages, finished-order
+clock summaries and selected colour-source/cart-reference probes. Basket
+page indexes are partial so unpaged queries retain their legacy enumeration.
+Apply all five before this release; no schema repair occurs at boot.
 Apply `npm run migrate` (node-pg-migrate up) to the dev database after merge and before running this API release.
 `pgm.noTransaction()` makes node-pg-migrate leave its default single transaction
 for these migrations only. Earlier migrations and completed index builds can
@@ -560,7 +570,30 @@ WHERE n.nspname = 'public' AND c.relname IN (
   'escalations_page_idx', 'escalations_status_page_idx',
   'season_windows_page_idx',
   'vouchers_client_expiry_idx', 'orders_reschedule_supplier_page_idx',
-  'orders_reschedule_status_page_idx', 'refund_requests_client_page_idx', 'orders_reschedule_count_idx'
+  'orders_reschedule_status_page_idx', 'refund_requests_client_page_idx', 'orders_reschedule_count_idx',
+  'orders_mixed_page_idx',
+  'orders_client_id_mixed_page_idx',
+  'orders_supplier_id_mixed_page_idx',
+  'orders_rider_id_mixed_page_idx',
+  'orders_review_data_mixed_page_idx',
+  'baskets_mixed_page_idx',
+  'baskets_client_id_mixed_page_idx',
+  'issues_mixed_page_idx',
+  'issues_client_id_mixed_page_idx',
+  'issues_order_id_mixed_page_idx',
+  'issues_status_mixed_page_idx',
+  'credits_mixed_page_idx',
+  'credits_user_id_mixed_page_idx',
+  'performance_history_page_idx',
+  'performance_no_fault_context_idx',
+  'promotion_invites_history_page_idx',
+  'promotion_claims_history_page_idx',
+  'ranking_review_totals_idx',
+  'ranking_listing_prices_idx',
+  'files_pending_colour_position_idx',
+  'cart_lines_artwork_source_idx',
+  'cart_lines_artwork_attachments_idx',
+  'ranking_finished_orders_idx'
 ) ORDER BY c.relname;
 
 SELECT format('REINDEX INDEX CONCURRENTLY %I.%I;', n.nspname, c.relname)
@@ -598,7 +631,30 @@ WHERE n.nspname = 'public' AND NOT i.indisvalid AND c.relname IN (
   'escalations_page_idx', 'escalations_status_page_idx',
   'season_windows_page_idx',
   'vouchers_client_expiry_idx', 'orders_reschedule_supplier_page_idx',
-  'orders_reschedule_status_page_idx', 'refund_requests_client_page_idx', 'orders_reschedule_count_idx'
+  'orders_reschedule_status_page_idx', 'refund_requests_client_page_idx', 'orders_reschedule_count_idx',
+  'orders_mixed_page_idx',
+  'orders_client_id_mixed_page_idx',
+  'orders_supplier_id_mixed_page_idx',
+  'orders_rider_id_mixed_page_idx',
+  'orders_review_data_mixed_page_idx',
+  'baskets_mixed_page_idx',
+  'baskets_client_id_mixed_page_idx',
+  'issues_mixed_page_idx',
+  'issues_client_id_mixed_page_idx',
+  'issues_order_id_mixed_page_idx',
+  'issues_status_mixed_page_idx',
+  'credits_mixed_page_idx',
+  'credits_user_id_mixed_page_idx',
+  'performance_history_page_idx',
+  'performance_no_fault_context_idx',
+  'promotion_invites_history_page_idx',
+  'promotion_claims_history_page_idx',
+  'ranking_review_totals_idx',
+  'ranking_listing_prices_idx',
+  'files_pending_colour_position_idx',
+  'cart_lines_artwork_source_idx',
+  'cart_lines_artwork_attachments_idx',
+  'ranking_finished_orders_idx'
 )
 \gexec
 SQL
@@ -665,3 +721,21 @@ Retain the statistics for before/after comparisons; do not reset them during a
 release. Query text is normalized, but access to these statistics remains an
 operator privilege. Production acceptance for issue 307 still requires actual
 API request-log measurements after the dev release and production rollout.
+
+The startup-read slice also scopes `GET /me/legal/pending`, `/support-chat/me`
+(and its `/api` alias), `/featured-prints`, `/season-windows`, and authenticated
+`GET /devices`. Legal acceptances and chat rows still come from their existing
+per-user SQL handlers on every read; there is no shared authorization or consent
+cache. Featured Prints loads only the curated listings, their current/approved
+service and photo facts, and shop eligibility. Season reads omit expired windows
+using the same inclusive Manila day as the public projection. Device listings
+read only the caller's registrations with the existing owner index.
+
+`tests/startup-reads-postgres.test.js` compares frozen-clock HTTP bodies against
+the full-store dispatcher across roles, review users and anonymous/unknown
+identities. Its 2,000/20,000-notification fixture asserts identical scoped graph
+rows and rejects inbox/audit/location/outbox reads; diagnostics record timings
+without imposing a flaky shared-runner latency threshold. The existing shop-team
+fallback remains unchanged. Authenticated device **writes** retain their existing
+full-store transaction and `save()` maintenance boundary; they are not covered
+by this read-only optimization.

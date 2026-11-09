@@ -33,6 +33,7 @@ import { organizationFeeMoney } from './organization-money.js';
 import { riderPackingFlow, finishedProductPhotos, currentInspection, inspectedPackingPhotos, claimBlocksHandover, handoverRequirements } from './shop-handover.js';
 import { createArtworkPreviews, isPreviewDocument, logPreviewFailure } from './artwork-preview.js';
 import { appendAudit, deriveMissingAudit, readAudit, setAuditActor, withAuditRequest } from './audit.js';
+import { parseGridgoApp, riderPacksMinimumBuilds, isRiderCustodyRoute, riderPacksUpdateRequired } from './app-builds.js';
 import { syncSupplierInvoiceExpectations, routeSupplierInvoices } from './supplier-invoices.js';
 import { routeSurveys } from './survey-routes.js';
 import { routeOrderSharing } from './order-sharing.js';
@@ -325,6 +326,9 @@ import {
   loadClientSaveStore,
   loadClientSavePreflightStore,
   loadStore,
+  loadUploadIntakeStore,
+  loadColourSourceStore,
+  loadColourSaveStore,
   loadClientBootstrapStore,
   loadProductionSweepStore,
   originalNotificationIds,
@@ -347,7 +351,8 @@ const BUILD_TIME = process.env.GRIDGO_BUILD_TIME || "unknown";
 const ALLOWED_ORIGINS = parseAllowedOrigins(process.env);
 validateProductionServerEnvironment(process.env, ALLOWED_ORIGINS);
 const objectStorage = createObjectStorage(process.env);
-const drainColourAnalyses = createColourWorker({ database, storage: objectStorage, load: () => load(), save: store => save(store), now, id });
+const drainColourAnalyses = createColourWorker({ database, storage: objectStorage, load: () => load(),
+  loadSource: fileId => loadColourSourceStore(database, fileId), loadForSave: file => loadColourSaveStore(database, file), save: store => save(store), now, id });
 const artworkPreviews = createArtworkPreviews({ database, storage: objectStorage, load: () => load(), save: store => save(store), now });
 // Push is optional configuration, not a startup requirement. A hosted pilot
 // without a usable service-account file must still serve every route — the
@@ -901,6 +906,7 @@ function publicOperationalSettings(settings, store = null, user = null) {
   if (file) paymentQr.imageUrl = `${PAYMENT_QR_PUBLIC_PATH}?v=${encodeURIComponent(file.fileId)}`;
   return {
     ...rest,
+    riderPacksMinimumBuilds: riderPacksMinimumBuilds(settings),
     foundingTesterLaunchAt: rest.foundingTesterLaunchAt ?? null,
     testerMonthlyBudgetMinor: rest.testerMonthlyBudgetMinor ?? null,
     testerSignupFormUrlTemplate: rest.testerSignupFormUrlTemplate ?? null,
@@ -2319,6 +2325,16 @@ const TRANSITIONS = {
   completed: { payout_released: ["ops_admin", "super_admin"] },
 };
 
+async function custodyAppUpdateRequired(req, pathname) {
+  const app = parseGridgoApp(req.headers['x-gridgo-app']);
+  if (app?.app !== 'rider' || !isRiderCustodyRoute(req.method, pathname)) return null;
+  // Keep every custody route authenticated. Verify without recording a sign-in
+  // or resolving domain authorization until the compatibility check passes.
+  if (!(await verifiedClerkClaimsFor(req))?.claims?.sub) return null;
+  const body = req.method === 'POST' ? await readBody(req) : null;
+  return riderPacksUpdateRequired(database, app, req.method, pathname, body);
+}
+
 function handleRequest(req, res) {
   return withAuditRequest(req, () => handleAuditedRequest(req, res));
 }
@@ -2362,6 +2378,13 @@ async function handleAuditedRequest(req, res) {
         at: now(),
       });
     }
+    if (req.method === 'GET' && pathname === '/app-minimum-builds') {
+      const { rows: [row] } = await database.query('SELECT version, settings FROM platform_settings WHERE singleton');
+      res.setHeader('Cache-Control', 'no-store');
+      return send(res, 200, { version: row?.version ?? 3, minimumBuilds: riderPacksMinimumBuilds(row?.settings) });
+    }
+    const appUpdate = req.gridgoAppUpdateRequired || await custodyAppUpdateRequired(req, pathname);
+    if (appUpdate) return send(res, 426, appUpdate);
     if (await testOperationsSession(req) && !testOperationsRouteAllowed(req.method, pathname)) {
       return send(res, 403, ORDER_REMOVAL_ROUTE.test(pathname) ? { error: 'forbidden' } : TEST_OPERATIONS_FORBIDDEN);
     }
@@ -2565,12 +2588,16 @@ async function handleAuditedRequest(req, res) {
         WHERE u.clerk_user_id=$1 AND (m.shop_id<>m.user_id OR m.status<>'active' OR m.role<>'owner') LIMIT 1`, [notificationClaims.claims.sub]);
       if (team.rowCount) { hotRead = false; notificationRead = false; }
     }
-    let store = notificationRead
+    const uploadIntake = req.method === 'POST' && pathname === '/files';
+    let store = uploadIntake
+      ? await loadUploadIntakeStore(database, (await verifiedClerkClaimsFor(req))?.claims?.sub || null)
+      : notificationRead
       ? await (pathname === '/notifications' ? loadInboxStore : loadNotificationStore)(database, notificationClaims?.claims?.sub || null, {
         limit: url.searchParams.get('limit'), role: url.searchParams.get('role') || req.headers['x-gridgo-role'], replay: pathname === '/notifications/stream',
         lastEventId: pathname === '/notifications/stream' ? String(req.headers['last-event-id'] || '').trim() || null : null,
       })
       : hotRead ? await loadHotReadStore(database, notificationClaims?.claims?.sub || null, pathname, {
+        at: now(),
         after: url.searchParams.get('after') || '', status: url.searchParams.get('status'), searchParams: url.searchParams,
         role: req.headers['x-gridgo-role'], includeReviewData: url.searchParams.get('includeReviewData') === '1',
         sessionHash: notificationClaims?.claims?.sid ? crypto.createHash('sha256').update(notificationClaims.claims.sid).digest('hex') : null,
@@ -3220,6 +3247,12 @@ async function handleAuditedRequest(req, res) {
     if (req.method === "GET" && pathname === "/admin/shop-rankings") {
       if (!isOps(user)) return send(res, 403, { error: "forbidden" });
       const categoryCode = String(url.searchParams.get("categoryCode") || "").trim() || null;
+      const rankedPage=store[STAFF_LIST_PAGE];
+      if(rankedPage?.rankTable) {
+        if(categoryCode && !rankedPage.rankTable.categories.some(row=>row.code===categoryCode)) return send(res,400,{error:'invalid_category_code',code:categoryCode});
+        if(rankedPage.error) throw rankedPage.error;
+        return send(res,200,rankedPage.rankTable);
+      }
       const board = shopScoreboard(store);
       if (categoryCode && !board.categories.some((row) => row.code === categoryCode)) {
         return send(res, 400, { error: "invalid_category_code", code: categoryCode });
@@ -3596,7 +3629,7 @@ async function handleAuditedRequest(req, res) {
         if (artworkCheck) pending.artworkCheck = artworkCheck;
 
         await enqueueMutation(async () => {
-          const latestStore = await load();
+          const latestStore = await loadClientSaveStore(database, (await verifiedClerkClaimsFor(req))?.claims?.sub || null, '/files', { fileId }) || await load();
           const latestUser = requestActor(req, latestStore, (await authenticateRequest(req, latestStore)).user, eventRole);
           if (!latestUser) {
             throw new AttachmentError(401, "unauthorized", "Your sign-in expired. Sign in and upload the file again.");
@@ -3626,7 +3659,7 @@ async function handleAuditedRequest(req, res) {
         }
         try {
           const ready = await enqueueMutation(async () => {
-            const latestStore = await load();
+            const latestStore = await loadClientSaveStore(database, (await verifiedClerkClaimsFor(req))?.claims?.sub || null, '/files', { fileId }) || await load();
             const latestUser = requestActor(req, latestStore, (await authenticateRequest(req, latestStore)).user, eventRole);
             const latestFile = findFile(latestStore, fileId);
             if (!latestUser || latestUser.id !== pending.ownerId || !latestFile) {
@@ -3654,7 +3687,7 @@ async function handleAuditedRequest(req, res) {
               // Original upload remains usable even when rendering/storage fails.
               logPreviewFailure(fileId, 'upload', error);
             }
-            try { ready.preview = findFile(await load(), fileId)?.preview; }
+            try { ready.preview = findFile(await loadHotReadStore(database, (await verifiedClerkClaimsFor(req))?.claims?.sub || null, `/files/${fileId}`), fileId)?.preview; }
             catch (error) { logPreviewFailure(fileId, 'upload_metadata', error); }
           }
           // A fileId is the readiness signal and is returned only after PutObject and ready metadata both persist.
@@ -3773,6 +3806,8 @@ async function handleAuditedRequest(req, res) {
         );
       }
       return await enqueueMutation(async () => {
+        const appUpdate = await custodyAppUpdateRequired(req, pathname);
+        if (appUpdate) return send(res, 426, appUpdate);
         const latestStore = await load();
         const latestUser = requestActor(req, latestStore, (await authenticateRequest(req, latestStore)).user, eventRole);
         if (!latestUser) {
@@ -4255,6 +4290,8 @@ async function handleAuditedRequest(req, res) {
       }
       const next = {
         ...store.settings,
+        riderPacksMinimumBuilds: Object.hasOwn(body, 'riderPacksMinimumBuilds')
+          ? body.riderPacksMinimumBuilds : riderPacksMinimumBuilds(store.settings),
         testerMonthlyBudgetMinor: Object.hasOwn(body, 'testerMonthlyBudgetMinor') ? body.testerMonthlyBudgetMinor : (store.settings.testerMonthlyBudgetMinor ?? null),
         testerSignupFormUrlTemplate: Object.hasOwn(body, 'testerSignupFormUrlTemplate') ? body.testerSignupFormUrlTemplate : (store.settings.testerSignupFormUrlTemplate ?? null),
         foundingTesterLaunchAt: Object.hasOwn(body, 'foundingTesterLaunchAt') ? body.foundingTesterLaunchAt : (store.settings.foundingTesterLaunchAt ?? null),
@@ -4446,7 +4483,7 @@ async function handleAuditedRequest(req, res) {
         return send(res, 403, { error: "forbidden" });
       }
       const acct = store.credits[clientId] || { balanceMinor: 0, ledger: [] };
-      return send(res, 200, { clientId, balanceMinor: acct.balanceMinor, ledger: acct.ledger });
+      return send(res, 200, staffPageBody(store, url, { clientId, balanceMinor: acct.balanceMinor, ledger: acct.ledger }));
     }
 
     if (req.method === "POST" && pathname === "/credits/authorize") {
@@ -5553,7 +5590,7 @@ async function handleAuditedRequest(req, res) {
       if (orderId) list = list.filter((i) => i.orderId === orderId);
       if (status) list = list.filter((i) => i.status === status);
       list = [...list].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
-      return send(res, 200, { issues: list.map(issue => publicIssue(issue, user)) });
+      return send(res, 200, staffPageBody(store, url, { issues: list.map(issue => publicIssue(issue, user)) }));
     }
 
     /**
@@ -6368,7 +6405,7 @@ async function handleAuditedRequest(req, res) {
     }
 
     if (req.method === "GET" && pathname === "/orders") {
-      return send(res, 200, { orders: await publicOrderList(ordersFor(user, store), user, store) });
+      return send(res, 200, staffPageBody(store, url, { orders: await publicOrderList(ordersFor(user, store), user, store) }));
     }
 
     if (req.method === "GET" && pathname.startsWith("/orders/")) {
@@ -7965,6 +8002,13 @@ const server = http.createServer((req, res) => {
       .then(() => verifyClerkBeforeMutation(req, pathname))
       .then(async (verified) => {
         if (!verified?.claims?.sub) return handleRequest(req, res);
+        const appUpdate = await custodyAppUpdateRequired(req, pathname);
+        if (appUpdate) {
+          // Refuse before opening the domain mutation transaction. The handler
+          // still applies its normal CORS policy, using this request's verdict.
+          req.gridgoAppUpdateRequired = appUpdate;
+          return handleRequest(req, res);
+        }
         if (isCartArtworkWrite(req.method, pathname)) {
           const body = await readBody(req);
           if (hasShortArtworkLinks(body?.artworkAttachments ?? body?.artworkLinks)) {

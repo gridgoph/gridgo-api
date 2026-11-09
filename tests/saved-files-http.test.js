@@ -95,8 +95,8 @@ test('HTTP quota serializes competing saves and Super Admin limit uses the setti
 
 test('HTTP upload can save at intake; refused uploads and non-artwork never reserve library space', { skip: !DATABASE_URL }, async t => {
   const { db, mutate } = await setup(t);
-  const sizes = new Map();
-  const api = await apiForTest(t, {}, { storageHandler: (req, res) => {
+  const sizes = new Map(); let output='';
+  const api = await apiForTest(t, {}, { onOutput:chunk=>{output+=chunk;}, storageHandler: (req, res) => {
     if (req.method === 'PUT') {
       let size = 0; req.on('data', chunk => { size += chunk.length; });
       req.on('end', () => { sizes.set(req.url.split('?')[0], size); res.writeHead(200, { ETag: '"saved-test"' }); res.end(); });
@@ -110,7 +110,7 @@ test('HTTP upload can save at intake; refused uploads and non-artwork never rese
     body.append('file', new Blob([bytes], { type: 'image/png' }), 'saved.png'); return body;
   };
   const upload = await api('client', 'POST', '/files', form());
-  assert.equal(upload.status, 201, JSON.stringify(upload.body));
+  assert.equal(upload.status, 201, JSON.stringify(upload.body)+output);
   assert.ok(upload.body.file.savedAt);
   const list = await api('client', 'GET', '/me/files');
   assert.equal(list.body.usage.usedBytes, bytes.length);

@@ -117,3 +117,37 @@ It grows unrelated notifications, audit, pings and delivered push-outbox history
 from 10,000 to 100,000 rows each and asserts identical scoped query/row budgets.
 It reports server request-log medians/p95s; `PERF_BASELINE=1` also samples the old
 full save. Local synthetic timings do not establish production acceptance.
+
+
+## Upload intake and colour work
+
+`POST /files` now authorizes its streaming intake using only the mapped identity,
+role/approval, selected-shop/profile and settings facts. Its separate pending and
+ready metadata transactions keep their existing domain lock and shared `save()`.
+Ordinary active single-client identities can reuse the scoped client writer;
+file appends carry an internal upload-only capability and allocate their exact
+ordinal from `store_collection_counts`. Missing/dirty normalization, sparse file
+layouts, foreign performance dependencies and unsupported/multi-role/team
+identities retain the complete writer. Quota, purpose, upload verdict, private
+object, audit, notifications and compensation rules are unchanged.
+
+Upload-triggered colour analysis previously loaded the whole store both before
+rendering and again before its result commit. It now reads the selected source
+and, for eligible clients, uses the same scoped save graph for result/fee-lock/
+notification updates. Unrelated upkeep uses the existing sweeps, as on scoped
+matching/cart-line saves. A foreign draft cart referencing the original, changed
+ownership, unsupported identity or the existing layout/normalization conditions
+retains the complete writer. Rendering still holds the separate colour locks;
+the domain lock is acquired only for the final recheck/commit as before. Legacy
+selection order, failed-result persistence, recipient fan-out and cart schedule
+locks remain covered by old/new comparisons. Preview and compensation writers,
+unsupported uploads, positive upkeep and checkout remain follow-up full paths.
+
+`scripts/benchmark-upload-intake.mjs` accepts `PERF_PHOTO_PATH` for a synthetic
+JPEG and measures API-own request logs with a local S3 protocol fixture. It grows
+unrelated inbox/audit/ping/delivered-outbox history from 10,000 to 100,000 rows,
+checks query/row budgets and asserts no complete-store call occurs during an
+eligible upload and its background colour work. `PERF_SOURCE=scoped` measures
+only the new path; `PERF_BASELINE_ONLY_1X=1` limits the expensive actual-dev
+baseline to the first population. These measurements include multipart intake,
+local checks and mocked object transfer, not real mobile-network/MinIO latency.

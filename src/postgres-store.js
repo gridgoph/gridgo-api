@@ -1,5 +1,5 @@
 import { shopTeamTables, emptyShopTeam, shopTeamRows, loadShopTeamRows, ensureShopOwners } from './shop-team-store.js';
-import { STAFF_LIST_PAGE, readStaffPage, staffPageRequested } from './staff-list-pages.js';
+import { STAFF_LIST_PAGE, readStaffPage, staffPageRequested, staffListPlan, parseStaffPage, encodeStaffCursor } from './staff-list-pages.js';
 import { orderReadQuery, activeOrderSql, attachOrderRemovalContext } from './order-removal.js';
 import { createHash } from 'node:crypto';
 import { bindClientSaveScope, clientSaveScope } from './save-scope.js';
@@ -26,6 +26,7 @@ import { sharingTables, emptySharingStore, sharingRows, loadSharingRows } from '
 import { checkoutExitTables, checkoutExitRows, loadCheckoutExitRows } from './checkout-exit-store.js';
 import { voucherTables, emptyVoucherStore, voucherRows, loadVoucherRows } from './voucher-store.js';
 import { loadLegalPenaltyGate } from './legal.js';
+import { manilaDate } from './season-windows.js';
 import { synchronizeProductionHours, productionHoursSynchronized } from "./production-days.js";
 import { staffTables, emptyStaffStore, staffRows, loadStaffRows } from './staff-store.js';
 import { refundTableDefinitions, writeRefundRows, readRefundRows } from "./refund-records.js";
@@ -1141,7 +1142,7 @@ async function readOwnCatalogueRoute(database, graph, ids, pathname, searchParam
  * Approved snapshots can retain photos and a service absent from the draft.
  * Keep JS visibility/cursor policy authoritative, including review-only shops.
  */
-async function readCatalogueGraph(graph, actorIds, { supplierIds = null, itemIds = null, fileId = null, subcategoryCode = null, ratings = true } = {}) {
+async function readCatalogueGraph(graph, actorIds, { supplierIds = null, itemIds = null, fileId = null, subcategoryCode = null, ratings = true, listingOnly = false } = {}) {
   const { loaded, read } = graph;
   if (fileId) {
     await read('supplier_catalog_item_photos', 'WHERE file_id = $1', [fileId]);
@@ -1160,7 +1161,9 @@ async function readCatalogueGraph(graph, actorIds, { supplierIds = null, itemIds
   const owners = [...new Set([...actorIds, ...suppliers])];
   await read('supplier_profiles', 'WHERE user_id = ANY($1::text[])', [suppliers]);
   const snapshotServices = loaded.supplier_catalog_items.map(row => row.approved_snapshot?.item?.supplierServiceId).filter(Boolean);
-  await read('supplier_services', 'WHERE supplier_id = ANY($1::text[]) OR id = ANY($2::text[])', [suppliers, snapshotServices]);
+  if (listingOnly) await read('supplier_services', 'WHERE id = ANY($1::text[])',
+    [[...new Set([...loaded.supplier_catalog_items.map(row => row.supplier_service_id), ...snapshotServices])]]);
+  else await read('supplier_services', 'WHERE supplier_id = ANY($1::text[]) OR id = ANY($2::text[])', [suppliers, snapshotServices]);
   await read('supplier_service_file_formats', 'WHERE supplier_service_id = ANY($1::text[])', [loaded.supplier_services.map(row => row.id)]);
   const items = loaded.supplier_catalog_items.map(row => row.id);
   for (const name of ['supplier_catalog_option_groups', 'supplier_catalog_item_photos', 'supplier_catalog_price_tiers',
@@ -1169,7 +1172,7 @@ async function readCatalogueGraph(graph, actorIds, { supplierIds = null, itemIds
     await read(name, 'WHERE catalog_item_id = ANY($1::text[])', [items]);
   }
   await read('supplier_catalog_options', 'WHERE option_group_id = ANY($1::text[])', [loaded.supplier_catalog_option_groups.map(row => row.id)]);
-  await read('supplier_shop_media', 'WHERE supplier_id = ANY($1::text[])', [suppliers]);
+  if (!listingOnly) await read('supplier_shop_media', 'WHERE supplier_id = ANY($1::text[])', [suppliers]);
   const photos = loaded.supplier_catalog_items.flatMap(row => row.approved_snapshot?.catalogItemPhotos || []).map(row => row.fileId);
   await read('files', 'WHERE file_id = ANY($1::text[])', [[...photos, ...loaded.supplier_catalog_item_photos.map(row => row.file_id),
     ...loaded.supplier_shop_media.map(row => row.file_id), ...(fileId ? [fileId] : [])]]);
@@ -1349,7 +1352,7 @@ async function readFileGraph(graph, actorIds, pathname) {
   return graph.finish();
 }
 
-const HOT_READ_PATHS = new Set(['/orders', '/jobs', '/settings', '/taxonomy', '/zones', '/catalog', '/ops/product-type-requests', '/ops/catalog-reviews', '/ops/shop-failures', '/ops/colour-price-checks', '/auth/me/ops', '/auth/me/admin', '/auth/me/supplier', '/auth/me/rider', '/auth/me/client', '/auth/me', '/me', '/me/home-summary']);
+const HOT_READ_PATHS = new Set(['/orders', '/jobs', '/settings', '/taxonomy', '/zones', '/catalog', '/ops/product-type-requests', '/ops/catalog-reviews', '/ops/shop-failures', '/ops/colour-price-checks', '/auth/me/ops', '/auth/me/admin', '/auth/me/supplier', '/auth/me/rider', '/auth/me/client', '/auth/me', '/me', '/me/home-summary', '/me/legal/pending', '/featured-prints', '/support-chat/me', '/api/support-chat/me', '/season-windows', '/devices']);
 const OPS_QUEUE_READ = /^\/(claims|issues)(?:\/[^/]+)?$|^\/escalations$/;
 const USER_READ = /^\/users(?:\/[^/]+(?:\/(?:verification-documents|payout-account))?)?$/;
 const AUDIT_READ = /^\/audit$|^\/orders\/[^/]+\/audit$/;
@@ -1386,7 +1389,7 @@ async function readOperationsQueue(graph, ids, pathname, params, role) {
     }
   }
   if (isTestOperationsUser(identity, raw.id)) clauses.push('order_id IN (SELECT id FROM orders WHERE review_data)');
-  if (!detail && ['claims', 'escalations'].includes(table) && staffPageRequested(params) && isTestOperationsUser(identity, raw.id)) {
+  if (!detail && ['claims', 'escalations', 'issues'].includes(table) && staffPageRequested(params) && isTestOperationsUser(identity, raw.id)) {
     // The review view checks every party/creator reference on these incident
     // rows. Apply that gate before LIMIT so hidden rows cannot consume a page.
     values.push(raw.id);
@@ -1400,7 +1403,7 @@ async function readOperationsQueue(graph, ids, pathname, params, role) {
         AND NOT EXISTS (SELECT 1 FROM users u WHERE u.review_data AND u.id=ref.value#>>'{}'))`);
     if (table === 'escalations') clauses.push(`(rider_id IS NULL OR rider_id=${actor} OR rider_id IN (SELECT id FROM users WHERE review_data))`);
   }
-  if (!detail && ['claims', 'escalations'].includes(table)) await readStaffPage(graph, pathname, params, clauses.length ? `WHERE ${clauses.join(' AND ')}` : '', values);
+  if (!detail && ['claims', 'escalations', 'issues'].includes(table)) await readStaffPage(graph, pathname, params, clauses.length ? `WHERE ${clauses.join(' AND ')}` : '', values);
   else await read(table, clauses.length ? `WHERE ${clauses.join(' AND ')}` : '', values);
   if (table === 'issues') await read('claims', 'WHERE id = ANY($1::text[])', [loaded.issues.map(row => row.claim_id).filter(Boolean)]);
   const rows = [...loaded[table], ...loaded.claims];
@@ -1483,11 +1486,41 @@ async function readUserDirectory(graph, ids, pathname, params, role) {
   return graph.finish();
 }
 
+/** Probe bounded candidate graphs using the existing policy. This also handles
+ * rider holds and legacy multi-shop access without duplicating them in SQL. */
+async function readVisiblePage(database, graph, path, params, where, values, visibleIds) {
+  let page;
+  try { page = parseStaffPage(path, params); } catch (error) { graph.staffPage = { error }; return graph.staffPage; }
+  const selected = [], identity = Object.fromEntries(Object.entries(graph.loaded).map(([k,v]) => [k, [...v]]));
+  let cursor = params.get('cursor'), metadata;
+  while (true) {
+    const probe = readGraph(database);
+    Object.assign(probe.loaded, Object.fromEntries(Object.entries(identity).map(([k,v]) => [k,[...v]])));
+    const query = new URLSearchParams(params);
+    query.set('limit', String(Math.max(25, page.limit)));
+    if (cursor != null) query.set('cursor',cursor);
+    await readStaffPage(probe,path,query,where,values);
+    metadata = probe.staffPage;
+    if (metadata.error) { graph.staffPage=metadata; return metadata; }
+    // Keep each candidate's key: the public boundary is the last returned
+    // visible row, never a hidden row or the extra lookahead.
+    const keys = probe.loaded[staffListPlan(path).table];
+    const visible = new Set(await visibleIds(probe));
+    for (const id of metadata.ids) if (visible.has(id)) selected.push(keys.find(row=>row.id===id));
+    if (selected.length > page.limit || !metadata.nextCursor) break;
+    cursor=metadata.nextCursor;
+  }
+  const rows=selected.slice(0,page.limit), last=rows.at(-1);
+  graph.staffPage = { ids: rows.map(row=>row.id), nextCursor: selected.length>page.limit
+    ? encodeStaffCursor(page,last.id,new Date(last.created_at).toISOString()) : null };
+  return graph.staffPage;
+}
+
 /** Candidate SQL narrows ownership; the existing JS policy makes the final decision.
  * In particular, an unassigned multi-shop order and a held dispatch offer need
  * their jobs/refund facts before visibility can be decided.
  */
-async function readOrderGraph(database, graph, pathname, { role, includeReviewData, candidateIds = null, reportCollection = false }) {
+async function readOrderGraph(database, graph, pathname, { role, includeReviewData, candidateIds = null, reportCollection = false, searchParams = new URLSearchParams(), pageAttempt = false, pagePolicy = false, policyOnly = false }) {
   const { loaded, read } = graph;
   const identityStore = graph.finish();
   const raw = identityStore.users[0];
@@ -1511,7 +1544,7 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
       (SELECT order_id FROM order_jobs WHERE supplier_id = $1 AND state <> 'cancelled')))`;
     else if (selected === 'rider') ownership = `(rider_id = $1 OR (state = 'ready_for_dispatch' AND rider_id IS NULL AND review_data = $2))`;
   }
-  if (candidateIds) ownership = 'TRUE';
+  if (candidateIds && !pagePolicy) ownership = 'TRUE';
   // Keep $1 typed even on a staff/empty read, where ownership uses no parameter.
   let where = `WHERE $1::text IS NOT NULL AND (${ownership})`;
   if (dispatch || (selected === 'rider' && pathname !== '/jobs' && hasRole(identityStore, raw.id, selected))) values.push(raw.reviewData === true);
@@ -1519,7 +1552,18 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
   where += ` ${reviewScope}`;
   if (candidateIds) { values.push(candidateIds); where += ` AND id = ANY($${values.length}::text[])`; }
   if (detail && !candidateIds) { values.push(pathname.split('/')[2]); where += ` AND id = $${values.length}`; }
-  await read('orders', where, values);
+  if (pathname === '/orders' && staffPageRequested(searchParams) && !pageAttempt) {
+    // Select candidates in key order, apply the unchanged access/hold policy,
+    // then hydrate only a visible page. Hidden candidates never consume slots.
+    const selected = await readVisiblePage(database, graph, pathname, searchParams, where, values,
+      async probe => {
+        const result = await readOrderGraph(database, probe, pathname, { role, includeReviewData, pageAttempt: true, candidateIds: probe.loaded.orders.map(row => row.id), pagePolicy: true, policyOnly: true });
+        return result.orders.map(row => row.id);
+      });
+    if (selected.error) return graph.finish();
+    values.push(selected.ids); where += ` AND id = ANY($${values.length}::text[])`;
+  }
+  if (!policyOnly) await read('orders', where, values);
   await read('platform_settings', 'WHERE singleton');
   let orderIds = loaded.orders.map(row => row.id);
   for (const name of ['order_jobs', 'refund_requests', 'refund_settlements']) {
@@ -1532,7 +1576,7 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
   }
   const candidates = graph.finish();
   const policyStore = reviewOnly ? testOperationsView(candidates, actor) : candidates;
-  const visible = new Set(policyStore.orders.filter(order => candidateIds ? true : dispatch
+  const visible = new Set(policyStore.orders.filter(order => candidateIds && !pagePolicy ? true : dispatch
     ? (order.reviewData === (raw.reviewData === true) && availableDispatch(order, policyStore))
       || (!isContainedPickup(order) && !dispatchWorkHeld(policyStore, order) && order.state === 'rider_assigned' && order.riderId === raw.id)
     : pathname === '/jobs'
@@ -1543,6 +1587,7 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
   for (const name of ['order_jobs', 'refund_requests', 'refund_settlements']) {
     loaded[name] = loaded[name].filter(row => visible.has(row.order_id));
   }
+  if (policyOnly) return graph.finish();
   if (!orderIds.length) {
     const store = graph.finish();
     // Preserve the existing 403 for a real, inaccessible detail without
@@ -1628,7 +1673,7 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
     else if (staff && !detail && !dispatch) fileStore = reviewReportView(fileStore, includeReviewData);
     store.orderFileReadContext = { orders: fileStore.orders, orderJobs: fileStore.orderJobs, orderLineItems: fileStore.orderLineItems };
   }
-  if ((detail || dispatch) && (['ops_admin', 'super_admin'].includes(selected) || (candidateIds && staff))) {
+  if ((detail || dispatch || (pathname === '/orders' && staffPageRequested(searchParams))) && (['ops_admin', 'super_admin'].includes(selected) || (candidateIds && staff))) {
     // This existing staff-only field counts events across the reporting view,
     // not merely the opened order. Return only counts for the visible shops.
     const counts = await database.query(`SELECT event->'supplierId' AS supplier, count(*)::int AS count
@@ -1656,7 +1701,8 @@ async function readBasketGraph(database, graph, ids, pathname, params, options) 
   let where=staff?'WHERE $1::text IS NOT NULL':'WHERE client_id=$1';
   if(id){values.push(sqlReadText(id));where+=' AND id=$2';}
   if(reviewOnly || (staff && !id && !options.includeReviewData)) where+=` AND NOT EXISTS (SELECT 1 FROM order_basket_groups g JOIN orders o ON o.id=g.order_id WHERE g.basket_id=order_baskets.id AND o.review_data=${reviewOnly?'false':'true'})`;
-  await read('order_baskets',where,values);
+  if (!id) await readStaffPage(graph, pathname, params, where, values);
+  else await read('order_baskets',where,values);
   const baskets=loaded.order_baskets;
   await read('order_basket_groups','WHERE basket_id = ANY($1::text[])',[baskets.map(r=>r.id)]);
   const groups=loaded.order_basket_groups;
@@ -1717,7 +1763,48 @@ export async function loadTesterProgramIdentityStore(database, clerkSubject) {
   });
 }
 
-/** A write graph for match tokens and draft line edits. Checkout stays full.
+/** Upload intake authorizes before streaming bytes. No domain history is needed
+ * until the separately locked pending/ready metadata mutations. */
+export async function loadUploadIntakeStore(database, clerkSubject) {
+  return database.snapshot(async () => {
+    const graph=readGraph(database);
+    await graph.read('users','WHERE clerk_user_id=$1',[clerkSubject]);
+    const ids=graph.loaded.users.map(row=>row.id);
+    await graph.read('shop_memberships','WHERE user_id=ANY($1::text[])',[ids]);
+    const actors=[...new Set([...ids,...graph.loaded.shop_memberships.map(row=>row.shop_id)])];
+    await readIdentity(graph,actors);
+    for (const table of ['supplier_profiles','staff_profiles']) await graph.read(table,'WHERE user_id=ANY($1::text[])',[actors]);
+    await graph.read('staff_roles','WHERE code IN (SELECT role_code FROM staff_profiles WHERE user_id=ANY($1::text[]))',[actors]);
+    await graph.read('platform_settings','WHERE singleton');
+    return graph.finish();
+  });
+}
+
+/** The renderer needs only its selected original's immutable source facts. */
+export async function loadColourSourceStore(database, fileId) {
+  // Preserve legacy tie/enumeration behaviour on anomalous global file layouts.
+  if ((await database.query("SELECT positions_contiguous FROM store_collection_counts WHERE name='files'")).rows[0]?.positions_contiguous !== true) return loadStore(database);
+  const graph = readGraph(database);
+  await graph.read('files', 'WHERE file_id=$1', [fileId]);
+  return graph.finish();
+}
+
+/** Commit colour results through the same own maintenance/audit/outbox writer.
+ * A historical foreign cart sharing this original retains the complete graph. */
+export async function loadColourSaveStore(database, file) {
+  const owner = (await database.query('SELECT clerk_user_id FROM users WHERE id=$1', [file.ownerId])).rows[0];
+  if (!owner?.clerk_user_id) return loadStore(database);
+  const foreign = await database.query(`SELECT 1 FROM client_cart_lines line
+    WHERE ((artwork_attachments IS NULL AND artwork_file_id=$1) OR artwork_attachments @> $2::jsonb)
+      AND cart_id IN (SELECT id FROM client_carts WHERE state='draft' AND client_id<>$3) LIMIT 1`,
+  [file.fileId, JSON.stringify([{ kind: 'file', fileId: file.fileId }]), file.ownerId]);
+  if (foreign.rowCount) return loadStore(database);
+  const store = await loadClientSaveStore(database, owner.clerk_user_id, '/files', { fileId: file.fileId });
+  if (!store || store.files.find(row => row.fileId === file.fileId)?.ownerId !== file.ownerId) return loadStore(database);
+  return store;
+}
+
+/** A write graph for match tokens, draft lines and eligible upload/colour metadata. Checkout stays full.
  * All reads run after the same domain advisory lock as the legacy writer.
  */
 export async function loadClientSavePreflightStore(database, clerkSubject, pathname, body) {
@@ -1768,6 +1855,7 @@ export async function loadClientSaveStore(database, clerkSubject, pathname, body
   await readIdentity(graph, [clientId]);
   // Retain established nonclient/multirole policy on the legacy path.
   if (!loaded.user_role_memberships.some(row => row.user_id === clientId && row.role === 'client')) return null;
+  if (pathname === '/files' && (actor.role !== 'client' || loaded.user_role_memberships.some(row => row.user_id === clientId && row.role !== 'client'))) return null;
   await readClientHomeGraph(graph, [clientId]);
   const ownOrders = loaded.orders.map(row => row.id);
   let cartId = pathname.startsWith('/me/carts/') ? pathname.split('/')[3] : body?.cartId == null ? null : String(body.cartId);
@@ -1834,6 +1922,7 @@ export async function loadClientSaveStore(database, clerkSubject, pathname, body
   // Preserve current shop access for the actor and existing Owner rows for
   // supplier context; a partial save must never synthesize over a removed row.
   await read('shop_memberships', 'WHERE user_id=ANY($1::text[]) OR shop_id=ANY($1::text[])', [loaded.users.map(row => row.id)]);
+  if (pathname === '/files' && loaded.shop_memberships.some(row => row.user_id === clientId && (row.shop_id !== clientId || row.role !== 'owner' || row.status !== 'active'))) return null;
   // Attributed competitor rows are context for the existing ambiguity policy.
   for (const name of ['tester_invites', 'promotion_invites']) await read(name, 'WHERE client_id=ANY($1::text[])', [loaded.users.filter(row => inviteEmails.includes(String(row.email || '').trim().toLowerCase())).map(row => row.id)]);
   await read('vouchers', "WHERE client_id=ANY($1::text[]) AND promotion_kind IN ('founding','friend_pass')", [loaded.users.map(row => row.id)]);
@@ -1877,7 +1966,7 @@ export async function loadClientSaveStore(database, clerkSubject, pathname, body
     || (order.state === 'awaiting_collection' && order.handover?.qrToken && !order.handover.consumedAt)
     || (store.supplierPerformanceLaunchedAt && order.supplierId && order.commercialCommittedAt && order.readyBy
       && order.state !== 'cancelled' && order.performanceClock?.supplierId !== order.supplierId))) return null;
-  if (layouts.get('files') === false && pathname.startsWith('/me/carts/')) return null;
+  if (layouts.get('files') === false && (pathname.startsWith('/me/carts/') || pathname === '/files')) return null;
   if (layouts.get('notifications') === false && store.notifications.some(row => row.type === 'order_call_incoming')) {
     const active = await database.query("SELECT 1 FROM order_calls WHERE order_id=ANY($1::text[]) AND state IN ('ringing','accepted') LIMIT 1", [own.map(order => order.id)]);
     if (active.rowCount) return null;
@@ -1888,7 +1977,7 @@ export async function loadClientSaveStore(database, clerkSubject, pathname, body
   if (pathname.endsWith('/lines') && foundingTesterEligible(store, clientId)
     && !store.foundingTesters.find(row => row.clientId === clientId)?.awardedAt
     && !progress.missions.added && progress.completedCount === 4) return null;
-  return bindClientSaveScope(store, { clientId, rawRows: structuredClone(loaded) });
+  return bindClientSaveScope(store, { clientId, allowFileAppend: pathname === '/files', rawRows: structuredClone(loaded) });
 }
 
 /** Missing survey/failure and unavailable-change candidates for the 1s upkeep
@@ -1926,13 +2015,33 @@ export async function appendTesterProgramAudit(database, entry, at) {
   [id, eventAt, actorId, actorRole, action, entityType, entityId, orderId, data]);
 }
 
-export async function loadHotReadStore(database, clerkSubject, pathname, { after = '', status = null, sessionHash = null, role, includeReviewData = false, searchParams = new URLSearchParams() } = {}) {
+export async function loadHotReadStore(database, clerkSubject, pathname, { after = '', status = null, sessionHash = null, role, includeReviewData = false, searchParams = new URLSearchParams(), at = new Date().toISOString() } = {}) {
   if (!isHotReadPath(pathname)) throw new Error('Unsupported targeted read path');
   return database.snapshot(async () => {
     const graph = readGraph(database), { loaded, read } = graph;
     await read('users', 'WHERE clerk_user_id = $1', [clerkSubject]);
     const ids = loaded.users.map(row => row.id);
     await readIdentity(graph, ids);
+    // These handlers query their own legal/chat rows. They need only the
+    // current caller's membership context from the compatibility graph.
+    if (['/me/legal/pending', '/support-chat/me', '/api/support-chat/me'].includes(pathname)) return graph.finish();
+    if (pathname === '/devices') {
+      await read('device_tokens', 'WHERE user_id = ANY($1::text[])', [ids]);
+      return graph.finish();
+    }
+    if (pathname === '/season-windows') {
+      await read('season_windows', 'WHERE end_date >= $1::date', [manilaDate(at)]);
+      return graph.finish();
+    }
+    if (pathname === '/featured-prints') {
+      await read('platform_settings', 'WHERE singleton');
+      const configured = loaded.platform_settings[0]?.settings?.featuredPrints?.catalogItemIds;
+      const itemIds = Array.isArray(configured) ? configured.filter(id => typeof id === 'string' && !id.includes('\0')) : [];
+      // Reuse the catalogue's approved-snapshot, eligibility and photo graph;
+      // unrelated listings, orders and ratings are not part of these cards.
+      await readCatalogueGraph(graph, ids, { itemIds, ratings: false, listingOnly: true });
+      return graph.finish();
+    }
     if (BASKET_READ.test(pathname)) return readBasketGraph(database, graph, ids, pathname, searchParams, { role, includeReviewData });
     if (isStaffDeskRead(pathname)) {
       if (pathname === '/staff/me' && sessionHash) await read('audit_log', "WHERE actor_id = ANY($1::text[]) AND action = 'staff.sign_in' AND data->'detail'->>'sessionHash' = $2 LIMIT 1", [ids, sessionHash]);
@@ -1966,7 +2075,7 @@ export async function loadHotReadStore(database, clerkSubject, pathname, { after
     if (isCatalogReadPath(pathname)) return readCatalogueRoute(graph, ids, pathname);
     if (QUOTE_READ.test(pathname)) return readQuoteGraph(graph, ids, pathname, status);
     if (pathname === '/dispatch/offers' || pathname === '/orders' || pathname === '/jobs' || ORDER_DETAIL_READ.test(pathname)) {
-      return readOrderGraph(database, graph, pathname, { role, includeReviewData });
+      return readOrderGraph(database, graph, pathname, { role, includeReviewData, searchParams });
     } else if (pathname === '/me/home-summary') {
       await readClientHomeGraph(graph, ids);
     } else if (pathname.startsWith('/auth/me') || pathname === '/me') {
@@ -2750,7 +2859,7 @@ export async function saveStore(database, store) {
           // Hydration uses array indices; SQL must retain the original ordinal.
           row.position = original.position;
           if (before.has(key)) before.get(key).position = original.position;
-        } else if (['notifications', 'audit_log'].includes(table.name)) {
+        } else if (['notifications', 'audit_log'].includes(table.name) || table.name === 'files' && scope.allowFileAppend) {
           if (nextPosition === undefined) nextPosition = (await database.query(
             'SELECT row_count FROM store_collection_counts WHERE name=$1 FOR UPDATE', [table.name])).rows[0].row_count;
           row.position = nextPosition++;

@@ -736,6 +736,8 @@ Operations may read workspace records only when the request supplies `action` eq
 
 `GET /settings` remains readable by signed-in roles for operational views. All writes through `PATCH /settings` and `POST /settings/payment-qr` require Super Admin; Operations receives `403 forbidden`, including for delivery-zone limits and prices.
 
+`riderPacksMinimumBuilds` uses this same version/reason handshake. Public launch reads and the staged `426 app_update_required` custody gate are defined in [Shop handovers — staged minimum rider build](SHOP_HANDOVER_API.md#staged-minimum-rider-build).
+
 Default `GET /settings` response:
 
 ```json

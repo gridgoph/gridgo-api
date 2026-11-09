@@ -14,7 +14,7 @@ import { privilegedAdminMemberships, queueInvalidate } from './notifications.js'
 // One bounded job at a time across replicas; renderer lock is independent of
 // the domain lock, so uploads, orders and payments proceed during conversion.
 // Pending records survive crashes and are picked up at startup/lifecycle tick.
-export function createColourWorker({database,load,save,storage,render=renderColourAnalysis,now=()=>new Date().toISOString(),id=()=>crypto.randomUUID()}) {
+export function createColourWorker({database,load,loadSource,loadForSave,save,storage,render=renderColourAnalysis,now=()=>new Date().toISOString(),id=()=>crypto.randomUUID()}) {
   let busy = false;
   return async function drain() {
     if (busy) return;
@@ -22,11 +22,11 @@ export function createColourWorker({database,load,save,storage,render=renderColo
     try {
       await database.transaction(async () => {
         if (!(await database.query("SELECT pg_try_advisory_xact_lock(hashtext('gridgo-colour-renderer')) AS locked")).rows[0].locked) return;
-        const candidate = await database.query(`SELECT 1 FROM files
+        const candidate = await database.query(`SELECT file_id FROM files
           WHERE state = 'ready' AND COALESCE(data->>'deleteRequestedAt', '') = ''
-            AND data @? '$.colourAnalyses[*] ? (@.status == "pending")' LIMIT 1`);
+            AND data @? '$.colourAnalyses[*] ? (@.status == "pending")' ORDER BY position LIMIT 1`);
         if (!candidate.rowCount) return;
-        const store = await load();
+        const store = await (loadSource ? loadSource(candidate.rows[0].file_id) : load());
         const file = store.files.find(file => file.state === 'ready' && !file.deleteRequestedAt && file.colourAnalyses?.some(job => job.status === 'pending'));
         const job = file?.colourAnalyses.find(job => job.status === 'pending');
         if (!job) return;
@@ -44,7 +44,7 @@ export function createColourWorker({database,load,save,storage,render=renderColo
         } catch (error) {errorCode = /^colour_[a-z_]+$/.test(error.code || '') ? error.code : 'colour_detection_failed';}
         finally {await fs.promises.rm(directory,{recursive:true,force:true});}
         await database.query('SELECT pg_advisory_xact_lock(hashtext($1))',[DOMAIN_MUTATION_LOCK]);
-        const latest = await load();
+        const latest = await (loadForSave ? loadForSave(file) : load());
         const current = latest.files.find(row => row.fileId === file.fileId && row.state === 'ready' && !row.deleteRequestedAt && row.objectKey === file.objectKey);
         const pending = current?.colourAnalyses.find(row => row.key === job.key && row.status === 'pending');
         if (!pending) return;
