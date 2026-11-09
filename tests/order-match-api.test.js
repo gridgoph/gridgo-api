@@ -1402,6 +1402,7 @@ test("a collected order stops on the counter, and only the counter hands it over
 
   await database.transaction(async () => {
     const store = await loadStore(database);
+    store.staffRoles.push({ code: 'hub_staff', name: 'Hub staff', canHandout: true });
     store.userRoleMemberships.push({ userId: 'user_ops', role: 'staff', createdAt: AT });
     store.staffProfiles.push({ userId: 'user_ops', roleCode: 'hub_staff', active: true, updatedAt: AT });
     await saveStore(database, store);

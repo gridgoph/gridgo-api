@@ -54,6 +54,15 @@ export async function apiForTest(t, env = {}, { storageHandler, onOutput } = {})
   }
   assert.ok(healthy, output);
   return async (key, method, path, body, opts = {}) => {
+    // Only upload intake requires completed storage initialization. Waiting on
+    // every route changes startup concurrency for unrelated auth/locking tests.
+    if (method === 'POST' && new URL(path, origin).pathname === '/files') {
+      for (let n = 0; n < 800 && !/MinIO ready:|MinIO unavailable;/.test(output); n++) {
+        if (child.exitCode !== null) throw new Error(output);
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+      assert.match(output, /MinIO ready:|MinIO unavailable;/);
+    }
     // A FormData body is an upload: fetch writes its own multipart boundary.
     const form = body instanceof FormData;
     const res = await fetch(`${origin}${path}`, { method, signal: opts.signal,
