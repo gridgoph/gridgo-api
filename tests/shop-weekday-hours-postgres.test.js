@@ -137,10 +137,17 @@ for (const allIncompatible of [false, true]) test(`HTTP isolates ${allIncompatib
     priceMinor: 1500, surchargeMinor: null, sortOrder: 0, createdAt: initial.orders[0].createdAt,
     updatedAt: initial.orders[0].createdAt }));
   await db.transaction(() => saveStore(db, initial));
+  // Both endpoints derive an earliest instant from domain new Date(). Keep
+  // that instant identical while JWT expiry and network timers remain real.
+  const domainNow = Date.now();
+  const clock = `const OriginalDate=Date;globalThis.Date=class extends OriginalDate {
+    constructor(...args){super(...(args.length?args:[${domainNow}]));}
+  };`;
   const api = await apiForTest(t, process.env.GRIDGO_WEEKDAY_E2E_MINIO ? {
+    NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --import=data:text/javascript,${encodeURIComponent(clock)}`,
     MINIO_ENDPOINT: process.env.GRIDGO_WEEKDAY_E2E_MINIO, MINIO_PUBLIC_URL: process.env.GRIDGO_WEEKDAY_E2E_MINIO,
     MINIO_ACCESS_KEY: 'weekday-test', MINIO_SECRET_KEY: 'weekday-test-secret', MINIO_BUCKET: 'weekday-test',
-  } : {});
+  } : { NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --import=data:text/javascript,${encodeURIComponent(clock)}` });
   for (const supplierId of allIncompatible ? ['supplier', 'replacement'] : ['supplier']) {
     const saved = await api(supplierId, 'PATCH', '/me/shop-hours', { expectedVersion: 1, schedule: incompatibleSchedule() });
     assert.equal(saved.status, 200, JSON.stringify(saved.body));

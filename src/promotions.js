@@ -91,6 +91,8 @@ export function reconcilePromotionInvites(store, ctx) {
   let changed = false;
   for (const invite of store.promotionInvites || []) {
     if (invite.status !== 'invited') continue;
+    if (ctx.clientIds && !ctx.clientIds.includes(invite.clientId)
+      && !store.users.some(user => ctx.clientIds.includes(user.id) && normalizeEmail(user.email) === invite.email)) continue;
     const { target, reason } = matchPromotionInvite(store, invite);
     if (invite.unmatchedReason !== reason) {
       invite.unmatchedReason = reason; changed = true;

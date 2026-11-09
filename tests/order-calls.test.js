@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { createDatabase } from '../src/database.js';
-import { loadStore, saveStore } from '../src/postgres-store.js';
+import { loadStore, loadDeliveryStore, saveStore } from '../src/postgres-store.js';
 import { fixture, AT, id } from './fixtures/reschedule.js';
 import { apiForTest } from './fixtures/reschedule-http.js';
 import { callParty, callWindow, publicCall, iceConfiguration, parseCallSignal, purgeClosedCalls, reconcileCalls, routeOrderCalls } from '../src/order-calls.js';
@@ -247,7 +247,7 @@ httpTest('signalling prompts reach only the two parties on a separate PostgreSQL
   for (const userId of ['client','rider','supplier','ops','admin','rider2']) {
     events.subscribeInvalidate(userId, payload => { if (payload.resource === 'calls') frames.push({ userId, payload }); });
   }
-  const transport = createRealtimeTransport({ database: db, loadStore, events, connectionString: DATABASE_URL });
+  const transport = createRealtimeTransport({ database: db, loadStore: loadDeliveryStore, events, connectionString: DATABASE_URL });
   t.after(() => transport.close()); await transport.start();
   const start = await api('client', 'POST', BASE, { pair: 'delivery' });
   const waitFor = async n => {
@@ -314,4 +314,15 @@ test('unsupported methods never reconcile or write outside the HTTP mutation bou
     assert.equal(routed, true);
     assert.deepEqual(result, { status: 405, body: { error: 'method_not_allowed' } });
   }
+});
+
+test('scoped reconciliation never ends a valid call outside the supplied order ids', async () => {
+  const store = fixture();
+  const writes = [];
+  const database = { query: async (sql, values) => {
+    if (sql.startsWith('SELECT')) return { rows: [{ id: 'foreign_call', order_id: 'unrelated_order', state: 'ringing' }] };
+    writes.push({ sql, values }); return { rowCount: 1 };
+  } };
+  assert.equal(await reconcileCalls(database, store, { createId: id, at: AT, orderIds: ['order'] }), 0);
+  assert.deepEqual(writes, []);
 });
