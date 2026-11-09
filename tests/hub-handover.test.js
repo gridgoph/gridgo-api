@@ -271,3 +271,17 @@ test('unset hub hours send the hours-set ready notice and count missed operating
   const claim = await call(store, 'other', '/staff/hub/claims', { qrToken: handover.qrToken, otp: handover.otp });
   assert.equal(claim.status, 200);
 });
+
+test('hub sweep invalidates only orders changed in that pass, independent of preceding candidates', async () => {
+  const { takeQueuedInvalidates } = await import('../src/notifications.js');
+  const store = setup(null);
+  const second = structuredClone(store.orders[0]);
+  second.id = 'unchanged_hub';
+  second.handover.readyNotifiedAt = AT;
+  store.orders.push(second);
+  takeQueuedInvalidates(store);
+  assert.equal(sweepHubReminders(store, { at: AT, id }), true);
+  const events = takeQueuedInvalidates(store);
+  assert.ok(events.some(event => event.id === store.orders[0].id));
+  assert.ok(!events.some(event => event.id === second.id));
+});

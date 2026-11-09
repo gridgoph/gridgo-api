@@ -1,3 +1,4 @@
+import { staffPageBody } from './staff-list-pages.js';
 import { assertRefundWorkAllowed } from './refund-policy.js';
 import { randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import { publicHubPickup } from './hub-pickup.js';
@@ -68,6 +69,7 @@ function clientNotice(store, order, type, body, at, id) {
 export function sweepHubReminders(store, { at, id }) {
   let changed = false;
   for (const order of store.orders || []) {
+    let orderChanged = false;
     const h = order.handover;
     if (order.state !== 'awaiting_collection' || !h?.qrToken || h.consumedAt) continue;
     const schedule = h.schedule;
@@ -78,10 +80,10 @@ export function sweepHubReminders(store, { at, id }) {
       if (!alreadyNotified) clientNotice(store, order, 'hub_ready', schedule
         ? 'Your order is ready. Bring its QR and matching code during hub hours.'
         : 'Your order is ready. Collection hours are not set yet. Contact Operations to arrange pickup.', at, id);
-      h.readyNotifiedAt = at; changed = true;
+      h.readyNotifiedAt = at; changed = true; orderChanged = true;
     }
     if (!schedule) {
-      if (changed) queueOrderInvalidate(store, order, ['orders']);
+      if (orderChanged) queueOrderInvalidate(store, order, ['orders']);
       continue;
     }
     const offset = schedule.utcOffsetMinutes * 60000;
@@ -103,9 +105,9 @@ export function sweepHubReminders(store, { at, id }) {
         notifyAdmins(store, 'hub_unclaimed_escalated', 'Unclaimed pickup needs Operations', order, `hub-unclaimed:${order.id}`, { createId: id, at });
         store.auditLog.push({ id: id('aud'), at, actorId: null, actorRole: 'system', action: 'hub.unclaimed_escalated', entityType: 'order', entityId: order.id, orderId: order.id, detail: { missedDays: h.missedDays } });
       }
-      changed = true;
+      changed = true; orderChanged = true;
     }
-    if (changed) queueOrderInvalidate(store, order, ['orders']);
+    if (orderChanged) queueOrderInvalidate(store, order, ['orders']);
   }
   return changed;
 }
@@ -139,8 +141,8 @@ export async function routeHubHandover(context) {
       .sort((a, b) => `${b.at}|${b.fileId}`.localeCompare(`${a.at}|${a.fileId}`)).slice(0, limit);
     return { status: 200, body: { scans: rows, nextCursor: rows.length === limit ? `${rows.at(-1).at}|${rows.at(-1).fileId}` : null } };
   }
-  if (req.method === 'GET' && path === '/ops/hub/escalations') return { status: 200, body: { escalations: store.orders.filter(o => o.handover?.escalation).map(o => ({ ...summary(o), escalation: o.handover.escalation })) } };
-  if (req.method === 'GET' && path === '/ops/hub/unclaimed') return { status: 200, body: { orders: store.orders.filter(o => o.state === 'awaiting_collection' && o.handover?.qrToken).map(summary) } };
+  if (req.method === 'GET' && path === '/ops/hub/escalations') return { status: 200, body: staffPageBody(store, url, { escalations: store.orders.filter(o => o.handover?.escalation).map(o => ({ ...summary(o), escalation: o.handover.escalation })) }) };
+  if (req.method === 'GET' && path === '/ops/hub/unclaimed') return { status: 200, body: staffPageBody(store, url, { orders: store.orders.filter(o => o.state === 'awaiting_collection' && o.handover?.qrToken).map(summary) }) };
   if (req.method === 'GET' && ['/staff/hub/handouts', '/ops/hub/handouts'].includes(path)) {
     const rows = (store.hubHandouts || []).filter(r => path.startsWith('/ops/') || r.staffId === user.id);
     const staffTotals = Object.values(rows.reduce((all, row) => { const entry = all[row.staffId] ||= { staffId: row.staffId, name: row.staffName, count: 0 }; entry.count++; return all; }, {}));

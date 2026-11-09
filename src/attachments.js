@@ -1,3 +1,4 @@
+import { assertStaffFile, isShopStaff, actorUserId } from './shop-team.js';
 import { canReadApprovalProof } from './approval-proof.js';
 import { deliveryPackagePhotoId } from './delivery-package-photos.js';
 import { riderPackingFlow, currentInspection, inspectedPackingPhotos, claimBlocksHandover } from './shop-handover.js';
@@ -587,6 +588,7 @@ function manilaDate(value = new Date()) {
 
 // File registry contract. Parent records contain only opaque file IDs; object keys never cross the API boundary.
 export function authorizeFileUpload(user, purpose) {
+  assertStaffFile(user, null, null, { upload: true, purpose });
   const policy = PURPOSE_POLICIES[purpose];
   if (!policy) {
     fail(400, "invalid_file_purpose", "Choose a supported file purpose, including rider_verification_document for rider evidence.", {
@@ -1020,6 +1022,8 @@ export function resolveFileTarget(store, purpose, body, user = null) {
 }
 
 export function authorizeFileAttachOwner(user, file) {
+  if (isShopStaff(user) && file && file.createdByUserId !== actorUserId(user)) forbidden();
+  if (file) assertStaffFile(user, null, null, { upload: true, purpose: file.purpose });
   if (!file) fail(404, "file_not_found", "That file no longer exists. Refresh your uploads and try again.");
   if (!user || file.ownerId !== user.id) forbidden();
   if (['artwork', 'mockup'].includes(file.purpose) && file.savedFileDeletionRequestedAt) {
@@ -1351,6 +1355,7 @@ function canReadReference(user, store, reference, file) {
 }
 
 export function authorizeFileRead(user, store, file) {
+  assertStaffFile(user, store, file);
   if (!file || file.state !== "ready") {
     fail(404, "file_not_found", "That ready file no longer exists. Refresh the record and try again.");
   }

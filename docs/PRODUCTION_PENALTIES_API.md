@@ -117,6 +117,9 @@ entitlement and payout. No deduction is taken from that separate settlement.
 Database constraints reconcile deductions with the lapse ledger and original
 stage shares and prevent changes to an applied lapse or released payout amount.
 
+The staff `/users/:id/production-lapses` read supports optional
+[`limit`/`cursor` pagination](STAFF_LIST_PAGINATION_API.md); the supplier `/me` read keeps its contract.
+
 ## Read endpoints for follow-up apps
 
 | Endpoint | Access | Response |

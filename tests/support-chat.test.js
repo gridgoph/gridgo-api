@@ -166,6 +166,7 @@ async function wipe(database, occurrenceKeys = []) {
     [`${PREFIX}%`],
   );
   await database.query(`DELETE FROM user_role_memberships WHERE user_id LIKE $1`, [`${PREFIX}%`]);
+  await database.query(`DELETE FROM shop_memberships WHERE user_id LIKE $1`, [`${PREFIX}%`]);
   await database.query(`DELETE FROM users WHERE id LIKE $1`, [`${PREFIX}%`]);
 }
 

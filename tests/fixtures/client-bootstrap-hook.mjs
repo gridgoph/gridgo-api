@@ -13,7 +13,7 @@ if (process.env.GRIDGO_TEST_BOOTSTRAP_FULL === '1') registerHooks({
     if (!url.endsWith('/src/server.js')) return result;
     let source = String(result.source);
     for (const [before, after] of [
-      ["const hotRead = req.method === 'GET' && isHotReadPath(pathname);", 'const hotRead = false;'],
+      ["let hotRead = req.method === 'GET' && isHotReadPath(pathname);", 'let hotRead = false;'],
       ['await loadClientBootstrapStore(database, clientId)', 'await load()'],
       ['if (!testerBootstrapNeedsWrite(latest, clientId, ctx)) return latest;', ''],
     ]) {

@@ -1,3 +1,4 @@
+import { staffPageBody } from './staff-list-pages.js';
 import { schedulingWarningOnly, tightDeclineExemption } from './scheduling-policy.js';
 import { reportOrderAllowed } from './review-data.js';
 import { identityHasMembership } from './authorization-context.js';
@@ -43,14 +44,31 @@ function appendEvent(store, input, { at, id, actor = null }) {
   return true;
 }
 
+/** A read-only dependency probe inside the domain transaction. */
+export function hasPendingSupplierPerformanceOutside(store, orderIds, at) {
+  const own = new Set(orderIds);
+  const foreign = (store.orders || []).filter(order => !own.has(order.id)).map(order => order.id);
+  if (!foreign.length) return false;
+  // Earlier foreign events affect incident-time thresholds, including the
+  // immutable consequence on an own event. Prove quiescence on a disposable
+  // graph; until it holds, the caller must retain the complete writer.
+  const probe = structuredClone(store);
+  const before = (probe.supplierPerformanceEvents || []).length;
+  let sequence = 0;
+  syncSupplierPerformance(probe, { at, orderIds: foreign, id: prefix => `${prefix}_pending_probe_${++sequence}` });
+  return (probe.supplierPerformanceEvents || []).length !== before;
+}
+
 /** Called only inside the domain transaction, before save/outbox delivery. */
-export function syncSupplierPerformance(store, { at, id, clockStore = store }) {
+export function syncSupplierPerformance(store, { at, id, clockStore = store, orderIds = null }) {
   if (!performanceEnabled(store, at)) return false;
   const start = Date.parse(store.supplierPerformanceLaunchedAt);
   let changed = false;
   const pending = [];
+  const scope = orderIds && new Set(orderIds);
   const collect = (event) => { if (Date.parse(event.at) >= start && Date.parse(event.at) <= Date.parse(at)) pending.push(event); };
   for (const order of store.orders || []) {
+    if (scope && !scope.has(order.id)) continue;
     if (order.supplierId && order.commercialCommittedAt && order.readyBy && order.state !== 'cancelled') {
       const existing = (store.supplierPerformanceEvents || []).some(row => row.orderId === order.id
         && row.supplierId === order.supplierId && row.sourceKey === 'finish');
@@ -146,7 +164,7 @@ export async function routeSupplierPerformance({ req, url, store, user, readBody
   }
   if (own ? !identityHasMembership(user, 'supplier') : !identityHasMembership(user, 'ops_admin') && !identityHasMembership(user, 'super_admin')) fail(403, 'forbidden');
   if (req.method !== 'GET') fail(405, 'method_not_allowed');
-  if (staff && !staff[1]) return { status: 200, body: { shops: (store.supplierProfiles || []).map(profile => supplierPerformance(store, profile.userId, at)) } };
+  if (staff && !staff[1]) return { status: 200, body: staffPageBody(store, url, { shops: (store.supplierProfiles || []).map(profile => supplierPerformance(store, profile.userId, at)) }) };
   const supplierId = own ? user.id : staff[1];
   if (!hasRole(store, supplierId, 'supplier')) fail(404, 'supplier_not_found');
   return { status: 200, body: { performance: supplierPerformance(store, supplierId, at) } };
