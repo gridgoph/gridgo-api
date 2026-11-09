@@ -1,4 +1,5 @@
 import { orderRemovalBlock } from './order-removal.js';
+import { riderPacksMinimumBuilds, validateRiderPacksMinimumBuilds } from './app-builds.js';
 import { identityHasMembership } from './authorization-context.js';
 import { collectedVoucherFundingMinor } from './voucher-funding.js';
 import { DEFAULT_SAVED_FILES_LIMIT_BYTES } from './file-retention-policy.js';
@@ -265,6 +266,7 @@ export function defaultProductionNudge() {
 
 export function defaultOperationalSettings() {
   return {
+    riderPacksMinimumBuilds: riderPacksMinimumBuilds(),
     foundingTesterLaunchAt: null,
     testerMonthlyBudgetMinor: null,
     testerSignupFormUrlTemplate: null,
@@ -324,6 +326,7 @@ export function defaultOperationalSettings() {
 }
 
 export function validateOperationalSettings(settings) {
+  if (settings?.riderPacksMinimumBuilds !== undefined) validateRiderPacksMinimumBuilds(settings.riderPacksMinimumBuilds, fail);
   if (settings?.clientShopChatContactThreshold !== undefined && (!Number.isSafeInteger(settings.clientShopChatContactThreshold) || settings.clientShopChatContactThreshold < 1 || settings.clientShopChatContactThreshold > 20)) {
     fail(400, 'invalid_chat_contact_threshold', 'Choose an integer between 1 and 20.');
   }
