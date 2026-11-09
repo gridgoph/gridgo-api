@@ -26,6 +26,7 @@ import { sharingTables, emptySharingStore, sharingRows, loadSharingRows } from '
 import { checkoutExitTables, checkoutExitRows, loadCheckoutExitRows } from './checkout-exit-store.js';
 import { voucherTables, emptyVoucherStore, voucherRows, loadVoucherRows } from './voucher-store.js';
 import { loadLegalPenaltyGate } from './legal.js';
+import { manilaDate } from './season-windows.js';
 import { synchronizeProductionHours, productionHoursSynchronized } from "./production-days.js";
 import { staffTables, emptyStaffStore, staffRows, loadStaffRows } from './staff-store.js';
 import { refundTableDefinitions, writeRefundRows, readRefundRows } from "./refund-records.js";
@@ -1141,7 +1142,7 @@ async function readOwnCatalogueRoute(database, graph, ids, pathname, searchParam
  * Approved snapshots can retain photos and a service absent from the draft.
  * Keep JS visibility/cursor policy authoritative, including review-only shops.
  */
-async function readCatalogueGraph(graph, actorIds, { supplierIds = null, itemIds = null, fileId = null, subcategoryCode = null, ratings = true } = {}) {
+async function readCatalogueGraph(graph, actorIds, { supplierIds = null, itemIds = null, fileId = null, subcategoryCode = null, ratings = true, listingOnly = false } = {}) {
   const { loaded, read } = graph;
   if (fileId) {
     await read('supplier_catalog_item_photos', 'WHERE file_id = $1', [fileId]);
@@ -1160,7 +1161,9 @@ async function readCatalogueGraph(graph, actorIds, { supplierIds = null, itemIds
   const owners = [...new Set([...actorIds, ...suppliers])];
   await read('supplier_profiles', 'WHERE user_id = ANY($1::text[])', [suppliers]);
   const snapshotServices = loaded.supplier_catalog_items.map(row => row.approved_snapshot?.item?.supplierServiceId).filter(Boolean);
-  await read('supplier_services', 'WHERE supplier_id = ANY($1::text[]) OR id = ANY($2::text[])', [suppliers, snapshotServices]);
+  if (listingOnly) await read('supplier_services', 'WHERE id = ANY($1::text[])',
+    [[...new Set([...loaded.supplier_catalog_items.map(row => row.supplier_service_id), ...snapshotServices])]]);
+  else await read('supplier_services', 'WHERE supplier_id = ANY($1::text[]) OR id = ANY($2::text[])', [suppliers, snapshotServices]);
   await read('supplier_service_file_formats', 'WHERE supplier_service_id = ANY($1::text[])', [loaded.supplier_services.map(row => row.id)]);
   const items = loaded.supplier_catalog_items.map(row => row.id);
   for (const name of ['supplier_catalog_option_groups', 'supplier_catalog_item_photos', 'supplier_catalog_price_tiers',
@@ -1169,7 +1172,7 @@ async function readCatalogueGraph(graph, actorIds, { supplierIds = null, itemIds
     await read(name, 'WHERE catalog_item_id = ANY($1::text[])', [items]);
   }
   await read('supplier_catalog_options', 'WHERE option_group_id = ANY($1::text[])', [loaded.supplier_catalog_option_groups.map(row => row.id)]);
-  await read('supplier_shop_media', 'WHERE supplier_id = ANY($1::text[])', [suppliers]);
+  if (!listingOnly) await read('supplier_shop_media', 'WHERE supplier_id = ANY($1::text[])', [suppliers]);
   const photos = loaded.supplier_catalog_items.flatMap(row => row.approved_snapshot?.catalogItemPhotos || []).map(row => row.fileId);
   await read('files', 'WHERE file_id = ANY($1::text[])', [[...photos, ...loaded.supplier_catalog_item_photos.map(row => row.file_id),
     ...loaded.supplier_shop_media.map(row => row.file_id), ...(fileId ? [fileId] : [])]]);
@@ -1349,7 +1352,7 @@ async function readFileGraph(graph, actorIds, pathname) {
   return graph.finish();
 }
 
-const HOT_READ_PATHS = new Set(['/orders', '/jobs', '/settings', '/taxonomy', '/zones', '/catalog', '/ops/product-type-requests', '/ops/catalog-reviews', '/ops/shop-failures', '/ops/colour-price-checks', '/auth/me/ops', '/auth/me/admin', '/auth/me/supplier', '/auth/me/rider', '/auth/me/client', '/auth/me', '/me', '/me/home-summary']);
+const HOT_READ_PATHS = new Set(['/orders', '/jobs', '/settings', '/taxonomy', '/zones', '/catalog', '/ops/product-type-requests', '/ops/catalog-reviews', '/ops/shop-failures', '/ops/colour-price-checks', '/auth/me/ops', '/auth/me/admin', '/auth/me/supplier', '/auth/me/rider', '/auth/me/client', '/auth/me', '/me', '/me/home-summary', '/me/legal/pending', '/featured-prints', '/support-chat/me', '/api/support-chat/me', '/season-windows', '/devices']);
 const OPS_QUEUE_READ = /^\/(claims|issues)(?:\/[^/]+)?$|^\/escalations$/;
 const USER_READ = /^\/users(?:\/[^/]+(?:\/(?:verification-documents|payout-account))?)?$/;
 const AUDIT_READ = /^\/audit$|^\/orders\/[^/]+\/audit$/;
@@ -1926,13 +1929,33 @@ export async function appendTesterProgramAudit(database, entry, at) {
   [id, eventAt, actorId, actorRole, action, entityType, entityId, orderId, data]);
 }
 
-export async function loadHotReadStore(database, clerkSubject, pathname, { after = '', status = null, sessionHash = null, role, includeReviewData = false, searchParams = new URLSearchParams() } = {}) {
+export async function loadHotReadStore(database, clerkSubject, pathname, { after = '', status = null, sessionHash = null, role, includeReviewData = false, searchParams = new URLSearchParams(), at = new Date().toISOString() } = {}) {
   if (!isHotReadPath(pathname)) throw new Error('Unsupported targeted read path');
   return database.snapshot(async () => {
     const graph = readGraph(database), { loaded, read } = graph;
     await read('users', 'WHERE clerk_user_id = $1', [clerkSubject]);
     const ids = loaded.users.map(row => row.id);
     await readIdentity(graph, ids);
+    // These handlers query their own legal/chat rows. They need only the
+    // current caller's membership context from the compatibility graph.
+    if (['/me/legal/pending', '/support-chat/me', '/api/support-chat/me'].includes(pathname)) return graph.finish();
+    if (pathname === '/devices') {
+      await read('device_tokens', 'WHERE user_id = ANY($1::text[])', [ids]);
+      return graph.finish();
+    }
+    if (pathname === '/season-windows') {
+      await read('season_windows', 'WHERE end_date >= $1::date', [manilaDate(at)]);
+      return graph.finish();
+    }
+    if (pathname === '/featured-prints') {
+      await read('platform_settings', 'WHERE singleton');
+      const configured = loaded.platform_settings[0]?.settings?.featuredPrints?.catalogItemIds;
+      const itemIds = Array.isArray(configured) ? configured.filter(id => typeof id === 'string' && !id.includes('\0')) : [];
+      // Reuse the catalogue's approved-snapshot, eligibility and photo graph;
+      // unrelated listings, orders and ratings are not part of these cards.
+      await readCatalogueGraph(graph, ids, { itemIds, ratings: false, listingOnly: true });
+      return graph.finish();
+    }
     if (BASKET_READ.test(pathname)) return readBasketGraph(database, graph, ids, pathname, searchParams, { role, includeReviewData });
     if (isStaffDeskRead(pathname)) {
       if (pathname === '/staff/me' && sessionHash) await read('audit_log', "WHERE actor_id = ANY($1::text[]) AND action = 'staff.sign_in' AND data->'detail'->>'sessionHash' = $2 LIMIT 1", [ids, sessionHash]);

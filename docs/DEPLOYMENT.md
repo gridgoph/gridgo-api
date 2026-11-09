@@ -665,3 +665,21 @@ Retain the statistics for before/after comparisons; do not reset them during a
 release. Query text is normalized, but access to these statistics remains an
 operator privilege. Production acceptance for issue 307 still requires actual
 API request-log measurements after the dev release and production rollout.
+
+The startup-read slice also scopes `GET /me/legal/pending`, `/support-chat/me`
+(and its `/api` alias), `/featured-prints`, `/season-windows`, and authenticated
+`GET /devices`. Legal acceptances and chat rows still come from their existing
+per-user SQL handlers on every read; there is no shared authorization or consent
+cache. Featured Prints loads only the curated listings, their current/approved
+service and photo facts, and shop eligibility. Season reads omit expired windows
+using the same inclusive Manila day as the public projection. Device listings
+read only the caller's registrations with the existing owner index.
+
+`tests/startup-reads-postgres.test.js` compares frozen-clock HTTP bodies against
+the full-store dispatcher across roles, review users and anonymous/unknown
+identities. Its 2,000/20,000-notification fixture asserts identical scoped graph
+rows and rejects inbox/audit/location/outbox reads; diagnostics record timings
+without imposing a flaky shared-runner latency threshold. The existing shop-team
+fallback remains unchanged. Authenticated device **writes** retain their existing
+full-store transaction and `save()` maintenance boundary; they are not covered
+by this read-only optimization.
