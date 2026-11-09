@@ -2,6 +2,9 @@
 
 Server contract for report **63AFAA4A**, tracked in [gridgo-api#204](https://github.com/gridgoph/gridgo-api/issues/204). Client wallet/checkout screens and dashboard screens ship separately. PHP money is integer centavos: the tester campaign uses `valueMinor: 1500` and `validityDays: 7`.
 
+Campaign lists and Operations account-voucher reads support optional
+[`limit`/`cursor` pages](STAFF_LIST_PAGINATION_API.md). Existing wallet tabs and unpaged responses are unchanged.
+
 ## Identity and storage
 
 All routes require a Clerk session and database membership. `/admin/*` below requires Super Admin; Operations has only the explicit read-only lookup. Clients can read and redeem only their own vouchers. Email matching finds existing client memberships; it never provisions users, links identities, or changes roles. No transfer, cash conversion, minimum-order rule, percentage voucher or free-delivery type exists. The Founding Tester referral programme and [launch Friend Pass](#launch-promotions) have separate invitation and reward rules.

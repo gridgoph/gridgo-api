@@ -356,3 +356,31 @@ test('HTTP promoting a second Owner preserves the last-owner guard, demotion hid
   assert.equal((await api('supplier','GET','/orders/order')).body.error,'shop_access_removed');
   assert.equal((await api('other','GET','/orders/order',null,supplier)).status,200);
 });
+
+test('paged staff administration preserves shop refusals and independent admin/Owner access', {skip}, async t => {
+  const {db,api} = await setup(t, store => {
+    store.shopMemberships.push({shopId:'supplier',userId:'admin',role:'staff',status:'active',createdAt:AT,updatedAt:AT});
+  });
+  const paths = ['/admin/staff','/admin/staff/invites','/admin/staff/roles'];
+  for (const status of ['active','pending','removed']) {
+    await mutate(db, store => { store.shopMemberships.find(row => row.userId === 'other').status = status; });
+    const error = status === 'active' ? 'shop_owner_required' : status === 'pending' ? 'shop_approval_pending' : 'shop_access_removed';
+    for (const path of [...paths,'/supplier-services']) for (const query of ['', '?limit=1', '?cursor=bad']) {
+      const result = await api('other','GET',path+query,null,supplier);
+      assert.equal(result.status,403,bodyOf(result)); assert.equal(result.body.error,error);
+    }
+  }
+  for (const path of paths) {
+    for (const who of ['supplier','other']) assert.equal((await api(who,'GET',path+'?limit=1',null,supplier)).status,403);
+    const admin = await api('admin','GET',path+'?limit=1',null,{headers:{'X-GRIDGO-Role':'super_admin'}});
+    assert.equal(admin.status,200,bodyOf(admin)); assert.ok('nextCursor' in admin.body);
+    assert.equal((await api('admin','GET',path+'?limit=1')).status,200);
+    assert.equal((await api('admin','GET',path+'?limit=1',null,supplier)).body.error,'shop_owner_required');
+  }
+  await mutate(db, store => { Object.assign(store.shopMemberships.find(row => row.userId === 'other'),{role:'owner',status:'active'}); });
+  const page = await api('other','GET','/supplier-services?limit=1',null,supplier);
+  assert.equal(page.status,200,bodyOf(page)); assert.equal(page.body.services.length,1);
+  assert.ok(page.body.services.every(row => row.supplierId === 'supplier'));
+  assert.ok('nextCursor' in page.body);
+  assert.equal((await api('other','GET','/admin/staff?limit=1',null,supplier)).status,403);
+});

@@ -4,6 +4,9 @@ Refs gridgoph/gridgo-api#124 and gridgoph/gridgo-api#125.
 
 All routes use the existing Clerk instance. The Admin App may select its staff context with `X-GRIDGO-Role: staff`; Operations/Super Admin feed screens must use their corresponding membership context. GRIDGO database memberships are authoritative. An invite grants the `staff` membership and a configurable staff profile role; the built-in `hub_staff` role permits handouts. Custom role codes never grant Operations, Super Admin, rider or supplier permissions. Operations and Super Admin are staff without an invite or staff profile: their own membership grants every staff route with `canHandout:true`, and they select it with `X-GRIDGO-Role: ops_admin` or `super_admin` (the projection's `role` is that membership). `X-GRIDGO-Role: staff` stays a 403 for an account without the `staff` membership. Account suspension, staff-profile suspension and membership removal take effect on the next request. A staff account may retain other existing memberships.
 
+Staff profile, role, invite, hub escalation and unclaimed lists support optional
+[`limit`/`cursor` pages](STAFF_LIST_PAGINATION_API.md). Unpaged callers keep their complete response.
+
 ## Staff provisioning (Super Admin dashboard)
 
 | Method | Endpoint | Body / response |

@@ -7,6 +7,9 @@ temporary closure uses `is_closed`, and order clocks use `orders.data`.
 Apply forward migration `1794146000000_shop_weekday_hours` before this API:
 it adds a constraint for optional overrides, with no profile/order backfill.
 
+The `/ops/shops/hours` roster supports optional
+[`limit`/`cursor` pages](STAFF_LIST_PAGINATION_API.md); per-shop reads retain their contract.
+
 ## Supplier and dashboard routes
 
 All routes require Clerk authentication and the indicated database role.

@@ -4,6 +4,9 @@ Season windows are public awareness messages written by Super Admin. They never
 change matching, checkout, supplier availability, fees, or which deadlines can be
 booked. Overlapping windows are valid and returned independently.
 
+The admin window list supports optional [`limit`/`cursor` pages](STAFF_LIST_PAGINATION_API.md).
+The `banners` subset remains independent of the page; unpaged and public reads keep their contract.
+
 ## Dates and banner timing
 
 `startDate` and `endDate` are real `YYYY-MM-DD` calendar dates, inclusive, in
