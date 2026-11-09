@@ -44,13 +44,15 @@ function appendEvent(store, input, { at, id, actor = null }) {
 }
 
 /** Called only inside the domain transaction, before save/outbox delivery. */
-export function syncSupplierPerformance(store, { at, id, clockStore = store }) {
+export function syncSupplierPerformance(store, { at, id, clockStore = store, orderIds = null }) {
   if (!performanceEnabled(store, at)) return false;
   const start = Date.parse(store.supplierPerformanceLaunchedAt);
   let changed = false;
   const pending = [];
+  const scope = orderIds && new Set(orderIds);
   const collect = (event) => { if (Date.parse(event.at) >= start && Date.parse(event.at) <= Date.parse(at)) pending.push(event); };
   for (const order of store.orders || []) {
+    if (scope && !scope.has(order.id)) continue;
     if (order.supplierId && order.commercialCommittedAt && order.readyBy && order.state !== 'cancelled') {
       const existing = (store.supplierPerformanceEvents || []).some(row => row.orderId === order.id
         && row.supplierId === order.supplierId && row.sourceKey === 'finish');
