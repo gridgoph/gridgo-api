@@ -1,3 +1,4 @@
+import { shopTeamTables, emptyShopTeam, shopTeamRows, loadShopTeamRows, ensureShopOwners } from './shop-team-store.js';
 import { STAFF_LIST_PAGE, readStaffPage, staffPageRequested } from './staff-list-pages.js';
 import { orderReadQuery, activeOrderSql, attachOrderRemovalContext } from './order-removal.js';
 import { createHash } from 'node:crypto';
@@ -112,6 +113,7 @@ const TABLES = [
   sampleBatchTable,
   performanceTable,
   ...staffTables,
+  ...shopTeamTables.filter(table => table.name !== 'order_actions'),
   { name: "client_carts", keys: ["id"], columns: ["id", "client_id", "state", "version", "service_level", "scheduled_for", "fulfillment_mode", "default_dropoff_lat", "default_dropoff_lng", "default_dropoff_label", "checked_out_order_id", "created_at", "updated_at", "checked_out_at", "deadline", "request_fulfillment"] },
   { name: "client_cart_lines", keys: ["id"], columns: ["id", "cart_id", "supplier_id", "catalog_item_id", "option_ids", "speed_tier_id", "quantity", "service_fee_snapshot", "structured_spec", "artwork_file_id", "artwork_links", "artwork_attachments", "artwork_warning_acceptances", "print_layout", "quantity_mode", "color_targets", "cover_spine", "special_instructions", "document_pages", "match_deadline", "deadline", "delivery_key", "sample", "sample_batch_draft_id", "sample_batch_pricing", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "created_at", "updated_at"] },
   { name: "order_jobs", keys: ["id"], columns: ["id", "order_id", "supplier_id", "rider_id", "state", "fulfillment_mode", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "supplier_subtotal_minor", "delivery_distance_meters", "delivery_fee_minor", "rider_commission_bps", "estimated_hours", "estimated_production_minutes", "scheduled_for", "deadline", "created_at", "updated_at"] },
@@ -143,6 +145,7 @@ const TABLES = [
   { name: "credit_ledger", keys: ["id"], columns: ["id", "user_id", "amount_minor", "balance_after_minor", "created_at", "position", "data"] },
   { name: "claims", keys: ["id"], columns: ["id", "order_id", "status", "created_at", "updated_at", "position", "data"] },
   { name: "issues", keys: ["id"], columns: ["id", "order_id", "client_id", "claim_id", "kind", "status", "created_at", "updated_at", "position", "data"] },
+  ...shopTeamTables.filter(table => table.name === 'order_actions'),
   { name: "audit_log", appendOnly: true, keys: ["id"], columns: ["id", "at", "actor_id", "actor_role", "action", "entity_type", "entity_id", "order_id", "position", "data"] },
   { name: "notifications", keys: ["id"], columns: ["id", "user_id", "type", "order_id", "created_at", "read_at", "deleted_at", "position", "data"] },
   { name: "location_pings", keys: ["id"], columns: ["id", "order_id", "rider_id", "lat", "lng", "accuracy_meters", "at", "position", "data"] },
@@ -153,6 +156,7 @@ const TABLES = [
 export function emptyStore() {
   return {
     ...emptyStaffStore(),
+    ...emptyShopTeam(),
     ...emptyVoucherStore(),
     orderSurveys: [],
     ...emptySharingStore(),
@@ -238,6 +242,8 @@ export function emptyStore() {
 
 function rowsFromStore(store) {
   const rows = Object.fromEntries(TABLES.map(({ name }) => [name, []]));
+  ensureShopOwners(store);
+  shopTeamRows(store, rows);
   staffRows(store, rows);
   voucherRows(store, rows);
   performanceRows(store, rows);
@@ -931,7 +937,9 @@ async function readIdentity(graph, userIds) {
 
 async function readNotificationContext(graph, { orderIds = [], caseIds = [], activeRiderIds = [] } = {}) {
   const { loaded, read } = graph;
-  const recipientIds = loaded.users.map(row => row.id);
+  await read('shop_memberships', 'WHERE user_id = ANY($1::text[])', [loaded.users.map(row => row.id)]);
+  const recipientIds = [...new Set([...loaded.users.map(row => row.id), ...(loaded.shop_memberships || []).map(row => row.shop_id)])];
+  await read('user_role_memberships', 'WHERE user_id = ANY($1::text[])', [recipientIds]);
   await read('approval_cases', 'WHERE user_id = ANY($1::text[]) OR id = ANY($2::text[])', [recipientIds, caseIds]);
   // A test-operations recipient needs the case owner's review mark.
   const owners = loaded.approval_cases.map(row => row.user_id);
@@ -1571,6 +1579,7 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
   }
   await read('order_line_item_options', 'WHERE order_line_item_id = ANY($1::text[])', [loaded.order_line_items.map(row => row.id)]);
   await read('refund_payments', 'WHERE request_id = ANY($1::text[])', [loaded.refund_settlements.map(row => row.request_id)]);
+  if (staff || selected === 'supplier') await read('order_actions', 'WHERE order_id = ANY($1::text[])', [loaded.orders.map(row => row.id)]);
   const suppliers = [...new Set(loaded.orders.map(row => row.supplier_id).filter(Boolean))];
   await read('supplier_profiles', 'WHERE user_id = ANY($1::text[])', [suppliers]);
   await read('supplier_payout_accounts', 'WHERE supplier_id = ANY($1::text[])', [suppliers]);
@@ -1703,6 +1712,7 @@ export async function loadTesterProgramIdentityStore(database, clerkSubject) {
     const graph = readGraph(database);
     await graph.read('users', 'WHERE clerk_user_id = $1', [clerkSubject]);
     await readIdentity(graph, graph.loaded.users.map(row => row.id));
+    await graph.read('shop_memberships', 'WHERE user_id = ANY($1::text[])', [graph.loaded.users.map(row => row.id)]);
     return graph.finish();
   });
 }
@@ -1821,6 +1831,9 @@ export async function loadClientSaveStore(database, clerkSubject, pathname, body
   await read('users', `WHERE id=ANY($1::text[]) OR lower(btrim(email))=ANY($2::text[]) OR email ~ '[^!-~]'
     OR id IN (SELECT user_id FROM user_role_memberships WHERE role IN ('ops_admin','super_admin','rider'))`, [related, inviteEmails]);
   await readIdentity(graph, loaded.users.map(row => row.id));
+  // Preserve current shop access for the actor and existing Owner rows for
+  // supplier context; a partial save must never synthesize over a removed row.
+  await read('shop_memberships', 'WHERE user_id=ANY($1::text[]) OR shop_id=ANY($1::text[])', [loaded.users.map(row => row.id)]);
   // Attributed competitor rows are context for the existing ambiguity policy.
   for (const name of ['tester_invites', 'promotion_invites']) await read(name, 'WHERE client_id=ANY($1::text[])', [loaded.users.filter(row => inviteEmails.includes(String(row.email || '').trim().toLowerCase())).map(row => row.id)]);
   await read('vouchers', "WHERE client_id=ANY($1::text[]) AND promotion_kind IN ('founding','friend_pass')", [loaded.users.map(row => row.id)]);
@@ -2122,6 +2135,7 @@ export async function loadNotificationStore(database, clerkSubject, { lastEventI
       const orderIds = [...new Set(loaded.notifications.map(row => row.order_id).filter(Boolean))];
       const caseIds = [...new Set(loaded.notifications.map(row => row.data?.approvalCaseId).filter(Boolean))];
       await read('user_role_memberships', 'WHERE user_id = $1', [userId]);
+      await read('shop_memberships', 'WHERE user_id = $1', [userId]);
       await read('approval_cases', 'WHERE user_id = $1 OR id = ANY($2::text[])', [userId, caseIds]);
       if (loaded.users[0].review_data) {
         // Test operations inbox visibility checks each case owner's review mark.
@@ -2147,6 +2161,7 @@ export async function loadNotificationStore(database, clerkSubject, { lastEventI
 function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supplierPerformanceLaunchedAt = null, writable = true } = {}) {
   const store = emptyStore();
   store.legalPenaltyGate = legalPenaltyGate;
+  loadShopTeamRows(store, loaded);
   loadStaffRows(store, loaded);
   loadVoucherRows(store, loaded);
   loadPerformanceRows(store, loaded);

@@ -4,6 +4,8 @@ import { randomUUID } from 'node:crypto';
 
 const context = new AsyncLocalStorage();
 export const withAuditRequest = (req, callback) => context.run({ req, actor: null }, callback);
+export function currentAuditRequest() { return context.getStore()?.req || null; }
+export function currentAuditActor() { return context.getStore()?.actor || null; }
 export function setAuditActor(actor) { if (context.getStore()) context.getStore().actor = actor; }
 
 // Audit evidence is a business projection, never a copy of request bodies or files.
@@ -66,8 +68,8 @@ function sourceContext() {
   return { app: clean(req.headers['x-gridgo-app']) || clean(req.headers.origin) || 'api', device: clean(req.headers['user-agent']) };
 }
 export function appendAudit(store, { actor, action, entityType, entityId, orderId, detail, reason, before, after }, { id = () => `aud_${randomUUID()}`, at = new Date().toISOString() } = {}) {
-  const entry = { id: id('aud'), at, actorId: actor?.role === 'system' ? null : actor?.id || null,
-    actorRole: actor?.role || 'system', actorName: actor?.name || (actor?.role === 'system' || !actor ? 'System' : null),
+  const entry = { id: id('aud'), at, actorId: actor?.role === 'system' ? null : actor?.actorUserId || actor?.id || null,
+    actorRole: actor?.role || 'system', ...(actor?.shopRole ? { actorShopRole: actor.shopRole } : {}), actorName: actor?.actorName || actor?.name || (actor?.role === 'system' || !actor ? 'System' : null),
     action, entityType: entityType || null, entityId: entityId || null, orderId: orderId || null,
     detail: detail ?? null, reason: reason ?? null, ...(before !== undefined ? { before } : {}), ...(after !== undefined ? { after } : {}), ...sourceContext() };
   (store.auditLog ||= []).push(entry);
@@ -81,6 +83,13 @@ export function finalizeAuditEntries(store, baseline) {
     if (oldIds.has(entry.id)) continue;
     const actor = store.users?.find(user => user.id === entry.actorId) || baseline?.users?.find(user => user.id === entry.actorId);
     const active = context.getStore()?.actor;
+    if (active?.actorUserId && (entry.actorId === active.id || entry.actorId === active.actorUserId)) {
+      entry.actorId = active.actorUserId;
+      entry.actorName = active.actorName || active.name;
+      entry.actorRole = active.role;
+      if (active.shopRole) entry.actorShopRole = active.shopRole;
+    }
+
     entry.actorName ||= actor?.name || (entry.actorId ? null : 'System');
     entry.actorRole ||= active?.id === entry.actorId ? active.role : actor?.role || 'system';
     const source = sourceContext();

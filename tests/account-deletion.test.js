@@ -167,6 +167,7 @@ test('HTTP requests bypass account holds, audit atomically and notify only staff
     await stopApi(instance);
     await database.query('DELETE FROM account_deletion_requests WHERE user_id LIKE $1 OR contact_email=$2', [`${PREFIX}%`, `${PREFIX}@example.test`]);
     await database.query('DELETE FROM notifications WHERE user_id LIKE $1', [`${PREFIX}%`]);
+    await database.query('DELETE FROM shop_memberships WHERE user_id LIKE $1', [`${PREFIX}%`]);
     await database.query('DELETE FROM user_role_memberships WHERE user_id LIKE $1', [`${PREFIX}%`]);
     await database.query('DELETE FROM users WHERE id LIKE $1', [`${PREFIX}%`]);
     await database.close();
@@ -294,6 +295,7 @@ test('HTTP Apple revocation binds Clerk identity, audits results, retries safely
     await new Promise(resolve => mock.close(resolve));
     await database.query('DELETE FROM account_deletion_requests WHERE user_id LIKE $1', [`${prefix}%`]);
     await database.query('DELETE FROM notifications WHERE user_id LIKE $1', [`${prefix}%`]);
+    await database.query('DELETE FROM shop_memberships WHERE user_id LIKE $1', [`${prefix}%`]);
     await database.query('DELETE FROM user_role_memberships WHERE user_id LIKE $1', [`${prefix}%`]);
     await database.query('DELETE FROM users WHERE id LIKE $1', [`${prefix}%`]);
     await database.close();

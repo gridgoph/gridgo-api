@@ -23,6 +23,24 @@ function denied(user, store, file) {
   assert.throws(() => authorizeFileRead(user, store, file), { status: 403, code: "forbidden" });
 }
 
+test('shop Staff can read only their live legacy multi-shop job artwork and mockups', () => {
+  const { order, store } = fixture();
+  order.supplierId = null;
+  const staff = { ...actor('supplier'), shopRole: 'staff', actorUserId: 'teammate' };
+  for (const file of store.files) {
+    if (file.fileId.endsWith('-a')) assert.doesNotThrow(() => authorizeFileRead(staff, store, file));
+    else denied(staff, store, file);
+  }
+  for (const purpose of ['artwork', 'mockup']) {
+    const file = { ...store.files.find(row => row.purpose === purpose), fileId: `unattributed-${purpose}`,
+      ownerId: staff.id, createdByUserId: staff.actorUserId,
+      references: [{ type: 'order', id: order.id, field: `${purpose}FileIds` }] };
+    denied(staff, store, file);
+  }
+  store.orderJobs[0].state = 'cancelled';
+  denied(staff, store, store.files[0]);
+});
+
 for (const role of ["supplier", "rider"]) for (const key of ["a", "b"]) {
   test(`${role} ${key} lists only its job files, including when primary order ids point elsewhere`, () => {
     const { order, store } = fixture();

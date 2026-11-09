@@ -311,3 +311,34 @@ test('logical removals exclude hidden notifications from scoped append ordinals'
   await db.query("DELETE FROM notifications WHERE id='hidden_later'");
   assert.equal(await count(),2,'hidden deletes do not decrement the active count');
 });
+
+test('scoped client saves preserve shop membership refusals and never revive removed Owners', { skip }, async t => {
+  const { setupSaveParity, saveParityApi } = await import('./fixtures/save-parity.js');
+  const db = createDatabase(process.env); t.after(() => db.close());
+  await setupSaveParity(db);
+  await db.query(`INSERT INTO shop_memberships(shop_id,user_id,role,status,created_at,updated_at)
+    VALUES('supplier','client','staff','active',$1,$1)`, [AT]);
+  await db.query("UPDATE shop_memberships SET status='removed' WHERE shop_id='supplier' AND user_id='supplier'");
+  const api = await saveParityApi(t, false);
+  for (const status of ['active', 'pending', 'removed']) {
+    await db.query("UPDATE shop_memberships SET status=$1 WHERE user_id='client'", [status]);
+    await db.transaction(async () => {
+      const graph = await adapter.loadClientSaveStore(db, 'clerk_client', '/me/matches', { subcategoryCode: 'flyers' });
+      assert.ok(graph, 'shop membership context must retain the scoped writer');
+      assert.equal(graph.shopMemberships.find(row => row.userId === 'client').status, status);
+      assert.equal(graph.shopMemberships.find(row => row.userId === 'supplier').status, 'removed');
+      await adapter.saveStore(db, graph);
+    });
+    for (const [method, path, body] of [
+      ['POST', '/me/matches', { subcategoryCode: 'flyers' }],
+      ['PATCH', '/me/carts/save_cart/lines/save_line', { quantity: 25 }],
+    ]) {
+      const result = await api('client', method, path, body, { headers: { 'X-GRIDGO-Role': 'supplier' } });
+      assert.equal(result.status, 403, JSON.stringify(result.body));
+      assert.equal(result.body.error, status === 'active' ? 'shop_owner_required'
+        : status === 'pending' ? 'shop_approval_pending' : 'shop_access_removed');
+    }
+  }
+  assert.equal((await db.query("SELECT status FROM shop_memberships WHERE user_id='supplier'")).rows[0].status, 'removed');
+  assert.equal((await db.query("SELECT version FROM client_carts WHERE id='save_cart'")).rows[0].version, 1);
+});

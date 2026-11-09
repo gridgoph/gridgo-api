@@ -1,3 +1,5 @@
+import { actorUserId } from './shop-team.js';
+import { appendAudit } from './audit.js';
 import { tooManyRequests } from "./support-rate-limit.js";
 import { activeOrderSql } from './order-removal.js';
 import { notifyAdmins } from "./domain-events.js";
@@ -89,7 +91,7 @@ export async function pickupChatUnreadCounts(database, orders, user, store) {
        LEFT JOIN pickup_chat_reads r ON r.order_id = m.order_id AND r.rider_id = m.rider_id AND r.user_id = $3
       WHERE m.sender_user_id <> $3 AND (r.last_read_at IS NULL OR m.created_at > r.last_read_at)
       GROUP BY m.order_id, m.rider_id`,
-    [eligible.map(order => order.id), eligible.map(order => order.riderId), user.id],
+    [eligible.map(order => order.id), eligible.map(order => order.riderId), actorUserId(user)],
   );
   for (const row of result.rows) counts.set(row.order_id, row.unread);
   return counts;
@@ -271,8 +273,8 @@ export async function routePickupChat({ req, res, pathname, user, store, databas
   const chat = pickupChatProjection(order, user, store, at);
 
   if (!writing) {
-    const messages = await listMessages(database, store, order, user.id);
-    await markRead(database, order, user.id);
+    const messages = await listMessages(database, store, order, actorUserId(user));
+    await markRead(database, order, actorUserId(user));
     send(res, 200, { chat, messages });
     return true;
   }
@@ -285,7 +287,7 @@ export async function routePickupChat({ req, res, pathname, user, store, databas
     });
     return true;
   }
-  if (tooManyRequests(`pickup-chat:${user.id}`, POST_LIMIT, POST_WINDOW_MS)) {
+  if (tooManyRequests(`pickup-chat:${actorUserId(user)}`, POST_LIMIT, POST_WINDOW_MS)) {
     send(res, 429, { error: "too_many_requests", message: "You are sending messages too fast. Wait a moment and try again." });
     return true;
   }
@@ -300,6 +302,7 @@ export async function routePickupChat({ req, res, pathname, user, store, databas
     send(res, 400, { error: "invalid_request", message: parsed.message });
     return true;
   }
+  if (user.shopRole === 'staff' && photos.fileIds.some(id => store.files.find(file => file.fileId === id)?.createdByUserId !== actorUserId(user))) { send(res, 403, { error: 'forbidden' }); return true; }
   const refused = checkPhotos(store, user.id, photos.fileIds);
   if (refused) {
     send(res, refused.status, refused.body);
@@ -309,18 +312,19 @@ export async function routePickupChat({ req, res, pathname, user, store, databas
     `INSERT INTO pickup_chat_messages (order_id, rider_id, sender_user_id, sender_role, body, attachment_file_ids, created_at)
      VALUES ($1, $2, $3, $4, $5, $6::text[], $7)
      RETURNING id, sender_user_id, sender_role, body, attachment_file_ids, created_at`,
-    [order.id, order.riderId, user.id, party, parsed.body, photos.fileIds, at],
+    [order.id, order.riderId, actorUserId(user), party, parsed.body, photos.fileIds, at],
   );
   bindPhotos(store, photos.fileIds, { messageId: inserted.rows[0].id, order });
-  await markRead(database, order, user.id);
+  await markRead(database, order, actorUserId(user));
   notifyCounterpart(store, order, party, { createId, at });
   // Staff inbox coverage is generic: it grants no access to private messages.
   notifyAdmins(store, "pickup_chat_activity", "Pick-up chat activity", order,
     `pickup-chat:${inserted.rows[0].id}`, { createId, at });
   queueInvalidate(store, { resource: "jobs", id: order.id, userIds: [order.supplierId] });
   queueInvalidate(store, { resource: "orders", id: order.id, userIds: [order.riderId] });
+  appendAudit(store, { actor: user, action: 'pickup_chat.message_sent', entityType: 'pickup_chat_message', entityId: inserted.rows[0].id, orderId: order.id }, { at });
   await save(store);
-  send(res, 201, { chat, message: mapMessage(inserted.rows[0], user.id, store) });
+  send(res, 201, { chat, message: mapMessage(inserted.rows[0], actorUserId(user), store) });
   return true;
 }
 

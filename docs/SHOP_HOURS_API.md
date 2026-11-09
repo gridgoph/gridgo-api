@@ -16,8 +16,8 @@ All routes require Clerk authentication and the indicated database role.
 
 | Route | Role | Response/action |
 | --- | --- | --- |
-| `GET /me/shop-hours` | Supplier | Own `{ hours }` |
-| `PATCH /me/shop-hours` | Supplier | Edit own base schedule, temporary closure, extension |
+| `GET /me/shop-hours` | Shop Owner | Own `{ hours }` |
+| `PATCH /me/shop-hours` | Shop Owner | Edit own base schedule, temporary closure, extension |
 | `GET /ops/shops/hours` | Operations/Super Admin | `{ shops: [{ supplierId, shopName, hours }] }` |
 | `GET /ops/shops/:supplierId/hours` | Operations/Super Admin | One shop's `{ hours }` |
 | `PATCH /ops/shops/:supplierId/hours` | Operations/Super Admin | Temporary closure only, with required `reason` |
