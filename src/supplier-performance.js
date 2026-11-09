@@ -1,3 +1,4 @@
+import { staffPageBody } from './staff-list-pages.js';
 import { schedulingWarningOnly, tightDeclineExemption } from './scheduling-policy.js';
 import { reportOrderAllowed } from './review-data.js';
 import { identityHasMembership } from './authorization-context.js';
@@ -146,7 +147,7 @@ export async function routeSupplierPerformance({ req, url, store, user, readBody
   }
   if (own ? !identityHasMembership(user, 'supplier') : !identityHasMembership(user, 'ops_admin') && !identityHasMembership(user, 'super_admin')) fail(403, 'forbidden');
   if (req.method !== 'GET') fail(405, 'method_not_allowed');
-  if (staff && !staff[1]) return { status: 200, body: { shops: (store.supplierProfiles || []).map(profile => supplierPerformance(store, profile.userId, at)) } };
+  if (staff && !staff[1]) return { status: 200, body: staffPageBody(store, url, { shops: (store.supplierProfiles || []).map(profile => supplierPerformance(store, profile.userId, at)) }) };
   const supplierId = own ? user.id : staff[1];
   if (!hasRole(store, supplierId, 'supplier')) fail(404, 'supplier_not_found');
   return { status: 200, body: { performance: supplierPerformance(store, supplierId, at) } };

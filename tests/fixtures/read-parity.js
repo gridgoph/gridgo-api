@@ -55,6 +55,12 @@ export function readParityEnv(full, at) {
     };
     ${full ? `registerHooks({ load(url, context, next) {
       const result = next(url, context);
+      if (url.endsWith('/src/server.js')) {
+        // Baseline retains the original complete-reader call; the current GET
+        // fallback opts into compatibility ordering after page indexes ship.
+        return { ...result, source: String(result.source).replace(
+          "await load({ legacyHeapOrder: req.method === 'GET' })", 'await load()') };
+      }
       if (url.endsWith('/src/postgres-store.js')) {
         const source = String(result.source).replace(/export function isHotReadPath\\(pathname\\) \\{[^}]+\\}/,
           'export function isHotReadPath() { return false; }');

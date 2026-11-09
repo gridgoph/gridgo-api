@@ -484,6 +484,9 @@ only for opaque staff-catalogue cursors containing non-identifier characters;
 normal generated-ID cursors retain the existing page index/collation.
 `1794173300000_staff_report_reads` concurrently adds the pricing date-range
 and monthly-completion candidate indexes.
+Migration `1794181000000_staff_list_pages` adds the opt-in staff list keyset/filter
+indexes with the same individual concurrent build procedure. See
+[staff pagination](STAFF_LIST_PAGINATION_API.md) for route coverage and legacy compatibility.
 Apply `npm run migrate` (node-pg-migrate up) to the dev database after merge and before running this API release.
 `pgm.noTransaction()` makes node-pg-migrate leave its default single transaction
 for these migrations only. Earlier migrations and completed index builds can
@@ -519,7 +522,22 @@ WHERE n.nspname = 'public' AND c.relname IN (
   'location_pings_assignment_latest_idx', 'location_pings_received_samples_idx',
   'orders_reschedule_desk_idx', 'orders_hub_escalation_desk_idx',
   'orders_hub_unclaimed_desk_idx', 'notifications_image_reference_idx',
-  'orders_pricing_created_idx', 'orders_pricing_completed_idx', 'orders_pricing_timeline_idx'
+  'orders_pricing_created_idx', 'orders_pricing_completed_idx', 'orders_pricing_timeline_idx',
+  'staff_profiles_page_idx', 'staff_invites_page_idx',
+  'staff_roles_page_idx', 'voucher_campaigns_page_idx',
+  'vouchers_client_page_idx', 'vouchers_client_status_page_idx',
+  'orders_hub_escalation_page_idx', 'orders_hub_unclaimed_page_idx',
+  'production_lapses_page_idx', 'supplier_services_page_idx',
+  'supplier_services_owner_page_idx', 'supplier_services_state_page_idx',
+  'supplier_services_owner_state_page_idx', 'supplier_profiles_page_idx',
+  'orders_reschedule_page_idx', 'orders_reschedule_filter_page_idx',
+  'refund_requests_page_idx', 'refund_requests_status_page_idx',
+  'users_page_idx', 'memberships_role_page_idx',
+  'claims_page_idx', 'claims_status_page_idx',
+  'escalations_page_idx', 'escalations_status_page_idx',
+  'season_windows_page_idx',
+  'vouchers_client_expiry_idx', 'orders_reschedule_supplier_page_idx',
+  'orders_reschedule_status_page_idx', 'refund_requests_client_page_idx', 'orders_reschedule_count_idx'
 ) ORDER BY c.relname;
 
 SELECT format('REINDEX INDEX CONCURRENTLY %I.%I;', n.nspname, c.relname)
@@ -539,7 +557,22 @@ WHERE n.nspname = 'public' AND NOT i.indisvalid AND c.relname IN (
   'location_pings_assignment_latest_idx', 'location_pings_received_samples_idx',
   'orders_reschedule_desk_idx', 'orders_hub_escalation_desk_idx',
   'orders_hub_unclaimed_desk_idx', 'notifications_image_reference_idx',
-  'orders_pricing_created_idx', 'orders_pricing_completed_idx', 'orders_pricing_timeline_idx'
+  'orders_pricing_created_idx', 'orders_pricing_completed_idx', 'orders_pricing_timeline_idx',
+  'staff_profiles_page_idx', 'staff_invites_page_idx',
+  'staff_roles_page_idx', 'voucher_campaigns_page_idx',
+  'vouchers_client_page_idx', 'vouchers_client_status_page_idx',
+  'orders_hub_escalation_page_idx', 'orders_hub_unclaimed_page_idx',
+  'production_lapses_page_idx', 'supplier_services_page_idx',
+  'supplier_services_owner_page_idx', 'supplier_services_state_page_idx',
+  'supplier_services_owner_state_page_idx', 'supplier_profiles_page_idx',
+  'orders_reschedule_page_idx', 'orders_reschedule_filter_page_idx',
+  'refund_requests_page_idx', 'refund_requests_status_page_idx',
+  'users_page_idx', 'memberships_role_page_idx',
+  'claims_page_idx', 'claims_status_page_idx',
+  'escalations_page_idx', 'escalations_status_page_idx',
+  'season_windows_page_idx',
+  'vouchers_client_expiry_idx', 'orders_reschedule_supplier_page_idx',
+  'orders_reschedule_status_page_idx', 'refund_requests_client_page_idx', 'orders_reschedule_count_idx'
 )
 \gexec
 SQL

@@ -1,3 +1,4 @@
+import { staffPageBody, STAFF_LIST_PAGE } from './staff-list-pages.js';
 import { voidTesterReward } from './tester-rewards.js';
 import { TESTER_CAMPAIGN_PURPOSES } from './tester-campaigns.js';
 import { identityHasMembership } from './authorization-context.js';
@@ -51,15 +52,15 @@ export async function routeVouchers({ req, url, store, user, readBody, readRawBo
   const admin = member(user, 'super_admin'), ops = admin || member(user, 'ops_admin');
   if (path.startsWith('/admin/') && !admin || path.startsWith('/ops/') && !ops || path.startsWith('/me/') && !member(user, 'client')) fail(403, 'forbidden');
   initVouchers(store);
-  const at = now();
+  const at = store[STAFF_LIST_PAGE]?.asOf || now();
   const result = (body, mutated = false, status = 200) => ({ status, body, mutated });
   if (path === '/me/vouchers' && req.method === 'GET' || path === '/ops/vouchers' && req.method === 'GET') {
     const clientId = path.startsWith('/ops/') ? url.searchParams.get('clientId') : user.id;
     if (!clientId) fail(400, 'voucher_client_required');
     const tab = url.searchParams.get('tab') || 'available';
     if (!['available', 'used', 'expired', 'all'].includes(tab)) fail(400, 'invalid_voucher_tab');
-    return result({ serverTime: at, vouchers: store.vouchers.filter(v => v.clientId === clientId).map(v => publicVoucher(store, v, at))
-      .filter(v => tab === 'all' || v.status === tab || tab === 'expired' && v.status === 'void') });
+    return result(staffPageBody(store, url, { serverTime: at, vouchers: store.vouchers.filter(v => v.clientId === clientId).map(v => publicVoucher(store, v, at))
+      .filter(v => tab === 'all' || v.status === tab || tab === 'expired' && v.status === 'void') }));
   }
   if (path === '/me/vouchers/code' && req.method === 'POST') return addVoucherCode(store, user.id, object(await readBody(req)).code, { id, at });
   if (path === '/admin/voucher-redemptions' && req.method === 'GET') {
@@ -82,7 +83,7 @@ export async function routeVouchers({ req, url, store, user, readBody, readRawBo
     const campaign = store.voucherCampaigns.find(c => c.id === campaigns[1]);
     if (req.method === 'GET' && !campaigns[2]) {
       if (campaigns[1] && !campaign) fail(404, 'voucher_campaign_not_found');
-      return result(campaign ? { campaign } : { campaigns: store.voucherCampaigns });
+      return result(campaign ? { campaign } : staffPageBody(store, url, { campaigns: store.voucherCampaigns }));
     }
     if (req.method === 'POST' && !campaigns[1]) {
       const body = object(await readBody(req));

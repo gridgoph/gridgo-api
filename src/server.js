@@ -1,3 +1,4 @@
+import { staffPageBody } from './staff-list-pages.js';
 import { ORDER_REMOVAL_ROUTE, removeOrder, activeOrderSql } from './order-removal.js';
 import { routeTesterProgram } from './tester-program-routes.js';
 import { isQuoteListing } from "./quote-listings.js";
@@ -1775,8 +1776,8 @@ function audit(store, entry) {
  * ending at a different pin.
  */
 
-async function load() {
-  return loadStore(database);
+async function load(options) {
+  return loadStore(database, options);
 }
 
 async function expireElapsedIssueWindows() {
@@ -2481,7 +2482,7 @@ async function handleAuditedRequest(req, res) {
         after: url.searchParams.get('after') || '', status: url.searchParams.get('status'), searchParams: url.searchParams,
         role: req.headers['x-gridgo-role'], includeReviewData: url.searchParams.get('includeReviewData') === '1',
         sessionHash: notificationClaims?.claims?.sid ? crypto.createHash('sha256').update(notificationClaims.claims.sid).digest('hex') : null,
-      }) : await load();
+      }) : await load({ legacyHeapOrder: req.method === 'GET' });
 
     if (
       (req.method === "GET" || req.method === "HEAD")
@@ -4050,7 +4051,7 @@ async function handleAuditedRequest(req, res) {
       if (own ? !identityHasMembership(user, "supplier") : !isOps(user)) return send(res, 403, { error: "forbidden" });
       const supplierId = own ? user.id : pathname.split("/")[2];
       if (!hasRole(store, supplierId, "supplier")) return send(res, 404, { error: "supplier_not_found" });
-      return send(res, 200, { supplierId, lapses: supplierLapses(store, supplierId) });
+      return send(res, 200, staffPageBody(store, url, { supplierId, lapses: supplierLapses(store, supplierId) }));
     }
 
     // Silence outside this API cannot be inferred. Operations attests it with an audited reason.
@@ -4368,7 +4369,7 @@ async function handleAuditedRequest(req, res) {
       list = list.map(u => u.role === 'client' ? { ...u, foundingTester: publicFoundingTester(store, u.id, now()).label !== null } : u);
       if (testerFilter != null) list = list.filter(u => u.role === 'client' && u.foundingTester === (testerFilter === 'true'));
       res.setHeader('Cache-Control', 'private, no-store');
-      return send(res, 200, { users: list });
+      return send(res, 200, staffPageBody(store, url, { users: list }));
     }
 
     if (req.method === "GET" && /^\/users\/[^/]+$/.test(pathname)) {
@@ -4929,7 +4930,7 @@ async function handleAuditedRequest(req, res) {
         return send(res, 403, { error: "forbidden" });
       }
       if (stateParam) list = list.filter((s) => s.state === stateParam);
-      return send(res, 200, { services: list.map(service => summarizeService(service, store)) });
+      return send(res, 200, staffPageBody(store, url, { services: list.map(service => summarizeService(service, store)) }));
     }
 
     if (req.method === "POST" && pathname === "/supplier-services") {
@@ -5249,7 +5250,7 @@ async function handleAuditedRequest(req, res) {
       if (orderId) list = list.filter((c) => c.orderId === orderId);
       if (status) list = list.filter((c) => c.status === status);
       list = [...list].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
-      return send(res, 200, { claims: list });
+      return send(res, 200, staffPageBody(store, url, { claims: list }));
     }
 
     if (req.method === "POST" && pathname === "/claims") {
@@ -5707,9 +5708,9 @@ async function handleAuditedRequest(req, res) {
       const orderId = url.searchParams.get("orderId");
       if (status) list = list.filter((item) => item.status === status);
       if (orderId) list = list.filter((item) => item.orderId === orderId);
-      return send(res, 200, {
+      return send(res, 200, staffPageBody(store, url, {
         escalations: [...list].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1)),
-      });
+      }));
     }
 
     if (req.method === "POST" && /^\/escalations\/[^/]+\/resolve$/.test(pathname)) {

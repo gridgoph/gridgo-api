@@ -1,3 +1,4 @@
+import { staffPageBody, STAFF_LIST_PAGE } from './staff-list-pages.js';
 import { authorizationContextFor } from "./authorization-context.js";
 import { privilegedAdminMemberships, queueInvalidate } from './notifications.js';
 
@@ -152,7 +153,7 @@ export async function routeSeasonWindows({ req, url, store, user, readBody, now,
   }
   if (pathname !== '/admin/season-windows' && !/^\/admin\/season-windows\/[^/]+$/.test(pathname)) return null;
   requireSuper(store, user);
-  const at = now();
+  const at = store[STAFF_LIST_PAGE]?.asOf || now();
   if (pathname === '/admin/season-windows/push-settings') {
     if (req.method === 'GET') return { status: 200, body: seasonPushSettings(store), mutated: false };
     if (req.method !== 'PATCH') return null;
@@ -173,7 +174,7 @@ export async function routeSeasonWindows({ req, url, store, user, readBody, now,
   const windows = store.seasonWindows || (store.seasonWindows = []);
   const adminWindow = w => ({ ...publicWindow(w, manilaDate(at)), version: w.version, noticeQueuedAt: w.noticeQueuedAt ?? null, createdAt: w.createdAt, updatedAt: w.updatedAt });
   if (pathname === '/admin/season-windows') {
-    if (req.method === 'GET') return { status: 200, body: { ...projectSeasonWindows(windows, at), windows: [...windows].sort((a, b) => a.startDate.localeCompare(b.startDate) || a.id.localeCompare(b.id)).map(adminWindow) }, mutated: false };
+    if (req.method === 'GET') return { status: 200, body: staffPageBody(store, url, { ...projectSeasonWindows(store[STAFF_LIST_PAGE]?.bannerWindows || windows, at), windows: [...windows].sort((a, b) => a.startDate.localeCompare(b.startDate) || a.id.localeCompare(b.id)).map(adminWindow) }), mutated: false };
     if (req.method !== 'POST') return null;
     const values = validateWindow(record(await readBody(req)));
     const window = { ...values, id: createId('sea'), version: 1, noticeQueuedAt: null, createdAt: at, updatedAt: at };
