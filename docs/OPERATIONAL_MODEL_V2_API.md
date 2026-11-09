@@ -4,6 +4,9 @@ Progressive fee schedules, locked cart groups, scheduled settings/preview, and s
 
 This is the rebuild contract for the three mobile apps and Operations web portal. Field names, enum values, money units, authorization, and state transitions are case-sensitive. `docs/STORAGE_API.md` and `docs/TAXONOMY_API.md` remain authoritative for file bytes and taxonomy structure.
 
+Staff `/users`, `/claims` and `/escalations` lists support compatible, opt-in
+[`limit`/`cursor` pagination](STAFF_LIST_PAGINATION_API.md). Omitting both parameters preserves the complete legacy response.
+
 ## Conventions
 
 - Bearer auth: `Authorization: Bearer <Clerk session JWT>` except `/health`, `/catalog`, `GET /public/payment-qr`, `GET /public/announcement-images/:fileId`, `POST /webhooks/clerk`, and the two device-registration routes below, which accept a call with **no** `Authorization` header from a phone that has not signed in. Sending an *expired* token is still `401` — omit the header entirely to register anonymously.

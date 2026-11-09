@@ -9,6 +9,10 @@ Supplier catalog items are shop-owned listings under one taxonomy-governed servi
 
 Effective unit price is `max(0, basePriceMinor + selected modifiers)`. Matching stays on the service line.
 
+The `/supplier-services` directory supports optional
+[`limit`/`cursor` pages](STAFF_LIST_PAGINATION_API.md) within its existing staff/supplier scope.
+Unpaged callers keep their complete response and ordering.
+
 ## Public browse
 
 Signed-in optional, same as `GET /catalog`. Invalid bearer tokens still return `401`.

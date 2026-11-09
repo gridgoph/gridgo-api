@@ -1,3 +1,4 @@
+import { STAFF_LIST_PAGE, readStaffPage, staffPageRequested } from './staff-list-pages.js';
 import { orderReadQuery, activeOrderSql, attachOrderRemovalContext } from './order-removal.js';
 import { createHash } from 'node:crypto';
 import { bindClientSaveScope, clientSaveScope } from './save-scope.js';
@@ -906,18 +907,20 @@ export async function loadStore(database) {
 
 /** Read-only projections share the compatibility decoder, never its write baseline. */
 function readGraph(database) {
+  const graph = {};
   const loaded = Object.fromEntries(TABLES.map(table => [table.name, []]));
-  async function read(name, where, values = []) {
+  async function read(name, where, values = [], options = {}) {
     const table = TABLES.find(table => table.name === name);
     if (!table) throw new Error(`Unknown read graph table: ${name}`);
-    loaded[name] = (await database.query(orderReadQuery(table, where), values)).rows;
+    loaded[name] = (await database.query(orderReadQuery(table, where, options), values)).rows;
   }
   function finish(options = {}) {
     const store = storeFromRows(loaded, { ...options, writable: false });
+    if (graph.staffPage) store[STAFF_LIST_PAGE] = { ...graph.staffPage, ...(graph.rescheduleTotal == null ? {} : { totalRequests: graph.rescheduleTotal }) };
     notificationReadStores.add(store);
     return store;
   }
-  return { loaded, read, finish };
+  return Object.assign(graph, { loaded, read, finish });
 }
 
 async function readIdentity(graph, userIds) {
@@ -1375,7 +1378,22 @@ async function readOperationsQueue(graph, ids, pathname, params, role) {
     }
   }
   if (isTestOperationsUser(identity, raw.id)) clauses.push('order_id IN (SELECT id FROM orders WHERE review_data)');
-  await read(table, clauses.length ? `WHERE ${clauses.join(' AND ')}` : '', values);
+  if (!detail && ['claims', 'escalations'].includes(table) && staffPageRequested(params) && isTestOperationsUser(identity, raw.id)) {
+    // The review view checks every party/creator reference on these incident
+    // rows. Apply that gate before LIMIT so hidden rows cannot consume a page.
+    values.push(raw.id);
+    const actor = `$${values.length}`;
+    const fields = ['userId','clientId','supplierId','riderId','ownerId','staffId','partyUserId','originalSupplierId','redeemedBy','createdBy']
+      .filter(field => table !== 'escalations' || field !== 'riderId').map(field => `'${field}'`).join(',');
+    clauses.push(`NOT EXISTS (SELECT 1 FROM jsonb_each(${table}.data) ref
+      WHERE ref.key IN (${fields})
+        AND ref.value NOT IN ('null'::jsonb,'false'::jsonb,'0'::jsonb,'""'::jsonb)
+        AND ref.value <> to_jsonb(${actor}::text)
+        AND NOT EXISTS (SELECT 1 FROM users u WHERE u.review_data AND u.id=ref.value#>>'{}'))`);
+    if (table === 'escalations') clauses.push(`(rider_id IS NULL OR rider_id=${actor} OR rider_id IN (SELECT id FROM users WHERE review_data))`);
+  }
+  if (!detail && ['claims', 'escalations'].includes(table)) await readStaffPage(graph, pathname, params, clauses.length ? `WHERE ${clauses.join(' AND ')}` : '', values);
+  else await read(table, clauses.length ? `WHERE ${clauses.join(' AND ')}` : '', values);
   if (table === 'issues') await read('claims', 'WHERE id = ANY($1::text[])', [loaded.issues.map(row => row.claim_id).filter(Boolean)]);
   const rows = [...loaded[table], ...loaded.claims];
   await read('orders', 'WHERE id = ANY($1::text[])', [[...new Set(rows.flatMap(row => [row.order_id, ...(row.data?.orderIds || [])]))]]);
@@ -1391,8 +1409,8 @@ async function readOperationsQueue(graph, ids, pathname, params, role) {
   return graph.finish();
 }
 
-/** Directory responses remain unpaginated as contracted. Only matching users,
- * their role profiles and the exact detail's private files are hydrated.
+/** Legacy directory responses remain complete. Opt-in pages select users
+ * before hydrating their role profiles and exact detail's private files.
  */
 async function readUserDirectory(graph, ids, pathname, params, role) {
   const { loaded, read } = graph;
@@ -1405,6 +1423,21 @@ async function readUserDirectory(graph, ids, pathname, params, role) {
   if (!staff && (!target || !/\/(verification-documents|payout-account)$/.test(pathname))) return identity;
   const directoryRole = params.get('role');
   if (target) await read('users', 'WHERE id = ANY($1::text[])', [[...ids, target]]);
+  else if (staffPageRequested(params)) {
+    const tester = params.get('foundingTester');
+    // The published directory filter projects the selected role, or users.role
+    // when no role filter is present. An award alone supplies the label.
+    const testerSql = tester == null ? '' : ` AND ${directoryRole ? (directoryRole === 'client' ? 'TRUE' : 'FALSE') : "role='client'"}
+      AND (EXISTS (SELECT 1 FROM founding_testers f WHERE f.client_id=users.id AND f.awarded_at IS NOT NULL)) = $2`;
+    const values = tester == null ? [sqlReadText(directoryRole || null)] : [sqlReadText(directoryRole || null), tester === 'true'];
+    if (reviewOnly) values.push(raw.id);
+    await readStaffPage(graph, pathname, params, `WHERE ${directoryRole ? 'id IN (SELECT user_id FROM user_role_memberships WHERE role=$1)' : '$1::text IS NULL'}
+      ${reviewOnly ? `AND (review_data OR id=$${values.length})` : ''}${testerSql}`, values);
+    // Keep the actor available for authenticateRequest without adding it to
+    // the selected directory page. staffPageBody uses only the selected IDs.
+    const pageUsers = loaded.users;
+    await read('users', 'WHERE id = ANY($1::text[])', [[...ids, ...pageUsers.map(row => row.id)]]);
+  }
   else await read('users', `WHERE (id = ANY($1::text[]) OR ${directoryRole ? 'id IN (SELECT user_id FROM user_role_memberships WHERE role = $2)' : 'TRUE'})
     ${reviewOnly ? 'AND (review_data OR id = ANY($1::text[]))' : ''}`, directoryRole ? [ids, sqlReadText(directoryRole)] : [ids]);
   const users = loaded.users.map(row => row.id);

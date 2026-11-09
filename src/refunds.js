@@ -1,3 +1,4 @@
+import { staffPageBody } from './staff-list-pages.js';
 import { assertReviewMoneyAllowed } from './review-data.js';
 import { assertProhibitedItemIntake, assertProhibitedItemFileCheck, prohibitedItemHold } from './prohibited-items.js';
 import { recordFileCheckTransition, supplierArtworkReleased } from './artwork-gates.js';
@@ -197,7 +198,7 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
       && (privileged(user) || row.clientId === user.id));
     if (request) return { status: 200, body: { refund: publicRefund(store, request, user) } };
     const status = url.searchParams.get('status');
-    return { status: 200, body: { refunds: records.filter((row) => !status || row.status === status).map((row) => publicRefund(store, row, user)) } };
+    return { status: 200, body: staffPageBody(store, url, { refunds: records.filter((row) => !status || row.status === status).map((row) => publicRefund(store, row, user)) }) };
   }
   const action = orderMatch ? 'request' : match?.[2];
   if ((action === 'destination' ? req.method !== 'PATCH' : req.method !== 'POST') || !action) return null;

@@ -1,3 +1,4 @@
+import { staffPageBody } from './staff-list-pages.js';
 import { identityHasMembership } from './authorization-context.js';
 import { AvailabilityError, validateShopSchedule, defaultShopSchedule, isOpenAt, addOpeningMilliseconds, weeklyWindows } from './availability.js';
 import { operatingHours, validateOperatingHours } from './operating-hours.js';
@@ -83,8 +84,8 @@ export async function routeShopHours({ req, url, store, user, readBody, now, id,
   if (own ? !identityHasMembership(user, 'supplier') : !identityHasMembership(user, 'ops_admin') && !identityHasMembership(user, 'super_admin')) fail(403, 'forbidden', 'This shop-hours action is not available to your role.');
   if (!['GET', 'PATCH'].includes(req.method) || (!own && !staff[1] && req.method !== 'GET')) fail(405, 'method_not_allowed', 'Use GET or PATCH.');
   const at = now();
-  if (staff && !staff[1]) return { status: 200, body: { shops: (store.supplierProfiles || []).map(profile => ({
-    supplierId: profile.userId, shopName: profile.shopName, hours: shopHoursStatus(profile, store.settings, at) })) } };
+  if (staff && !staff[1]) return { status: 200, body: staffPageBody(store, url, { shops: (store.supplierProfiles || []).map(profile => ({
+    supplierId: profile.userId, shopName: profile.shopName, hours: shopHoursStatus(profile, store.settings, at) })) }) };
   const profile = (store.supplierProfiles || []).find(row => row.userId === (own ? user.id : staff[1]));
   if (!profile) fail(404, 'supplier_profile_not_found', 'Shop profile not found.');
   if (req.method === 'GET') return { status: 200, body: { hours: shopHoursStatus(profile, store.settings, at) } };

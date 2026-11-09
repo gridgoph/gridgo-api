@@ -11,7 +11,7 @@ const activeOrderAndBasketSql = (expression) => `${activeOrderSql(expression)} A
 /** Every compatibility graph (including writers and sweeps) reads the same active
  * domain. Hidden rows are absent from both its baseline and current rows, so an
  * unrelated save cannot delete or rewrite the retained history. Audit is exempt. */
-export function orderReadQuery({ name, columns }, where = '') {
+export function orderReadQuery({ name, columns }, where = '', { select = columns } = {}) {
   let predicate;
   if (name === 'orders') predicate = activeOrderSql('orders.id');
   else if (name === 'order_invoices') predicate = activeOrderAndBasketSql('order_invoices.order_id');
@@ -36,7 +36,7 @@ export function orderReadQuery({ name, columns }, where = '') {
   // Nonrecursive same-name CTEs bind the active table for the entire scoped
   // query (including nested references); PostgreSQL inlines these predicates.
   const source = predicate ? `WITH ${name} AS NOT MATERIALIZED (SELECT * FROM ${name} WHERE ${predicate}) ` : '';
-  return `${source}SELECT ${columns.join(', ')} FROM ${name} ${where}`;
+  return `${source}SELECT ${select.join(', ')} FROM ${name} ${where}`;
 }
 
 /** Policy facts only: never hydrate removed orders into a served/work graph.
