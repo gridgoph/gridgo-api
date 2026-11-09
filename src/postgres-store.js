@@ -1,7 +1,11 @@
 import { shopTeamTables, emptyShopTeam, shopTeamRows, loadShopTeamRows, ensureShopOwners } from './shop-team-store.js';
 import { orderReadQuery, activeOrderSql, attachOrderRemovalContext } from './order-removal.js';
+import { createHash } from 'node:crypto';
+import { bindClientSaveScope, clientSaveScope } from './save-scope.js';
+import { testerProgress, foundingTesterEligible } from './founding-testers.js';
 import { artworkFileIdsFor } from './artwork-attachments.js';
-import { parseCatalogListQuery } from './catalog-routes.js';
+import { parseCatalogListQuery, parseStaffCatalogQuery } from './catalog-routes.js';
+import { isStaffDeskRead, readStaffDesk } from './staff-desk-reads.js';
 import { notificationVisible, parseNotificationListLimit, canAccessOrder, hasRole } from './notifications.js';
 import { isTestOperationsUser, testOperationsView } from './test-operations.js';
 import { identityHasMembership, selectActorRole } from './authorization-context.js';
@@ -10,6 +14,7 @@ import { testerProgramTables, emptyTesterProgram, testerProgramRows, loadTesterP
 import { foundingTesterTable, foundingTesterRows, loadFoundingTesterRows } from './founding-tester-store.js';
 import { enforceReviewData, labelReviewNotifications, reviewReportView } from './review-data.js';
 import { performanceTable, performanceRows, loadPerformanceRows } from './supplier-performance-store.js';
+import { hasPendingSupplierPerformanceOutside } from './supplier-performance.js';
 import { parsePaperSize } from './print-layout.js';
 import { canonicalColourPricing } from './colour-pricing.js';
 import { appendAudit, finalizeAuditEntries } from './audit.js';
@@ -20,7 +25,7 @@ import { sharingTables, emptySharingStore, sharingRows, loadSharingRows } from '
 import { checkoutExitTables, checkoutExitRows, loadCheckoutExitRows } from './checkout-exit-store.js';
 import { voucherTables, emptyVoucherStore, voucherRows, loadVoucherRows } from './voucher-store.js';
 import { loadLegalPenaltyGate } from './legal.js';
-import { synchronizeProductionHours } from "./production-days.js";
+import { synchronizeProductionHours, productionHoursSynchronized } from "./production-days.js";
 import { staffTables, emptyStaffStore, staffRows, loadStaffRows } from './staff-store.js';
 import { refundTableDefinitions, writeRefundRows, readRefundRows } from "./refund-records.js";
 import { availableDispatch, dispatchWorkHeld } from './dispatch-policy.js';
@@ -30,6 +35,7 @@ import { quoteRequestTables, emptyQuoteRequestStore, quoteRequestRows, loadQuote
 
 const BASELINE = Symbol("postgresStoreBaseline");
 const notificationReadStores = new WeakSet();
+const completeDomainTransactions = new WeakMap();
 
 function without(record, keys) {
   const result = { ...record };
@@ -897,6 +903,10 @@ export async function loadStore(database) {
     enumerable: false,
     writable: true,
   });
+  if (database.inWriteTransaction()) {
+    const { rows } = await database.query('SELECT pg_current_xact_id()::text AS id');
+    completeDomainTransactions.set(store, rows[0].id);
+  }
   return store;
 }
 
@@ -1342,8 +1352,9 @@ const USER_READ = /^\/users(?:\/[^/]+(?:\/(?:verification-documents|payout-accou
 const AUDIT_READ = /^\/audit$|^\/orders\/[^/]+\/audit$/;
 const STAFF_ITEM_READ = /^\/ops\/catalog-items\/[^/]+$/;
 const ORDER_DETAIL_READ = /^\/orders\/[^/]+$/;
+const BASKET_READ = /^\/baskets(?:\/[^/]+(?:\/invoice)?)?$/;
 const QUOTE_READ = /^\/(me|ops)\/quote-requests(?:\/([^/]+))?$/;
-export function isHotReadPath(pathname) { return pathname === '/dispatch/offers' || OPS_QUEUE_READ.test(pathname) || USER_READ.test(pathname) || AUDIT_READ.test(pathname) || STAFF_ITEM_READ.test(pathname) || pathname === '/me/files' || HOT_READ_PATHS.has(pathname) || ORDER_DETAIL_READ.test(pathname) || isCatalogReadPath(pathname) || isOwnCatalogReadPath(pathname) || isCartReadPath(pathname) || MATCH_READ_PATHS.has(pathname) || FILE_READ.test(pathname) || QUOTE_READ.test(pathname); }
+export function isHotReadPath(pathname) { return BASKET_READ.test(pathname) || isStaffDeskRead(pathname) || pathname === '/dispatch/offers' || OPS_QUEUE_READ.test(pathname) || USER_READ.test(pathname) || AUDIT_READ.test(pathname) || STAFF_ITEM_READ.test(pathname) || pathname === '/me/files' || HOT_READ_PATHS.has(pathname) || ORDER_DETAIL_READ.test(pathname) || isCatalogReadPath(pathname) || isOwnCatalogReadPath(pathname) || isCartReadPath(pathname) || MATCH_READ_PATHS.has(pathname) || FILE_READ.test(pathname) || QUOTE_READ.test(pathname); }
 
 /** Queue SQL narrows candidates only; the existing role/review views and
  * handlers remain authoritative for visibility, ordering and errors.
@@ -1443,7 +1454,7 @@ async function readUserDirectory(graph, ids, pathname, params, role) {
  * In particular, an unassigned multi-shop order and a held dispatch offer need
  * their jobs/refund facts before visibility can be decided.
  */
-async function readOrderGraph(database, graph, pathname, { role, includeReviewData }) {
+async function readOrderGraph(database, graph, pathname, { role, includeReviewData, candidateIds = null, reportCollection = false }) {
   const { loaded, read } = graph;
   const identityStore = graph.finish();
   const raw = identityStore.users[0];
@@ -1467,12 +1478,14 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
       (SELECT order_id FROM order_jobs WHERE supplier_id = $1 AND state <> 'cancelled')))`;
     else if (selected === 'rider') ownership = `(rider_id = $1 OR (state = 'ready_for_dispatch' AND rider_id IS NULL AND review_data = $2))`;
   }
+  if (candidateIds) ownership = 'TRUE';
   // Keep $1 typed even on a staff/empty read, where ownership uses no parameter.
   let where = `WHERE $1::text IS NOT NULL AND (${ownership})`;
   if (dispatch || (selected === 'rider' && pathname !== '/jobs' && hasRole(identityStore, raw.id, selected))) values.push(raw.reviewData === true);
-  const reviewScope = dispatch ? '' : reviewOnly ? 'AND review_data' : staff && !detail && !includeReviewData ? 'AND NOT review_data' : '';
+  const reviewScope = dispatch ? '' : reviewOnly ? 'AND review_data' : staff && (!detail || reportCollection) && !includeReviewData ? 'AND NOT review_data' : '';
   where += ` ${reviewScope}`;
-  if (detail) { values.push(pathname.split('/')[2]); where += ` AND id = $${values.length}`; }
+  if (candidateIds) { values.push(candidateIds); where += ` AND id = ANY($${values.length}::text[])`; }
+  if (detail && !candidateIds) { values.push(pathname.split('/')[2]); where += ` AND id = $${values.length}`; }
   await read('orders', where, values);
   await read('platform_settings', 'WHERE singleton');
   let orderIds = loaded.orders.map(row => row.id);
@@ -1486,7 +1499,7 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
   }
   const candidates = graph.finish();
   const policyStore = reviewOnly ? testOperationsView(candidates, actor) : candidates;
-  const visible = new Set(policyStore.orders.filter(order => dispatch
+  const visible = new Set(policyStore.orders.filter(order => candidateIds ? true : dispatch
     ? (order.reviewData === (raw.reviewData === true) && availableDispatch(order, policyStore))
       || (!isContainedPickup(order) && !dispatchWorkHeld(policyStore, order) && order.state === 'rider_assigned' && order.riderId === raw.id)
     : pathname === '/jobs'
@@ -1501,7 +1514,7 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
     const store = graph.finish();
     // Preserve the existing 403 for a real, inaccessible detail without
     // hydrating its private graph. Test operations still sees hidden rows as 404.
-    if (detail) store.orderReadForbidden = (await database.query(
+    if (detail && !candidateIds) store.orderReadForbidden = (await database.query(
       `SELECT EXISTS (SELECT 1 FROM orders WHERE ${activeOrderSql('orders.id')} AND id = $1 ${reviewOnly ? 'AND review_data' : ''}) AS present`,
       [pathname.split('/')[2]],
     )).rows[0].present;
@@ -1511,6 +1524,25 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
     'platform_revenue_adjustments', 'claims', 'order_change_requests', 'order_change_payments', 'order_change_payouts',
     'delivery_pin_payments', 'refund_supplier_payouts', 'shop_reviews', 'delivery_reminders']) {
     await read(name, 'WHERE order_id = ANY($1::text[])', [orderIds]);
+  }
+  if (selected === 'super_admin' && identityHasMembership(actor, 'super_admin')) {
+    // The removal guard also sees shared payments and retained financial history.
+    // Keep these facts scoped to the projected orders, including legacy credit
+    // references stored inside data. Other roles do not need this private graph.
+    await read('order_basket_groups', `WHERE basket_id IN
+      (SELECT basket_id FROM order_basket_groups WHERE order_id = ANY($1::text[]))`, [orderIds]);
+    await read('order_baskets', 'WHERE id = ANY($1::text[])', [loaded.order_basket_groups.map(row => row.basket_id)]);
+    // Containment uses each history table's order_refs GIN index. Preserve
+    // scalar/array references both at the snapshot root and inside legacy data.
+    const references = orderIds.flatMap(orderId => [
+      { orderId }, { orderIds: [orderId] }, { data: { orderId } }, { data: { orderIds: [orderId] } },
+    ]).map(reference => JSON.stringify(reference));
+    const linked = 'WHERE data @> ANY($1::jsonb[])';
+    await read('credit_ledger', linked, [references]);
+    await read('credit_accounts', 'WHERE user_id = ANY($1::text[])', [loaded.credit_ledger.map(row => row.user_id)]);
+    for (const name of ['voucher_reservations', 'voucher_redemptions', 'voucher_ledger']) {
+      await read(name, linked, [references]);
+    }
   }
   await read('order_line_item_options', 'WHERE order_line_item_id = ANY($1::text[])', [loaded.order_line_items.map(row => row.id)]);
   await read('refund_payments', 'WHERE request_id = ANY($1::text[])', [loaded.refund_settlements.map(row => row.request_id)]);
@@ -1563,7 +1595,7 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
     else if (staff && !detail && !dispatch) fileStore = reviewReportView(fileStore, includeReviewData);
     store.orderFileReadContext = { orders: fileStore.orders, orderJobs: fileStore.orderJobs, orderLineItems: fileStore.orderLineItems };
   }
-  if ((detail || dispatch) && ['ops_admin', 'super_admin'].includes(selected)) {
+  if ((detail || dispatch) && (['ops_admin', 'super_admin'].includes(selected) || (candidateIds && staff))) {
     // This existing staff-only field counts events across the reporting view,
     // not merely the opened order. Return only counts for the visible shops.
     const counts = await database.query(`SELECT event->'supplierId' AS supplier, count(*)::int AS count
@@ -1575,6 +1607,31 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
         [...new Set(loaded.orders.map(row => JSON.stringify([{ supplierId: row.supplier_id }])))] ]);
     store.shopArrivedPackedCounts = new Map(counts.rows.map(row => [row.supplier, row.count]));
   }
+  return store;
+}
+
+/** Baskets are one shared payment boundary; this is a read-only projection.
+ * Each basket hydrates its own groups through the existing order decoder.
+ */
+async function readBasketGraph(database, graph, ids, pathname, params, options) {
+  const { loaded,read }=graph,identity=graph.finish(),raw=identity.users[0];
+  if (!raw || (options.role && !hasRole(identity,raw.id,options.role))) return identity;
+  const actor=selectActorRole(identity,raw,options.role || raw.role,{restrictMemberships:Boolean(options.role)});
+  const staff=['ops_admin','super_admin'].some(role=>identityHasMembership(actor,role));
+  if (!staff && !identityHasMembership(actor,'client')) return identity;
+  const id=pathname.split('/')[2],reviewOnly=isTestOperationsUser(identity,raw.id),values=[raw.id];
+  let where=staff?'WHERE $1::text IS NOT NULL':'WHERE client_id=$1';
+  if(id){values.push(sqlReadText(id));where+=' AND id=$2';}
+  if(reviewOnly || (staff && !id && !options.includeReviewData)) where+=` AND NOT EXISTS (SELECT 1 FROM order_basket_groups g JOIN orders o ON o.id=g.order_id WHERE g.basket_id=order_baskets.id AND o.review_data=${reviewOnly?'false':'true'})`;
+  await read('order_baskets',where,values);
+  const baskets=loaded.order_baskets;
+  await read('order_basket_groups','WHERE basket_id = ANY($1::text[])',[baskets.map(r=>r.id)]);
+  const groups=loaded.order_basket_groups;
+  const store=await readOrderGraph(database,graph,'/orders/basket-read',{...options,candidateIds:groups.map(r=>r.order_id),reportCollection:!id});
+  loaded.order_baskets=baskets;loaded.order_basket_groups=groups;
+  await read('order_invoices','WHERE order_id = ANY($1::text[])',[baskets.map(r=>r.receipt_order_id)]);
+  const projection=graph.finish();
+  store.baskets=projection.baskets;store.orderInvoices=projection.orderInvoices;
   return store;
 }
 
@@ -1627,6 +1684,203 @@ export async function loadTesterProgramIdentityStore(database, clerkSubject) {
   });
 }
 
+/** A write graph for match tokens and draft line edits. Checkout stays full.
+ * All reads run after the same domain advisory lock as the legacy writer.
+ */
+export async function loadClientSavePreflightStore(database, clerkSubject, pathname, body) {
+  return database.snapshot(() => loadClientSaveStore(database, clerkSubject, pathname, body, { preflight: true }));
+}
+
+export async function loadClientSaveStore(database, clerkSubject, pathname, body = {}, { preflight = false } = {}) {
+  if (preflight ? !database.inTransaction() : !database.inWriteTransaction()) throw new Error('Client save graph requires an active write transaction');
+  if (!preflight && (await database.query('SELECT dirty FROM store_production_normalization WHERE singleton')).rows[0]?.dirty !== false) return null;
+  const graph = readGraph(database), { loaded } = graph;
+  // Helpers can revisit a table while adding catalogue/workload context. Keep
+  // the union: a shop graph must not evict the client's own order facts.
+  const replace = graph.read;
+  const reads = new Set(), coverage = new Map();
+  graph.read = async (name, where, values = []) => {
+    // The graph only grows while this transaction owns the domain lock.
+    // Repeated complete ID/owner reads and identical child reads add no facts.
+    const complete = /^WHERE ([a-z_]+)\s*=\s*(ANY\(\$1::text\[\]\)|\$1)$/.exec(where);
+    if (complete) {
+      const coverageKey = `${name}:${complete[1]}`;
+      const covered = coverage.get(coverageKey) || new Set();
+      const array = complete[2].startsWith('ANY');
+      const missing = (array ? values[0] : [values[0]]).filter(id => !covered.has(id));
+      if (!missing.length) return;
+      for (const id of missing) covered.add(id);
+      coverage.set(coverageKey, covered);
+      values = array ? [missing] : values;
+    }
+    const cacheKey = JSON.stringify([name, where, values]);
+    if (reads.has(cacheKey)) return;
+    reads.add(cacheKey);
+    const previous = loaded[name];
+    await replace(name, where, values);
+    const table = TABLES.find(table => table.name === name);
+    loaded[name] = [...new Map([...previous, ...loaded[name]].map(row => [rowKey(row, table.keys), row])).values()];
+    if (table.keys.length === 1) {
+      const key = `${name}:${table.keys[0]}`, covered = coverage.get(key) || new Set();
+      for (const row of loaded[name]) covered.add(row[table.keys[0]]);
+      coverage.set(key, covered);
+    }
+  };
+  const { read } = graph;
+  await read('users', 'WHERE clerk_user_id=$1', [clerkSubject]);
+  const actor = loaded.users[0];
+  if (!actor) return null;
+  if (['removed','suspended'].includes(actor.account_status)) return null;
+  const clientId = actor.id;
+  await readIdentity(graph, [clientId]);
+  // Retain established nonclient/multirole policy on the legacy path.
+  if (!loaded.user_role_memberships.some(row => row.user_id === clientId && row.role === 'client')) return null;
+  await readClientHomeGraph(graph, [clientId]);
+  const ownOrders = loaded.orders.map(row => row.id);
+  let cartId = pathname.startsWith('/me/carts/') ? pathname.split('/')[3] : body?.cartId == null ? null : String(body.cartId);
+  try { if (pathname.startsWith('/me/carts/')) cartId = decodeURIComponent(cartId); } catch { cartId = null; }
+  if (cartId && !cartId.includes('\0')) {
+    await read('client_carts', 'WHERE id=$1', [cartId]);
+    if (loaded.client_carts.some(row => row.id === cartId && row.client_id === clientId)) await read('client_cart_lines', 'WHERE cart_id=$1', [cartId]);
+  }
+  await read('client_match_preferences', 'WHERE client_id=$1', [clientId]);
+  await read('client_saved_addresses', 'WHERE client_id=$1', [clientId]);
+  const token = pathname.startsWith('/me/carts/') && typeof body?.selectToken === 'string'
+    ? createHash('sha256').update(body.selectToken).digest('hex') : null;
+  await read('client_match_selections', 'WHERE client_id=$1 OR token_hash=$2', [clientId, token]);
+  const selectedItemId = loaded.client_match_selections.find(row => row.token_hash === token)?.selection?.catalogItemId;
+  const itemIds = [...new Set([...loaded.client_cart_lines.map(row => row.catalog_item_id),
+    ...(typeof selectedItemId === 'string' ? [selectedItemId] : []),
+    ...(typeof body?.catalogItemId === 'string' && !body.catalogItemId.includes('\0') ? [body.catalogItemId.trim()] : [])])];
+  const code = pathname.startsWith('/me/matches') ? sqlReadText(String(body?.subcategoryCode || '').trim()) : null;
+  await readCatalogueGraph(graph, [clientId], code ? { subcategoryCode: code } : { itemIds });
+  if (code && itemIds.length) await readCatalogueGraph(graph, [clientId], { itemIds });
+  const suppliers = [...new Set([...loaded.supplier_profiles.map(row => row.user_id),
+    ...loaded.orders.flatMap(row => [row.supplier_id,
+      ...(row.data?.shopFailureEvents || []).map(event => event.supplierId),
+      ...(row.data?.shopHandover?.arrivedPacked || []).map(event => event.supplierId)]).filter(Boolean)])];
+  await read('supplier_profiles', 'WHERE user_id=ANY($1::text[])', [suppliers]);
+  await read('supplier_payment_terms', 'WHERE supplier_id=ANY($1::text[])', [suppliers]);
+  await readShopWork(graph, suppliers);
+  // A moved/failed shop can have an unmaterialized incident even when neither
+  // the current order nor its current job is assigned to that shop anymore.
+  // Existing partial/GIN indexes bound these historical incident parents.
+  await read('orders', `WHERE (jsonb_array_length(CASE WHEN jsonb_typeof(data->'shopFailureEvents')='array'
+      THEN data->'shopFailureEvents' ELSE '[]'::jsonb END)>0 AND EXISTS (
+        SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(data->'shopFailureEvents')='array'
+          THEN data->'shopFailureEvents' ELSE '[]'::jsonb END) e WHERE e->>'supplierId'=ANY($1::text[])))
+    OR (data#>'{shopHandover,arrivedPacked}' IS NOT NULL AND data#>'{shopHandover,arrivedPacked}' @> ANY($2::jsonb[]))`,
+  [suppliers, suppliers.map(supplierId => JSON.stringify([{ supplierId }]))]);
+  await read('order_line_items', 'WHERE order_id=ANY($1::text[])', [loaded.orders.map(row => row.id)]);
+  // Complete own order/hold/maintenance facts; workload parents stay context.
+  for (const name of ['order_jobs', 'order_line_item_options', 'order_payment_allocations', 'payout_milestones',
+    'claims', 'escalations', 'refund_requests', 'refund_supplier_payouts', 'order_change_requests',
+    'order_change_payments', 'order_change_payouts', 'delivery_pin_payments', 'supplier_invoices']) {
+    if (name === 'order_line_item_options') await read(name, 'WHERE order_line_item_id=ANY($1::text[])', [loaded.order_line_items.map(row => row.id)]);
+    else await read(name, 'WHERE order_id=ANY($1::text[])', [ownOrders]);
+  }
+  for (const name of ['refund_attempts', 'refund_payments', 'refund_events']) await read(name, 'WHERE request_id=ANY($1::text[])', [loaded.refund_requests.map(row => row.id)]);
+  await read('order_basket_groups', 'WHERE basket_id IN (SELECT id FROM order_baskets WHERE client_id=$1)', [clientId]);
+  await read('order_baskets', 'WHERE client_id=$1', [clientId]);
+  await read('organization_accounts', 'WHERE user_id=$1', [clientId]);
+  await read('sample_batch_drafts', 'WHERE client_id=$1', [clientId]);
+  await read('vouchers', 'WHERE client_id=$1', [clientId]);
+  await read('voucher_campaigns', 'WHERE id=ANY($1::text[])', [loaded.vouchers.map(row => row.campaign_id)]);
+  await read('voucher_reservations', 'WHERE client_id=$1', [clientId]);
+  await read('voucher_redemptions', 'WHERE client_id=$1', [clientId]);
+  await read('voucher_cart_choices', 'WHERE id=ANY($1::text[])', [loaded.client_carts.map(row => row.id)]);
+  await read('promotion_settings', "WHERE id='launch'");
+  const email = String(actor.email || '').trim().toLowerCase();
+  for (const name of ['tester_invites', 'promotion_invites']) await read(name, 'WHERE client_id=$1 OR email=$2', [clientId, email]);
+  const inviteEmails = [...new Set([...loaded.tester_invites, ...loaded.promotion_invites].map(row => row.email))];
+  const related = [...new Set([...loaded.users.map(row => row.id), ...suppliers, ...loaded.orders.flatMap(row => [row.client_id, row.supplier_id, row.rider_id]),
+    ...loaded.tester_invites.map(row => row.inviter_id), ...loaded.promotion_invites.map(row => row.founder_id)].filter(Boolean))];
+  await read('users', `WHERE id=ANY($1::text[]) OR lower(btrim(email))=ANY($2::text[]) OR email ~ '[^!-~]'
+    OR id IN (SELECT user_id FROM user_role_memberships WHERE role IN ('ops_admin','super_admin','rider'))`, [related, inviteEmails]);
+  await readIdentity(graph, loaded.users.map(row => row.id));
+  // Preserve current shop access for the actor and existing Owner rows for
+  // supplier context; a partial save must never synthesize over a removed row.
+  await read('shop_memberships', 'WHERE user_id=ANY($1::text[]) OR shop_id=ANY($1::text[])', [loaded.users.map(row => row.id)]);
+  // Attributed competitor rows are context for the existing ambiguity policy.
+  for (const name of ['tester_invites', 'promotion_invites']) await read(name, 'WHERE client_id=ANY($1::text[])', [loaded.users.filter(row => inviteEmails.includes(String(row.email || '').trim().toLowerCase())).map(row => row.id)]);
+  await read('vouchers', "WHERE client_id=ANY($1::text[]) AND promotion_kind IN ('founding','friend_pass')", [loaded.users.map(row => row.id)]);
+  await read('voucher_campaigns', 'WHERE id=ANY($1::text[])', [loaded.vouchers.map(row => row.campaign_id)]);
+  const strings = new Set(loaded.files.map(row => row.file_id));
+  const collect = value => { if (typeof value === 'string' && !value.includes('\0')) strings.add(value); else if (value && typeof value === 'object') for (const child of Object.values(value)) collect(child); };
+  collect(body); collect(loaded.client_cart_lines); collect(loaded.sample_batch_drafts);
+  await read('files', `WHERE file_id=ANY($1::text[]) OR (owner_id=$2 AND (data ? 'savedAt' OR data ? 'saveToMyFilesRequestedAt'))
+    OR file_id IN (SELECT file_id FROM file_references WHERE reference_type='order' AND reference_id=ANY($3::text[]))`, [[...strings], clientId, ownOrders]);
+  await read('file_references', 'WHERE file_id=ANY($1::text[])', [loaded.files.map(row => row.file_id)]);
+  await read('notifications', "WHERE order_id=ANY($1::text[]) AND (type IN ('order_call_incoming','order_ready_for_pickup') OR data ? 'occurrenceKey')", [ownOrders]);
+  const recipients = new Set([clientId, ...loaded.user_role_memberships
+    .filter(row => ['ops_admin','super_admin','rider'].includes(row.role)).map(row => row.user_id)]);
+  for (const order of loaded.orders.filter(row => row.client_id === clientId)) {
+    for (const userId of [order.supplier_id, order.rider_id,
+      ...(order.data?.shopFailureEvents || []).map(event => event.supplierId),
+      ...(order.data?.shopHandover?.arrivedPacked || []).map(event => event.supplierId)]) if (userId) recipients.add(userId);
+  }
+  await read('device_tokens', 'WHERE user_id=ANY($1::text[])', [[...recipients]]);
+  const store = storeFromRows(loaded, { writable: !preflight,
+    surveyLaunchedAt: (await database.query('SELECT launched_at FROM survey_launch WHERE singleton')).rows[0]?.launched_at || null,
+    supplierPerformanceLaunchedAt: (await database.query('SELECT launched_at FROM supplier_performance_launch WHERE singleton')).rows[0]?.launched_at || null,
+  });
+  if (preflight) {
+    notificationReadStores.add(store);
+    return store;
+  }
+  // Keep the pre-synchronization baseline. A normalization delta can include a
+  // global positioned row, so retain exact legacy compaction rather than guess
+  // its full-array index from this subset. The source marker normally catches
+  // this before hydration; this check is also conservative on legacy anomalies.
+  if (stable(store[BASELINE]) !== stable(rowsFromStore(store))) return null;
+  // The full adapter compacts an edited row's ordinal from the complete array.
+  // Preserve that legacy behaviour on anomalous layouts rather than guessing
+  // a global rank from a partial graph or scanning the history on every save.
+  const layouts = new Map((await database.query(`SELECT name,positions_contiguous FROM store_collection_counts
+    WHERE name=ANY($1::text[])`, [['orders','files','notifications']])).rows.map(row => [row.name, row.positions_contiguous]));
+  const own = store.orders.filter(order => order.clientId === clientId);
+  if (hasPendingSupplierPerformanceOutside(store, own.map(order => order.id), new Date().toISOString())) return null;
+  if (layouts.get('orders') === false && own.some(order => order.state === 'issue_window_open'
+    || (order.state === 'awaiting_collection' && order.handover?.qrToken && !order.handover.consumedAt)
+    || (store.supplierPerformanceLaunchedAt && order.supplierId && order.commercialCommittedAt && order.readyBy
+      && order.state !== 'cancelled' && order.performanceClock?.supplierId !== order.supplierId))) return null;
+  if (layouts.get('files') === false && pathname.startsWith('/me/carts/')) return null;
+  if (layouts.get('notifications') === false && store.notifications.some(row => row.type === 'order_call_incoming')) {
+    const active = await database.query("SELECT 1 FROM order_calls WHERE order_id=ANY($1::text[]) AND state IN ('ringing','accepted') LIMIT 1", [own.map(order => order.id)]);
+    if (active.rowCount) return null;
+  }
+  // Reward issuance needs shared monthly/referral budgets. Keep that rare,
+  // unproved money graph on the complete writer, rather than approximate it.
+  const progress = testerProgress(store, clientId);
+  if (pathname.endsWith('/lines') && foundingTesterEligible(store, clientId)
+    && !store.foundingTesters.find(row => row.clientId === clientId)?.awardedAt
+    && !progress.missions.added && progress.completedCount === 4) return null;
+  return bindClientSaveScope(store, { clientId, rawRows: structuredClone(loaded) });
+}
+
+/** Missing survey/failure and unavailable-change candidates for the 1s upkeep
+ * probe. Pure helpers decide whether anything actually changes before a writer
+ * is loaded; active but unchanged candidates never force full-store reloads.
+ */
+export async function loadSaveUpkeepProbe(database) {
+  return database.snapshot(async () => {
+    const graph = readGraph(database), { loaded, read } = graph;
+    await read('orders', `WHERE id IN (
+      SELECT order_id FROM order_change_requests WHERE status IN ('pending','pending_payment')
+      UNION SELECT id FROM orders WHERE jsonb_array_length(CASE WHEN jsonb_typeof(data->'shopFailureEvents')='array' THEN data->'shopFailureEvents' ELSE '[]'::jsonb END)>0
+        AND NOT EXISTS (SELECT 1 FROM order_surveys s WHERE s.order_id=orders.id)
+      UNION SELECT order_id FROM issues WHERE data#>>'{faultDecision,status}'='approved'
+        AND NOT EXISTS (SELECT 1 FROM order_surveys s WHERE s.order_id=issues.order_id))`);
+    const ids = loaded.orders.map(row => row.id);
+    for (const name of ['order_change_requests','issues','refund_settlements','order_surveys']) await read(name, 'WHERE order_id=ANY($1::text[])', [ids]);
+    const clients = [...new Set(loaded.orders.map(row => row.client_id))];
+    await readIdentity(graph, clients);
+    await read('founding_testers', 'WHERE client_id=ANY($1::text[])', [clients]);
+    await read('platform_settings', 'WHERE singleton');
+    return graph.finish({ surveyLaunchedAt: (await database.query('SELECT launched_at FROM survey_launch WHERE singleton')).rows[0]?.launched_at || null });
+  });
+}
+
 /** Tester administration appends evidence without running domain save hooks. */
 export async function appendTesterProgramAudit(database, entry, at) {
   if (!database.inWriteTransaction()) throw new Error('Tester audit requires a write transaction');
@@ -1646,6 +1900,11 @@ export async function loadHotReadStore(database, clerkSubject, pathname, { after
     await read('users', 'WHERE clerk_user_id = $1', [clerkSubject]);
     const ids = loaded.users.map(row => row.id);
     await readIdentity(graph, ids);
+    if (BASKET_READ.test(pathname)) return readBasketGraph(database, graph, ids, pathname, searchParams, { role, includeReviewData });
+    if (isStaffDeskRead(pathname)) {
+      if (pathname === '/staff/me' && sessionHash) await read('audit_log', "WHERE actor_id = ANY($1::text[]) AND action = 'staff.sign_in' AND data->'detail'->>'sessionHash' = $2 LIMIT 1", [ids, sessionHash]);
+      return readStaffDesk(database, graph, ids, pathname, searchParams, { role, readIdentity, readCatalogItemContext, readCatalogueGraph, parseStaffCatalogQuery, newGraph: () => readGraph(database) });
+    }
     if (OPS_QUEUE_READ.test(pathname)) return readOperationsQueue(graph, ids, pathname, searchParams, role);
     if (USER_READ.test(pathname)) return readUserDirectory(graph, ids, pathname, searchParams, role);
     if (AUDIT_READ.test(pathname)) {
@@ -2445,6 +2704,27 @@ export async function saveStore(database, store) {
   finalizeAuditEntries(store, originalDomainStore(store));
   const currentRows = rowsFromStore(store);
   const baselineRows = store[BASELINE] || Object.fromEntries(TABLES.map(({ name }) => [name, []]));
+  const scope = clientSaveScope(store);
+  if (scope) {
+    for (const table of TABLES) {
+      if (!table.columns.includes('position')) continue;
+      const raw = rowMap(scope.rawRows[table.name], table);
+      const before = rowMap(baselineRows[table.name], table);
+      let nextPosition;
+      for (const row of currentRows[table.name]) {
+        const key = rowKey(row, table.keys), original = raw.get(key);
+        if (original) {
+          // Hydration uses array indices; SQL must retain the original ordinal.
+          row.position = original.position;
+          if (before.has(key)) before.get(key).position = original.position;
+        } else if (['notifications', 'audit_log'].includes(table.name)) {
+          if (nextPosition === undefined) nextPosition = (await database.query(
+            'SELECT row_count FROM store_collection_counts WHERE name=$1 FOR UPDATE', [table.name])).rows[0].row_count;
+          row.position = nextPosition++;
+        } else if (!before.has(key)) throw new Error(`Unsupported scoped append: ${table.name}`);
+      }
+    }
+  }
   const maps = new Map(TABLES.map((table) => [table.name, { before: rowMap(baselineRows[table.name] || [], table), current: rowMap(currentRows[table.name], table) }]));
   for (const table of [...TABLES].reverse()) {
     const { before, current } = maps.get(table.name);
@@ -2471,9 +2751,19 @@ export async function saveStore(database, store) {
   }
   for (const row of currentRows.order_line_items || []) {
     if (row.snapshot_finalized) {
+      if (scope && baselineRows.order_line_items.some(old => old.id === row.id && old.snapshot_finalized)) continue;
       await database.query("UPDATE order_line_items SET snapshot_finalized = true WHERE id = $1", [row.id]);
     }
   }
+  // Only a complete graph can prove that no normalization outside a request's
+  // subset remains. A shop-hours mutation can leave its new duration view dirty
+  // until the next full load/sweep; clearing must use the post-mutation facts.
+  const completeTransaction = completeDomainTransactions.get(store);
+  if (completeTransaction && productionHoursSynchronized(store)) {
+    await database.query(`UPDATE store_production_normalization SET dirty=false
+      WHERE singleton AND dirty AND pg_current_xact_id()::text=$1`, [completeTransaction]);
+  }
+  if (scope) scope.rawRows = structuredClone(currentRows);
   if (Object.hasOwn(store, BASELINE)) {
     store[BASELINE] = structuredClone(currentRows);
     domainBaselines.set(store, structuredClone(store));

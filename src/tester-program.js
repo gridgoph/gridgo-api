@@ -85,7 +85,8 @@ async function ownState(database, enrollment, config, at) {
   const rows = await checkinsFor(database, enrollment.id);
   const progress = testerProgress(enrollment, rows.map(row => row.manila_date), today);
   return { enrolled: true, app: enrollment.app, ...progress,
-    stopped: progress.runComplete || Boolean(config.production_approved_at), manilaDate: today,
+    stopped: progress.runComplete || Boolean(config.production_approved_at),
+    productionApproved: Boolean(config.production_approved_at), manilaDate: today,
     nudge: await nudgeFor(database, enrollment, progress, config, await feedbackFor(database, enrollment.user_id, enrollment.app), at) };
 }
 

@@ -8,7 +8,7 @@ import { fixture, AT } from './fixtures/reschedule.js';
 import { apiForTest } from './fixtures/reschedule-http.js';
 import { OWNER_ROUTES, STAFF_ROUTES } from './fixtures/shop-team-routes.js';
 import { PICKUP_CHECK_CODES } from '../src/operational-model.js';
-import { up } from '../migrations/1794145000000_shop_teams.js';
+import { up } from '../migrations/1794192200000_shop_teams.js';
 import { notificationVisible } from '../src/notifications.js';
 const skip = !process.env.DATABASE_URL;
 const supplier = { headers: { 'X-GRIDGO-Role': 'supplier' } };

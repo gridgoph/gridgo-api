@@ -303,3 +303,14 @@ test('Tight reasoned declines and pilot late finishes keep notices without perfo
   assert.equal(view(store,order.readyAt).notices.length,1);
   assert.equal(view(store,order.readyAt).notices[0].exempt,true);
 });
+
+test('scoped performance maintenance touches only selected orders while retaining shared policy context', () => {
+  const store = fixture();
+  store.supplierPerformanceLaunchedAt = START;
+  const foreign = { ...structuredClone(store.orders[0]), id: 'foreign_work', clientId: 'other' };
+  store.orders.push(foreign);
+  const before = structuredClone(foreign);
+  syncSupplierPerformance(store, { at: START, id, orderIds: [store.orders[0].id] });
+  assert.ok(store.orders[0].performanceClock);
+  assert.deepEqual(foreign, before);
+});

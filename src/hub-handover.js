@@ -68,6 +68,7 @@ function clientNotice(store, order, type, body, at, id) {
 export function sweepHubReminders(store, { at, id }) {
   let changed = false;
   for (const order of store.orders || []) {
+    let orderChanged = false;
     const h = order.handover;
     if (order.state !== 'awaiting_collection' || !h?.qrToken || h.consumedAt) continue;
     const schedule = h.schedule;
@@ -78,10 +79,10 @@ export function sweepHubReminders(store, { at, id }) {
       if (!alreadyNotified) clientNotice(store, order, 'hub_ready', schedule
         ? 'Your order is ready. Bring its QR and matching code during hub hours.'
         : 'Your order is ready. Collection hours are not set yet. Contact Operations to arrange pickup.', at, id);
-      h.readyNotifiedAt = at; changed = true;
+      h.readyNotifiedAt = at; changed = true; orderChanged = true;
     }
     if (!schedule) {
-      if (changed) queueOrderInvalidate(store, order, ['orders']);
+      if (orderChanged) queueOrderInvalidate(store, order, ['orders']);
       continue;
     }
     const offset = schedule.utcOffsetMinutes * 60000;
@@ -103,9 +104,9 @@ export function sweepHubReminders(store, { at, id }) {
         notifyAdmins(store, 'hub_unclaimed_escalated', 'Unclaimed pickup needs Operations', order, `hub-unclaimed:${order.id}`, { createId: id, at });
         store.auditLog.push({ id: id('aud'), at, actorId: null, actorRole: 'system', action: 'hub.unclaimed_escalated', entityType: 'order', entityId: order.id, orderId: order.id, detail: { missedDays: h.missedDays } });
       }
-      changed = true;
+      changed = true; orderChanged = true;
     }
-    if (changed) queueOrderInvalidate(store, order, ['orders']);
+    if (orderChanged) queueOrderInvalidate(store, order, ['orders']);
   }
   return changed;
 }

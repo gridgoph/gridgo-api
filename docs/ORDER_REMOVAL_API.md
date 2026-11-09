@@ -43,6 +43,47 @@ its submitted/confirmed order and basket payments must carry the server's
 `simulated` marker. Real orders with a shop remain subject to existing recovery
 and cancellation rules. Blocked orders keep all existing visibility and behavior.
 
+## Super Admin eligibility projection
+
+Super Admin order responses, including `GET /orders/:id` (the admin order
+workspace), `GET /orders` and mutation responses containing an order, include:
+
+```json
+{ "removal": { "allowed": true, "blockedReason": null } }
+```
+
+When blocked, `allowed` is `false` and `blockedReason` is one of the codes below.
+These codes come from `orderRemovalBlock` in `src/order-removal.js`, the same
+policy used by `POST /ops/orders/:id/remove`. The table gives short dashboard
+messages; the POST retains its existing longer plain-language `message`.
+
+| `blockedReason` | Short message |
+| --- | --- |
+| `payout_released` | A payout has already been released. |
+| `refund_activity` | This order has a refund in progress or completed. |
+| `payment_submitted` | A payment has been submitted or confirmed. |
+| `financial_activity` | This order has financial activity. |
+| `shop_assigned` | A shop is already assigned. |
+
+If several protections apply, the first reason in table order wins. The field
+is absent for Operations (including test Operations), clients, shops, riders and
+staff. It is computed from current database facts, never historical order JSON.
+Targeted Super Admin order reads load the relevant basket payment, credit and
+voucher facts as well as the order's payment, payout, refund and job records.
+Migration `1794157000000_order_removal_history_indexes` builds four concurrent
+GIN indexes for the batched JSON containment lookup, covering root and nested
+scalar/array order references. Apply it before this API release; see the
+[concurrent-build recovery procedure](DEPLOYMENT.md#targeted-read-indexes-and-interrupted-builds).
+The growth regression in `tests/order-removal-growth-postgres.test.js` checks the
+actual Super Admin detail query plans and shared-buffer work after 100,000
+unrelated records per financial-history table, as well as all reference forms.
+
+Show the Remove order action only when `removal.allowed` is `true`; otherwise
+show the short explanation. Eligibility is a current read, not a reservation:
+the POST rechecks under the transaction lock, so callers must still handle
+`409 order_removal_blocked` if activity changes after the order was read. Required
+reason and exact-email confirmation remain mandatory even when eligible.
+
 ## What is kept and hidden
 
 Migration `1794060000000_order_removals` adds an immutable removal record with the

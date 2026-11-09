@@ -69,9 +69,11 @@ export function createFileRetention({ database, load, save, storage, enabled = f
     await finishPending(fileId);
     return (await load()).files.find((row) => row.fileId === fileId);
   }
-  async function run({ dryRun = true } = {}) {
+  async function run({ dryRun = true, readStore = null } = {}) {
     const at = now();
-    const snapshot = await load();
+    // Only reports may consume a scoped graph. Execution always reloads the
+    // complete writable state and repeats its domain-lock/hold checks.
+    const snapshot = dryRun && readStore ? readStore : await load();
     const candidates = snapshot.files.filter((file) => retentionDecision(snapshot, file, at).eligible);
     const byPurpose = {};
     for (const file of candidates) byPurpose[file.purpose] = (byPurpose[file.purpose] || 0) + 1;

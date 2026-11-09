@@ -93,6 +93,9 @@ import { createTokenValidator } from "./push-token-validation.js";
 import { pushStats } from "./push-stats.js";
 import { deriveDomainEvents, notifyAdmins } from "./domain-events.js";
 import { originalDomainStore } from "./postgres-store.js";
+import { clientSaveScope, isClientSavePath, saveMaintenanceView } from './save-scope.js';
+import { assertStoredSupplementUnique, assertStoredOrderPaymentGuards } from './save-guards.js';
+import { saveUpkeepNeeded, pruneMatchSelections } from './save-upkeep.js';
 import { TEST_OPERATIONS_FORBIDDEN, isTestOperationsUser, mergeTestOperationsView, reviewSubject, testOperationsRouteAllowed, testOperationsView } from "./test-operations.js";
 import { hasRole, hasSupplierAppAccess, approvedRole, canAccessOrder, notificationVisible, EVENT_ROLES, invalidateFrameVisible } from "./notifications.js";
 import { availableDispatch, dispatchWorkHeld } from "./dispatch-policy.js";
@@ -318,6 +321,8 @@ import {
   loadPushDeliveryStore,
   isHotReadPath,
   loadHotReadStore,
+  loadClientSaveStore,
+  loadClientSavePreflightStore,
   loadStore,
   loadClientBootstrapStore,
   loadProductionSweepStore,
@@ -430,23 +435,30 @@ async function save(view) {
   // A test operations view commits through its underlying full store.
   const store = mergeTestOperationsView(view);
   if (store !== view) moveQueuedInvalidates(view, store);
+  const scope = clientSaveScope(store);
+  const maintenance = saveMaintenanceView(store);
+  const flushMaintenanceInvalidates = () => { if (maintenance !== store) moveQueuedInvalidates(maintenance, store); };
   let closedSavedFiles = 0;
-  const savedOwners = new Set((store.files || []).filter(file => file.state !== 'deleted'
+  const savedOwners = new Set((maintenance.files || []).filter(file => file.state !== 'deleted'
     && (file.savedAt || file.saveToMyFilesRequestedAt)).map(file => file.ownerId));
   for (const owner of store.users || []) {
-    if (owner.accountStatus === 'removed' && savedOwners.has(owner.id)) {
-      closedSavedFiles += requestAccountSavedFileDeletion(store, owner.id, { at: now(), audit });
+    if ((!scope || owner.id === scope.clientId) && owner.accountStatus === 'removed' && savedOwners.has(owner.id)) {
+      closedSavedFiles += requestAccountSavedFileDeletion(maintenance, owner.id, { at: now(), audit });
     }
   }
   if (closedSavedFiles) database.afterCommit(() => { void fileRetention.reconcile().catch(() => console.warn('saved file closure cleanup deferred')); });
-  enforceReviewData(store, originalDomainStore(store));
-  if ((store.files || []).some(file => file.colourAnalyses?.some(job => job.status === "pending"))) database.afterCommit(() => { void drainColourAnalyses().catch(() => console.warn("colour worker failed")); });
-  assertSupplementCollectionsUnique(store);
-  syncSupplierInvoiceExpectations(store, originalDomainStore(store), { at: now(), id, audit });
-  await reconcileCalls(database, store, { createId: id, at: now() });
-  cancelVoucherReservations(store, { id, at: now() });
-  syncSurveys(store, { id, at: now() });
-  reconcilePromotionInvites(store, { id, at: now() });
+  enforceReviewData(maintenance, originalDomainStore(store));
+  if ((maintenance.files || []).some(file => file.colourAnalyses?.some(job => job.status === "pending"))) database.afterCommit(() => { void drainColourAnalyses().catch(() => console.warn("colour worker failed")); });
+  if (scope) await assertStoredSupplementUnique(database);
+  else assertSupplementCollectionsUnique(store);
+  syncSupplierInvoiceExpectations(maintenance, originalDomainStore(store), { at: now(), id, audit });
+  flushMaintenanceInvalidates();
+  await reconcileCalls(database, store, { createId: id, at: now(), ...(scope ? { orderIds: maintenance.orders.map(row => row.id) } : {}) });
+  cancelVoucherReservations(maintenance, { id, at: now() });
+  flushMaintenanceInvalidates();
+  syncSurveys(maintenance, { id, at: now() });
+  flushMaintenanceInvalidates();
+  reconcilePromotionInvites(store, { id, at: now(), ...(scope ? { clientIds: [scope.clientId] } : {}) });
   const previousStore = originalDomainStore(store);
   if (previousStore) {
     const touched = new Set();
@@ -459,7 +471,7 @@ async function save(view) {
         if (clientId) touched.add(clientId);
       }
     }
-    matchTesterInvites(store, { id, at: now() });
+    matchTesterInvites(store, { id, at: now(), ...(scope ? { clientIds: [scope.clientId] } : {}) });
     for (const clientId of touched) {
       // Incidental order maintenance (invoice expectations, lifecycle metadata)
       // must not turn save() into a historical/bulk award sweep.
@@ -473,7 +485,8 @@ async function save(view) {
     }
   }
   const before = new Map((originalDomainStore(store)?.orders || []).map(order => [order.id, order]));
-  for (const order of store.orders || []) {
+  if (scope) await assertStoredOrderPaymentGuards(database);
+  for (const order of maintenance.orders || []) {
     if (before.get(order.id)?.state !== order.state && ["payment_authorized", "production"].includes(order.state)) assertApprovalBeforeProceeding(order);
     const topUpPending = changesFor(store, order).some(row => row.status === 'pending_confirmation' && awaitedTopUp(order, row));
     if (changePaymentPending(store, order) && (!changeWindowOpen(order)
@@ -496,10 +509,12 @@ async function save(view) {
       prepareHandover(store, order, { at: now() });
     }
   }
-  syncSupplierPerformance(store, { at: now(), id, clockStore: originalDomainStore(store) || store });
-  sweepHubReminders(store, { at: now(), id });
+  syncSupplierPerformance(store, { at: now(), id, clockStore: originalDomainStore(store) || store,
+    ...(scope ? { orderIds: maintenance.orders.map(order => order.id) } : {}) });
+  sweepHubReminders(maintenance, { at: now(), id });
+  flushMaintenanceInvalidates();
   const previousFiles = new Map((originalDomainStore(store)?.files || []).map(file => [file.fileId, file]));
-  for (const file of store.files || []) {
+  for (const file of maintenance.files || []) {
     if (file.purpose !== 'supplier_invoice' || file.state !== 'ready') continue;
     for (const ref of file.references || []) {
       if (ref.type !== 'order' || (previousFiles.get(file.fileId)?.references || []).some(r => r.type === 'order' && r.id === ref.id)) continue;
@@ -2535,7 +2550,12 @@ async function handleAuditedRequest(req, res) {
       return send(res, result.status, result.body);
     }
 
-    await expireElapsedIssueWindows();
+    const clientSave = database.inWriteTransaction() && isClientSavePath(req.method, pathname);
+    const scopedClientStore = clientSave
+      ? await loadClientSaveStore(database, req.gridgoVerifiedClaims?.claims?.sub || null, pathname, await readBody(req)) : null;
+    // Unrelated lifecycle upkeep runs on the existing candidate timers. The
+    // legacy graph (including checkout) retains its established boundary.
+    if (!scopedClientStore) await expireElapsedIssueWindows();
     let notificationRead = req.method === 'GET' && ['/notifications', '/notifications/stream'].includes(pathname);
     let hotRead = req.method === 'GET' && isHotReadPath(pathname);
     const notificationClaims = notificationRead || hotRead ? await verifiedClerkClaimsFor(req) : null;
@@ -2553,7 +2573,17 @@ async function handleAuditedRequest(req, res) {
         after: url.searchParams.get('after') || '', status: url.searchParams.get('status'), searchParams: url.searchParams,
         role: req.headers['x-gridgo-role'], includeReviewData: url.searchParams.get('includeReviewData') === '1',
         sessionHash: notificationClaims?.claims?.sid ? crypto.createHash('sha256').update(notificationClaims.claims.sid).digest('hex') : null,
-      }) : await load();
+      }) : scopedClientStore || await load();
+
+    if (clientSaveScope(store)) {
+      const maintenance = saveMaintenanceView(store);
+      const pending = new Set(maintenance.orders.filter(order => order.state === 'issue_window_open').map(order => order.id));
+      const at = now();
+      if (expireIssueWindows(maintenance, at)) {
+        for (const order of maintenance.orders) if (order.state === 'completed' && pending.has(order.id)) notifyOrderParties(store, order, { createId: id, at });
+        await save(store);
+      }
+    }
 
     if (
       (req.method === "GET" || req.method === "HEAD")
@@ -3841,7 +3871,7 @@ async function handleAuditedRequest(req, res) {
 
     if (req.method === "GET" && pathname === "/admin/files/retention") {
       if (user.role !== "super_admin") return send(res, 403, { error: "forbidden" });
-      return send(res, 200, await fileRetention.run({ dryRun: true }));
+      return send(res, 200, await fileRetention.run({ dryRun: true, readStore: store }));
     }
 
     if (req.method === "DELETE" && /^\/(?:files|me\/files)\/[^/]+$/.test(pathname)) {
@@ -5916,6 +5946,8 @@ async function handleAuditedRequest(req, res) {
           catalog: (store.catalogItems || []).filter(item => !isQuoteListing(item)),
           users: store.users || [],
           audit: store.auditLog || [],
+          auditActivity: store.pricingAuditActivity,
+          readContext: store.pricingReadContext,
           refundRequests: store.refundRequests || [],
           refunds: store.refundSettlements || [],
           settings: store.settings || {},
@@ -7923,7 +7955,7 @@ const server = http.createServer((req, res) => {
         if (isCartArtworkWrite(req.method, pathname)) {
           const body = await readBody(req);
           if (hasShortArtworkLinks(body?.artworkAttachments ?? body?.artworkLinks)) {
-            const store = await load();
+            const store = await loadClientSavePreflightStore(database, verified.claims.sub, pathname, body) || await load();
             const auth = await authenticateRequest(req, store);
             if (auth.user && !accountHoldDenial(auth.user)) {
               const role = req.headers["x-gridgo-role"];
@@ -7987,6 +8019,18 @@ function runPushTokenValidation() {
 // A separate short tick keeps the 30s ringing deadline independent of the
 // slower file/production lifecycle. All replicas serialize through the domain lock.
 let callsBusy = false;
+let saveUpkeepBusy = false;
+async function sweepSaveUpkeep() {
+  if (saveUpkeepBusy) return;
+  saveUpkeepBusy = true;
+  try {
+    const at = now();
+    await pruneMatchSelections(database, at);
+    if (!await saveUpkeepNeeded(database, at)) return;
+    await enqueueMutation(async () => { await save(await load()); });
+  } catch (error) { console.warn(`save upkeep failed reason=${error?.code || 'unavailable'}`); }
+  finally { saveUpkeepBusy = false; }
+}
 async function sweepCalls() {
   if (callsBusy) return;
   callsBusy = true;
@@ -8129,6 +8173,8 @@ server.listen(PORT, HOST, () => {
   lifecycleTimer.unref();
   const callsTimer = setInterval(sweepCalls, 1000);
   callsTimer.unref();
+  const saveUpkeepTimer = setInterval(sweepSaveUpkeep, 1000);
+  saveUpkeepTimer.unref();
   void runLifecycleWork();
   // Off the lifecycle tick: a pass paces itself for seconds and must never
   // hold up issue windows, nudges, or the outbox backstop. `0` disables it.

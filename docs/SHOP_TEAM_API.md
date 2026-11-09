@@ -7,7 +7,7 @@ never grants a supplier business, hub, Operations, or Super Admin membership.
 
 ## Identity and launch compatibility
 
-A shop ID is its existing supplier user ID. Migration `1794145000000` adds shop
+A shop ID is its existing supplier user ID. Migration `1794192200000` adds shop
 memberships and backfills every supplier membership as that shop's active
 `owner`. No user IDs, Clerk subjects, credentials, sessions, order assignments,
 prices or payment snapshots change. Future supplier enrollment adds its owner
