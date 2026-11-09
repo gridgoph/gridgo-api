@@ -45,17 +45,17 @@ export async function setupReadParity(database) {
 }
 
 // Test-only dispatcher bypass and clock; production has no baseline switch.
-export function readParityEnv(full, at, { sourceRef = null, planner = null, stableFixture = false } = {}) {
+export function readParityEnv(full, at, { sourceRef = null, planner = null, stableFixture = false, timing = false } = {}) {
   const hook = `
     import { registerHooks } from 'node:module';
     import { execFileSync } from 'node:child_process';
     import { fileURLToPath } from 'node:url';
     import { relative } from 'node:path';
-    const NativeDate = Date;
+    ${timing ? '' : `const NativeDate = Date;
     globalThis.Date = class extends NativeDate {
       constructor(...args) { super(...(args.length ? args : [${at}])); }
       static now() { return ${at}; }
-    };
+    };`}
     registerHooks({ load(url, context, next) {
       const path = url.startsWith('file:') ? relative(process.cwd(), fileURLToPath(url)) : '';
       let result = ${sourceRef ? `path.startsWith('src/') && path.endsWith('.js')
@@ -88,8 +88,10 @@ export function readParityEnv(full, at, { sourceRef = null, planner = null, stab
 // a slow CI run eventually issues nbf values later than the children's clock.
 export async function parityApiForTest(t, full, at, options = {}) {
   const api = await apiForTest(t, readParityEnv(full, at, options), options);
-  const seconds = Math.floor(at / 1000);
-  return (who, method, path, body, opts = {}) => api(who, method, path, body, {
+  return (who, method, path, body, opts = {}) => {
+    const seconds = Math.floor((options.timing ? Date.now() : at) / 1000);
+    return api(who, method, path, body, {
     ...opts, claims: { iat: seconds - 5, nbf: seconds - 5, exp: seconds + 3600, ...opts.claims },
-  });
+    });
+  };
 }

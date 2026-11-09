@@ -1,3 +1,4 @@
+import { staffPageBody, STAFF_LIST_PAGE } from './staff-list-pages.js';
 import { identityHasMembership } from './authorization-context.js';
 import { voucherFail as fail } from './vouchers.js';
 import { promotionSettings, promotionVersion, updatedPromotionSettings } from './promotion-settings.js';
@@ -13,7 +14,18 @@ export async function routePromotions({ req, url, store, user, readBody, id, now
   const at = now(), ctx = { id, at };
   const result = (body, mutated = false) => ({ status: 200, body, mutated });
   if (path === '/admin/promotions') {
-    if (req.method === 'GET') return result(adminPromotions(store, at));
+    if (req.method === 'GET') {
+      const summary=store[STAFF_LIST_PAGE]?.promotionSummary;
+      const body=adminPromotions(store,summary?.at || at);
+      if(summary) {
+        Object.assign(body.founding,{claimed:summary.claimed,available:Math.max(0,body.founding.slots-summary.claimed),used:summary.used,expiredUnused:summary.expired});
+        body.friendPass.issued=summary.issued;
+        Object.assign(body.budget,{committedMinor:summary.committed,redeemedMinor:summary.redeemed,remainingMinor:Math.max(0,body.budget.capMinor-summary.committed)});
+        if(summary.section==='claims') body.friendPass.invites=[];
+        else body.founding.claims=[];
+      }
+      return result(staffPageBody(store,url,body));
+    }
     if (req.method !== 'PATCH') fail(404, 'not_found');
     if (!admin) fail(403, 'forbidden');
     const body = await readBody(req), next = updatedPromotionSettings(store, body);

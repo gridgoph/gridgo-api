@@ -36,6 +36,14 @@ GET /admin/staff/invites?limit=20&cursor=<nextCursor>
 
 | GET route | Array | Opt-in page order |
 | --- | --- | --- |
+| `/orders` | `orders` | `createdAt` descending, order ID descending |
+| `/baskets` | `baskets` | `createdAt` descending, basket ID descending |
+| `/issues` | `issues` | `createdAt` descending, issue ID descending |
+| `/credits/balance` | `ledger` | ledger `at` descending, entry ID descending |
+| `/admin/promotions?section=claims` | `founding.claims` | `claimedAt` descending, voucher ID descending |
+| `/admin/promotions?section=invites` | `friendPass.invites` | `createdAt` descending, invite ID descending |
+| `/admin/shop-rankings` | `rows` | existing global rank/name order, stable supplier tie-breaker |
+| `/ops/shops/:id/performance` | `performance.events` | event `at` descending, event ID descending |
 | `/admin/staff` | `staff` | `updatedAt` descending, user ID descending |
 | `/admin/staff/invites` | `invites` | `createdAt` descending, invite ID descending |
 | `/admin/staff/roles` | `roles` | role code ascending |
@@ -72,11 +80,33 @@ page when a desk changes.
 - `totalRequests` on the reschedule queue covers the full permitted supplier
   scope, across statuses, as before; it is independent of the page/status filter.
   Historical requests stay with their original requesting shop after recovery;
-  retained order removals are excluded from both the count and page.
+  retained order removals are excluded from both the count and page. Transactional
+  per-shop/global counters now serve this total; it no longer counts order history
+  on each page. Review-only and ordinary scopes retain their previous totals.
 - Season `banners` remains the full currently active banner subset, independently
   of the window page. Past windows remain available through the admin page.
-- The performance page limits **shops**, retaining each selected shop's complete
-  event/history and metric inputs. It does not page events, notices or warnings.
+- `/ops/shops/performance` still limits **shops**. On the separate
+  `/ops/shops/:id/performance` detail, the shared event cursor limits `events`;
+  `notices` and `warnings` contain only their matching subset of those events.
+  Either subset may be empty while `nextCursor` is non-null. Counts, on-time
+  totals, roster-review status and current top-pick demotion remain full summary
+  values. SQL aggregates current/incident windows, including retroactive no-fault
+  and scheduling exemptions; only selected events and their evidence are hydrated.
+- `/admin/promotions` uses `section=claims|invites` when paging; it defaults to
+  `claims`. The selected nested array is paged and the other nested array is empty.
+  Keep separate cursors for the two sections. Invalid sections return
+  `400 invalid_section` on paged requests. Settings, version, budget, slot counts,
+  used/expired totals and issued-invite total cover the whole launch population.
+- `/admin/shop-rankings` retains the complete categories, global `rankedCount`,
+  per-shop scores and absolute `position`. PostgreSQL calculates compact global
+  star totals; JavaScript retains the existing rounding and name/tie ordering.
+  The rank cursor seeks by score/count/quality/name/supplier facts, not an offset.
+  Only selected shops hydrate finished-order clock inputs and category prices.
+- The mixed order/basket/issue/credit pages retain existing party, membership,
+  selected-role, review-data, file and financial projections. Balance is always
+  the account's full current balance, independently of the ledger page. Staff
+  order packed-arrival counts still cover their full reporting scope. Order
+  visibility probes hydrate only bounded access/hold facts before the final page.
 - Review-only Operations selection and ordinary review-data visibility are
   applied before the keyset limit. Order removals remain excluded.
 - Supplier access to `/supplier-services`, and client access to
@@ -92,18 +122,26 @@ editor. Keep the current page plus cursor in screen state; stop when it is `null
 Do not infer a total from the current page's length. This API release does not
 change dashboard code or turn on default pagination for older builds.
 
-The reviewed slice leaves `/admin/promotions`' two independent nested lists,
-`/admin/shop-rankings` and `/ops/shops/:id/performance` histories for follow-up
-contracts that retain their full-population budgets/ranks/incident windows.
-Mixed party/staff `/orders`, `/baskets`, `/issues` and `/credits/balance` are also
-follow-ups. `/ops/riders/locations` remains a complete live map snapshot by design.
-Existing paginated desks keep their current contracts.
+The Promotions claims/invites tabs, shop rankings, shop performance history,
+shared Orders, basket/payment history, issue lists and credit ledger screens can
+now adopt these contracts. They must keep their current summary fields and
+separate list state; fetching a page must not replace a total with its row count.
+This release changes API contracts only and does not update dashboard or apps.
+`/ops/riders/locations` remains a complete live map snapshot by design.
 
 ## Deployment and verification
 
 Apply `1794190500000_staff_list_pages` before the API release. Its page/filter
 indexes use individual concurrent builds; use the existing
 [interrupted-build recovery](DEPLOYMENT.md#targeted-read-indexes-and-interrupted-builds).
+Apply `1794217000000_reschedule_request_counts`,
+`1794217010000_mixed_list_pages`, `1794217020000_aggregate_page_indexes` and
+`1794217030000_colour_worker_reads` before the finish-slice release. Count
+initialization takes the domain lock and brief order/removal table locks;
+insert/update transition tables aggregate deltas once per statement. Concurrent
+indexes on existing tables follow the same recovery procedure. Basket page
+indexes have a redundant length predicate supplied only by opted-in queries,
+so legacy unpaged enumeration keeps its original query plans.
 No schema work runs at boot. HTTP mutations, advisory locks, save, audit and
 notification boundaries are unchanged.
 
@@ -133,8 +171,29 @@ The destructive benchmark grows matching list parents and unrelated notification
 audit and location history from 10,000 to 100,000 rows per grown table. It vacuums/analyzes each completed bulk load, then reports
 API-own request-log timings, first/deep parent query plans and SQL row/query budgets, and
 asserts that page hydration budgets remain equal at both scales. Performance
-histories for any one selected shop are held constant; exact reschedule totals
-still require a database count of their complete matching scope. The exact
-supplier-filtered `totalRequests` count is an explicit performance exception in
-this slice; a maintained counting table is follow-up work. Local synthetic
+histories for any one selected shop are held constant in that earlier benchmark.
+The finish-slice benchmark below also grows old performance history and launch
+claims/invites, with distinct synthetic beneficiaries and complete two-group
+basket money snapshots. It exercises first/deep cursors and asserts equal
+query/transfer budgets across 10,000/100,000 history rows and 1,000/10,000
+complete baskets (configurable with `PERF_BASKET_BASE_ROWS`). Aggregate computation
+can still depend on the relevant launch/league/incident population; unrelated
+inbox, audit and ping growth is never hydrated. Reschedule totals use only their
+maintained scope rows. Local synthetic
 results do not establish the production timing target.
+
+
+Finish-slice verification:
+
+```sh
+TEST_DATABASE_URL=postgresql://…/gridgo_task_test npm test -- --maxWorkers=2 tests/finish-pages-postgres.test.js tests/finish-counts-migration.test.js tests/finish-page-index-migration.test.js tests/upload-intake-parity.test.js tests/upload-colour-worker-parity.test.js
+DATABASE_URL=postgresql://…/gridgo_task_test PERF_BASE_ROWS=10000 PERF_SAMPLES=5 node scripts/benchmark-finish-pages.mjs
+```
+
+The new unpaged matrix compares 90 HTTP bodies against actual pre-change dev
+source. Separate cursor tests compare concatenated projected rows and all
+summaries with the unpaged API, including Unicode reasons, future no-fault facts,
+sub-millisecond timestamps and exact 30-day/7-day performance boundaries.
+Counters are also tested against populated migration input, bulk DML, cascades,
+truncates and rollback. Index tests prove later writers proceed during a build,
+interrupted builds recover, and 20,000 basket rows retain legacy enumeration.

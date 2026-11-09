@@ -1,3 +1,4 @@
+import { STAFF_LIST_PAGE } from './staff-list-pages.js';
 import { schedulingWarningOnly, tightDeclineExemption } from './scheduling-policy.js';
 import { reportOrderAllowed } from './review-data.js';
 const DAY = 86400000;
@@ -20,6 +21,8 @@ export function performanceExemption(store, row) {
 const emptyCounts = () => ({ declines: 0, timeouts: 0, lateFinishes: 0, cancellations: 0, arrivedPacked: 0 });
 const COUNT_KEY = { declined: 'declines', timed_out: 'timeouts', late_finish: 'lateFinishes', cancelled: 'cancellations', arrived_packed: 'arrivedPacked' };
 export function performanceCounts(store, supplierId, at) {
+  const facts=store?.[STAFF_LIST_PAGE]?.performanceFacts;
+  if(facts?.supplierId===supplierId && facts.counts[at]) return {...facts.counts[at]};
   const end = Date.parse(at), start = end - 30 * DAY;
   const counts = emptyCounts();
   for (const event of store.supplierPerformanceEvents || []) {
@@ -43,6 +46,8 @@ export function consequences(kind, counts) {
 }
 /** Replay incident-time windows: an old count alone cannot restart a seven-day demotion. */
 export function performanceTopPick(store, supplierId, at) {
+  const facts=store?.[STAFF_LIST_PAGE]?.performanceFacts;
+  if(facts?.supplierId===supplierId && facts.at===at) return {...facts.topPick};
   const end = Date.parse(at);
   let hiddenUntil = null;
   for (const event of store.supplierPerformanceEvents || []) {

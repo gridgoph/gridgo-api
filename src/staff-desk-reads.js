@@ -1,3 +1,4 @@
+import { readPromotionPage, readPerformancePage, readRankingPage } from './aggregate-read-pages.js';
 import { readStaffPage, staffPageRequested } from './staff-list-pages.js';
 import { assignmentTime } from './rider-tracking.js';
 import { identityHasMembership, selectActorRole } from './authorization-context.js';
@@ -62,7 +63,7 @@ export async function readStaffDesk(database, graph, actorIds, path, params, hel
     if (staff || actor.role==='client') {
       const clientId=text(params.get('clientId') || actor.id);
       await read('credit_accounts','WHERE user_id=$1',[clientId]);
-      await read('credit_ledger','WHERE user_id=$1',[clientId]);
+      await readStaffPage(graph,path,params,'WHERE user_id=$1',[clientId]);
     }
     return finish();
   }
@@ -152,6 +153,7 @@ export async function readStaffDesk(database, graph, actorIds, path, params, hel
     }
     return relatedIdentity();
   }
+  if (/^\/ops\/shops\/[^/]+\/performance$/.test(path) && staffPageRequested(params)) return readPerformancePage(database,graph,actorIds,path,params,helpers);
   if (/production-lapses$/.test(path) || /\/performance$/.test(path)) {
     const supplierId = path.startsWith('/users/') ? path.split('/')[2] : /^\/ops\/shops\/([^/]+)\/performance$/.exec(path)?.[1];
     if (supplierId) await read('supplier_profiles', 'WHERE user_id=$1', [text(supplierId)]);
@@ -204,12 +206,11 @@ export async function readStaffDesk(database, graph, actorIds, path, params, hel
         const owner = "data#>>'{rescheduleRequest,supplierId}'";
         const scope = `WHERE ${valid} AND ${params.get('supplierId') ? `${owner}=$1` : '$1::text IS NULL'}`;
         await readStaffPage(graph, path, params, `${scope} AND ${params.get('status') ? "data#>>'{rescheduleRequest,status}'=$2" : '$2::text IS NULL'}`, [...values, text(params.get('status') || null)]);
-        // This counter has always covered every status for this supplier scope.
-        // Count narrow candidates and subtract retained removals. The exact
-        // supplier-filtered aggregate intentionally retains its full scope;
-        // a maintained counting table is separate follow-up work.
-        if (!graph.staffPage.error) graph.rescheduleTotal = (await database.query(`WITH eligible AS NOT MATERIALIZED (SELECT id FROM orders ${scope})
-          SELECT ((SELECT count(*) FROM eligible) - (SELECT count(*) FROM order_removals removed JOIN eligible ON eligible.id=removed.order_id))::int AS total`, values)).rows[0].total;
+        // Two maintained scope rows, independent of request-history size.
+        if (!graph.staffPage.error) graph.rescheduleTotal = params.get('supplierId')?.includes('\0') ? 0 : Number((await database.query(`
+          SELECT coalesce(sum(request_count),0)::text AS total FROM reschedule_request_counts
+          WHERE supplier_key=$1::jsonb ${reviewOnly ? 'AND review_data' : ''}`,
+          [JSON.stringify(params.get('supplierId') ? params.get('supplierId') : { all: true })])).rows[0].total);
       } else await read('orders', where, values);
     }
     else if (path === '/ops/special-instructions') {
@@ -420,6 +421,7 @@ async function readStaffReports(database, graph, actorIds, path, params, helpers
         ['available','expired'].includes(tab) ? [text(params.get('clientId')), at] : [text(params.get('clientId'))]);
       if (graph.staffPage) graph.staffPage.asOf = at;
     }
+    else if (path === '/admin/promotions' && staffPageRequested(params)) return readPromotionPage(database,graph,actorIds,path,params,helpers);
     else if (path === '/admin/promotions') {
       await read('vouchers', "WHERE promotion_kind IN ('founding','friend_pass')");
       await read('promotion_invites', '');
@@ -473,6 +475,7 @@ async function readStaffReports(database, graph, actorIds, path, params, helpers
     for (const table of ['taxonomy_categories','taxonomy_category_aliases','taxonomy_subcategories']) await read(table, '');
     return helpers.relatedIdentity();
   }
+  if (path === '/admin/shop-rankings' && staffPageRequested(params)) return readRankingPage(database,graph,actorIds,path,params,helpers);
   if (path === '/admin/shop-rankings') {
     // Rankings intentionally compare every rated shop. No inbox, ping or audit
     // history participates; only the rated parents and listing category facts.

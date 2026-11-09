@@ -1,4 +1,4 @@
-import { staffPageBody } from './staff-list-pages.js';
+import { staffPageBody, STAFF_LIST_PAGE } from './staff-list-pages.js';
 import { schedulingWarningOnly, tightDeclineExemption } from './scheduling-policy.js';
 import { reportOrderAllowed } from './review-data.js';
 import { identityHasMembership } from './authorization-context.js';
@@ -132,7 +132,7 @@ export function supplierPerformance(store, supplierId, at) {
   return { supplierId, asOf: at, policy: 'warnings_only', windowDays: 30, graceMinutes: 60,
     counts, rosterReview: counts.lateFinishes >= 3 || counts.cancellations >= 2,
     topPick: performanceTopPick(store, supplierId, at),
-    onTime: { completed: finishes.length, onTime, late: finishes.length - onTime,
+    onTime: store[STAFF_LIST_PAGE]?.performanceFacts?.onTime || { completed: finishes.length, onTime, late: finishes.length - onTime,
       rate: finishes.length ? Number((onTime / finishes.length).toFixed(4)) : null },
     warnings: recent.filter(row => row.warningCodes?.length).map(project),
     notices: rows.filter(row => row.kind === 'late_finish').map(project),
@@ -145,7 +145,7 @@ export async function routeSupplierPerformance({ req, url, store, user, readBody
   const noFault = /^\/orders\/([^/]+)\/performance-no-fault$/.exec(url.pathname);
   if (!own && !staff && !noFault) return null;
   if (!user) fail(401, 'unauthorized');
-  const at = now();
+  const at = store[STAFF_LIST_PAGE]?.asOf || now();
   if (noFault) {
     if (!identityHasMembership(user, 'super_admin')) fail(403, 'forbidden');
     if (req.method !== 'POST') fail(405, 'method_not_allowed');
@@ -167,5 +167,11 @@ export async function routeSupplierPerformance({ req, url, store, user, readBody
   if (staff && !staff[1]) return { status: 200, body: staffPageBody(store, url, { shops: (store.supplierProfiles || []).map(profile => supplierPerformance(store, profile.userId, at)) }) };
   const supplierId = own ? user.id : staff[1];
   if (!hasRole(store, supplierId, 'supplier')) fail(404, 'supplier_not_found');
-  return { status: 200, body: { performance: supplierPerformance(store, supplierId, at) } };
+  const performance=supplierPerformance(store,supplierId,at),page=store[STAFF_LIST_PAGE];
+  if(page) {
+    const selected=new Set(page.ids);
+    performance.notices=performance.notices.filter(row=>selected.has(row.id));
+    performance.warnings=performance.warnings.filter(row=>selected.has(row.id));
+  }
+  return { status: 200, body: staffPageBody(store,url,{performance}) };
 }

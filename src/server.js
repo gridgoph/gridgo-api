@@ -326,6 +326,9 @@ import {
   loadClientSaveStore,
   loadClientSavePreflightStore,
   loadStore,
+  loadUploadIntakeStore,
+  loadColourSourceStore,
+  loadColourSaveStore,
   loadClientBootstrapStore,
   loadProductionSweepStore,
   originalNotificationIds,
@@ -348,7 +351,8 @@ const BUILD_TIME = process.env.GRIDGO_BUILD_TIME || "unknown";
 const ALLOWED_ORIGINS = parseAllowedOrigins(process.env);
 validateProductionServerEnvironment(process.env, ALLOWED_ORIGINS);
 const objectStorage = createObjectStorage(process.env);
-const drainColourAnalyses = createColourWorker({ database, storage: objectStorage, load: () => load(), save: store => save(store), now, id });
+const drainColourAnalyses = createColourWorker({ database, storage: objectStorage, load: () => load(),
+  loadSource: fileId => loadColourSourceStore(database, fileId), loadForSave: file => loadColourSaveStore(database, file), save: store => save(store), now, id });
 const artworkPreviews = createArtworkPreviews({ database, storage: objectStorage, load: () => load(), save: store => save(store), now });
 // Push is optional configuration, not a startup requirement. A hosted pilot
 // without a usable service-account file must still serve every route — the
@@ -2584,7 +2588,10 @@ async function handleAuditedRequest(req, res) {
         WHERE u.clerk_user_id=$1 AND (m.shop_id<>m.user_id OR m.status<>'active' OR m.role<>'owner') LIMIT 1`, [notificationClaims.claims.sub]);
       if (team.rowCount) { hotRead = false; notificationRead = false; }
     }
-    let store = notificationRead
+    const uploadIntake = req.method === 'POST' && pathname === '/files';
+    let store = uploadIntake
+      ? await loadUploadIntakeStore(database, (await verifiedClerkClaimsFor(req))?.claims?.sub || null)
+      : notificationRead
       ? await (pathname === '/notifications' ? loadInboxStore : loadNotificationStore)(database, notificationClaims?.claims?.sub || null, {
         limit: url.searchParams.get('limit'), role: url.searchParams.get('role') || req.headers['x-gridgo-role'], replay: pathname === '/notifications/stream',
         lastEventId: pathname === '/notifications/stream' ? String(req.headers['last-event-id'] || '').trim() || null : null,
@@ -3239,6 +3246,12 @@ async function handleAuditedRequest(req, res) {
     if (req.method === "GET" && pathname === "/admin/shop-rankings") {
       if (!isOps(user)) return send(res, 403, { error: "forbidden" });
       const categoryCode = String(url.searchParams.get("categoryCode") || "").trim() || null;
+      const rankedPage=store[STAFF_LIST_PAGE];
+      if(rankedPage?.rankTable) {
+        if(categoryCode && !rankedPage.rankTable.categories.some(row=>row.code===categoryCode)) return send(res,400,{error:'invalid_category_code',code:categoryCode});
+        if(rankedPage.error) throw rankedPage.error;
+        return send(res,200,rankedPage.rankTable);
+      }
       const board = shopScoreboard(store);
       if (categoryCode && !board.categories.some((row) => row.code === categoryCode)) {
         return send(res, 400, { error: "invalid_category_code", code: categoryCode });
@@ -3615,7 +3628,7 @@ async function handleAuditedRequest(req, res) {
         if (artworkCheck) pending.artworkCheck = artworkCheck;
 
         await enqueueMutation(async () => {
-          const latestStore = await load();
+          const latestStore = await loadClientSaveStore(database, (await verifiedClerkClaimsFor(req))?.claims?.sub || null, '/files', { fileId }) || await load();
           const latestUser = requestActor(req, latestStore, (await authenticateRequest(req, latestStore)).user, eventRole);
           if (!latestUser) {
             throw new AttachmentError(401, "unauthorized", "Your sign-in expired. Sign in and upload the file again.");
@@ -3645,7 +3658,7 @@ async function handleAuditedRequest(req, res) {
         }
         try {
           const ready = await enqueueMutation(async () => {
-            const latestStore = await load();
+            const latestStore = await loadClientSaveStore(database, (await verifiedClerkClaimsFor(req))?.claims?.sub || null, '/files', { fileId }) || await load();
             const latestUser = requestActor(req, latestStore, (await authenticateRequest(req, latestStore)).user, eventRole);
             const latestFile = findFile(latestStore, fileId);
             if (!latestUser || latestUser.id !== pending.ownerId || !latestFile) {
@@ -3673,7 +3686,7 @@ async function handleAuditedRequest(req, res) {
               // Original upload remains usable even when rendering/storage fails.
               logPreviewFailure(fileId, 'upload', error);
             }
-            try { ready.preview = findFile(await load(), fileId)?.preview; }
+            try { ready.preview = findFile(await loadHotReadStore(database, (await verifiedClerkClaimsFor(req))?.claims?.sub || null, `/files/${fileId}`), fileId)?.preview; }
             catch (error) { logPreviewFailure(fileId, 'upload_metadata', error); }
           }
           // A fileId is the readiness signal and is returned only after PutObject and ready metadata both persist.
@@ -4469,7 +4482,7 @@ async function handleAuditedRequest(req, res) {
         return send(res, 403, { error: "forbidden" });
       }
       const acct = store.credits[clientId] || { balanceMinor: 0, ledger: [] };
-      return send(res, 200, { clientId, balanceMinor: acct.balanceMinor, ledger: acct.ledger });
+      return send(res, 200, staffPageBody(store, url, { clientId, balanceMinor: acct.balanceMinor, ledger: acct.ledger }));
     }
 
     if (req.method === "POST" && pathname === "/credits/authorize") {
@@ -5576,7 +5589,7 @@ async function handleAuditedRequest(req, res) {
       if (orderId) list = list.filter((i) => i.orderId === orderId);
       if (status) list = list.filter((i) => i.status === status);
       list = [...list].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
-      return send(res, 200, { issues: list.map(issue => publicIssue(issue, user)) });
+      return send(res, 200, staffPageBody(store, url, { issues: list.map(issue => publicIssue(issue, user)) }));
     }
 
     /**
@@ -6391,7 +6404,7 @@ async function handleAuditedRequest(req, res) {
     }
 
     if (req.method === "GET" && pathname === "/orders") {
-      return send(res, 200, { orders: await publicOrderList(ordersFor(user, store), user, store) });
+      return send(res, 200, staffPageBody(store, url, { orders: await publicOrderList(ordersFor(user, store), user, store) }));
     }
 
     if (req.method === "GET" && pathname.startsWith("/orders/")) {

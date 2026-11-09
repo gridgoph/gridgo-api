@@ -1,3 +1,4 @@
+import { staffPageBody } from './staff-list-pages.js';
 import { markReviewPayment } from './review-data.js';
 import { confirmVoucher } from './vouchers.js';
 import { groupSummary } from "./cart-groups.js";
@@ -59,8 +60,8 @@ export async function routeBaskets({ req, url, store, user, readBody, id, now })
   const privileged = staff(user);
   if (!privileged && !identityHasMembership(user, 'client')) fail(403, 'forbidden', 'Client or Operations access is required.');
   if (req.method === 'GET' && !match[1]) {
-    return { status: 200, body: { baskets: (store.baskets || []).filter((basket) => privileged || basket.clientId === user.id)
-      .map((basket) => publicBasket(store, basket, user)) } };
+    return { status: 200, body: staffPageBody(store, url, { baskets: (store.baskets || []).filter((basket) => privileged || basket.clientId === user.id)
+      .map((basket) => publicBasket(store, basket, user)) }) };
   }
   const basket = (store.baskets || []).find((row) => row.id === match[1]);
   if (!basket || (!privileged && basket.clientId !== user.id)) fail(404, 'basket_not_found', 'That basket is unavailable.');
