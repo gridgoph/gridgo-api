@@ -4,9 +4,7 @@ import { loadStore, saveStore } from '../../src/postgres-store.js';
 import { syncSupplierPerformance } from '../../src/supplier-performance.js';
 import { AT } from './reschedule.js';
 
-// Keep the frozen HTTP clock and its one-hour-earlier incidents after the
-// database's immutable performance launch, including fresh future CI databases.
-export const SAVE_AT = Math.max(Date.parse('2026-11-09T04:00:00.000Z'), Date.now() + 2*3600000);
+export const SAVE_AT = Date.parse('2026-11-09T04:00:00.000Z');
 export async function setupSaveParity(db) {
   await setupOrders(db);
   await db.transaction(async () => {
