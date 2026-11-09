@@ -31,11 +31,14 @@ export async function setupSaveParity(db) {
   });
 }
 
-export async function saveParityApi(t, full, { failSql = null, upkeep = false, timing = false, onOutput } = {}) {
+export async function saveParityApi(t, full, { failSql = null, upkeep = false, timing = false, onOutput, sourceRef = null, storageHandler, disableColour = false, traceLoads = false } = {}) {
   const injected = `async function query(text, values) { if (text.includes(${JSON.stringify(failSql)})) throw new Error("injected_sql_failure");`;
   const hook = `
     import { registerHooks, syncBuiltinESMExports } from 'node:module';
     import crypto from 'node:crypto';
+    import { execFileSync } from 'node:child_process';
+    import { fileURLToPath } from 'node:url';
+    import { relative } from 'node:path';
     const NativeDate = Date;
     ${timing ? '' : `globalThis.Date = class extends NativeDate { constructor(...args) { super(...(args.length ? args : [${SAVE_AT}])); } static now() { return ${SAVE_AT}; } };`}
     let uuid=0;const bytes=new Map();
@@ -43,7 +46,8 @@ export async function saveParityApi(t, full, { failSql = null, upkeep = false, t
     crypto.randomBytes = n => { const out=Buffer.alloc(n); const next=(bytes.get(n)||0)+1;bytes.set(n,next);out.writeUInt32BE(next,n-4); return out; };
     syncBuiltinESMExports();
     registerHooks({ load(url, context, next) {
-      const result=next(url,context); let source=String(result.source);
+      const path=url.startsWith('file:') ? relative(process.cwd(),fileURLToPath(url)) : '';
+      const result=${sourceRef ? `path.startsWith('src/') && path.endsWith('.js') ? {format:'module',source:execFileSync('git',['show',${JSON.stringify(sourceRef)}+':'+path],{encoding:'utf8'}),shortCircuit:true} :` : ''} next(url,context); let source=String(result.source);
       if(url.endsWith('/src/server.js')) {
         source=source.replace('function kickPushDrain() {','function kickPushDrain() { return;');
         ${full ? `source=source.replace('const clientSave = database.inWriteTransaction() && isClientSavePath(req.method, pathname);', 'const clientSave = false;');` : ''}
@@ -51,10 +55,12 @@ export async function saveParityApi(t, full, { failSql = null, upkeep = false, t
         source=source.replace(/setInterval\\((runLifecycleWork|sweepCalls|sweepSaveUpkeep|runFileRetention),/g,'setInterval(() => {},');
         ${upkeep ? `source=source.replace('const lifecycleTimer =', 'setTimeout(() => sweepSaveUpkeep(), 100).unref(); const lifecycleTimer =');` : ''}
       }
+      ${disableColour ? `if(url.endsWith('/src/colour-worker.js')) source=source.replace('return async function drain() {','return async function drain() { return;');` : ''}
+      ${traceLoads ? `if(url.endsWith('/src/postgres-store.js')) source=source.replace('export async function loadStore(database) {', 'export async function loadStore(database) { console.log("benchmark_full_store_load");');` : ''}
       ${failSql ? `if(url.endsWith('/src/database.js')) source=source.replace('async function query(text, values) {', ${JSON.stringify(injected)});` : ''}
       return { ...result, source };
     } });`;
-  const api = await apiForTest(t, { NODE_OPTIONS: `--import=data:text/javascript,${encodeURIComponent(hook)}`, MINIO_PUBLIC_URL: 'https://storage.example.invalid' }, { onOutput });
+  const api = await apiForTest(t, { NODE_OPTIONS: `--import=data:text/javascript,${encodeURIComponent(hook)}`, MINIO_PUBLIC_URL: 'https://storage.example.invalid' }, { onOutput, storageHandler });
   return (who, method, pathname, body, opts = {}) => api(who, method, pathname, body, { ...opts,
     claims: { iat: (timing ? Date.now()/1000 : SAVE_AT/1000)-5, nbf: (timing ? Date.now()/1000 : SAVE_AT/1000)-5, exp: (timing ? Date.now()/1000 : SAVE_AT/1000)+3600, ...opts.claims } });
 }
