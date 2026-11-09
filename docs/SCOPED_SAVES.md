@@ -18,6 +18,13 @@ invalidates from the maintenance view are transferred at their original save
 stage. Audit, notifications, push outbox and transactional realtime events remain
 in the same commit; transport delivery remains after commit.
 
+Pending foreign performance incidents can affect the immutable consequence on
+the requester's next event. Relevant historical incident parents are included
+even after their shop assignment changed. A disposable helper pass tests that
+foreign event backlog; while it exists, the request retains the full writer and
+its chronological event sequence. No foreign event is materialized through a
+partial graph or omitted from an own incident threshold.
+
 Existing global supplement-reference/proof uniqueness and pending change/pin
 payment refusals remain global, through indexed SQL candidates and the same JS
 policy. The Unicode reference fallback keeps JavaScript trim/uppercase semantics.
@@ -34,7 +41,8 @@ and thrown errors/rollback.
 Unrelated upkeep no longer waits for the next **scoped** matching/cart-line save.
 A one-second candidate sweep handles removed accounts' saved-file closure,
 cancelled voucher reservations, tester/promotion invite attribution, unavailable
-change closure and failure-based survey gaps. Existing lifecycle candidate sweeps
+change closure, failure-based survey gaps and production-duration normalization.
+Existing lifecycle candidate sweeps
 continue at their configured cadence (30 seconds by default) for ordinary
 surveys, hub reminders, production performance, voucher expiry and colour work;
 active calls retain their one-second sweep. Expired match-selection records older
@@ -67,6 +75,19 @@ cannot be proved from the scoped graph, the request retains the full writer;
 existing row positions are never guessed from a subset. The scoped writer still refuses ordinary
 read-only projection stores and only changes the hydrated delta.
 
+The scoped decoder keeps its pre-synchronization baseline. Any load-time
+normalization delta retains the full writer so legacy global row positions are
+preserved. The `store_production_normalization` singleton is invalidated in the
+same transaction as every shop-profile, service, catalogue item/tier, starter,
+order-line or job write (including deletes/truncates). Migration initializes it
+dirty for existing rows. A dirty/missing marker forces the full request path and
+is also a one-second upkeep candidate, including facts outside the requested
+family. Only a complete full graph proven synchronized after its mutation can
+clear it after persistence, in the same PostgreSQL transaction that loaded it.
+Shop-hours updates therefore cannot erase pending
+compatibility work by resetting their own baseline; rollback also rolls back
+invalidation. This adds no new duration or immutable order promise calculation.
+
 `POST /me/carts/:id/checkout` and its artwork preflight retain the full store and
 money boundary. A rare first cart-line addition that would complete all five
 missions for a legacy client with four missions but no recorded added step also
@@ -87,6 +108,9 @@ checks concurrent cart versions, and compares moved upkeep with the old save's
 business rows. Test-only module hooks freeze clocks/randomness and inject late
 failures; production has no baseline switch. Matching catalogue thumbnails and
 compact mutation listing projections retain their signing behaviour.
+`tests/scoped-save-review-regressions.test.js` covers earlier foreign incidents,
+reassigned historical shops, shop-hours followed by matching, stale own jobs,
+normalization outside the request graph, and transactional source invalidation.
 
 `scripts/benchmark-scoped-saves.mjs` runs only against an isolated test database.
 It grows unrelated notifications, audit, pings and delivered push-outbox history

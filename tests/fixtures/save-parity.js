@@ -50,6 +50,6 @@ export async function saveRows(db) {
     'payout_milestones','order_baskets','order_basket_groups','order_invoices','audit_log','notifications','notification_push_outbox',
     'vouchers','voucher_reservations','voucher_redemptions','voucher_ledger','credit_accounts','credit_ledger',
     'client_carts','client_cart_lines','client_match_selections','files','file_references','tester_invites','promotion_invites',
-    'founding_testers','tester_rewards','supplier_performance_events','supplier_invoices','order_surveys','order_calls','store_collection_counts'];
+    'founding_testers','tester_rewards','supplier_performance_events','supplier_invoices','order_surveys','order_calls','store_collection_counts','store_production_normalization'];
   return Object.fromEntries(await Promise.all(tables.map(async table => [table, (await db.query(`SELECT to_jsonb(t) AS row FROM ${table} t ORDER BY to_jsonb(t)::text`)).rows.map(r => r.row)])));
 }

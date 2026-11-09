@@ -91,6 +91,15 @@ export function synchronizeProductionHours(store, { convertLegacy = false } = {}
   return store;
 }
 
+/** Prove quiescence without mutating the writer's post-operation facts. */
+export function productionHoursSynchronized(store) {
+  const records = Object.fromEntries(['supplierServices','catalogItems','catalogSpeedTiers',
+    'listingStarters','orderLineItems','orderJobs'].map(key => [key, store[key] || []]));
+  const normalized = structuredClone(records);
+  synchronizeProductionHours({ ...normalized, supplierProfiles: store.supplierProfiles });
+  return JSON.stringify(normalized) === JSON.stringify(records);
+}
+
 /** An unavailable calendar may still be displayed; scheduling and writes stay strict. */
 export function displayProductionDayMinutes(store, supplierId) {
   try { return shopProductionDayMinutes(store, supplierId); }

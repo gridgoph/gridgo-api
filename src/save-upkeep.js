@@ -8,6 +8,7 @@ import { closeUnavailableChanges } from './order-changes.js';
 /** Candidate probes only. Actual upkeep rechecks under the domain lock and
  * uses the same save/audit/outbox boundary as the former incidental work. */
 export async function saveUpkeepNeeded(database, at) {
+  if ((await database.query('SELECT dirty FROM store_production_normalization WHERE singleton')).rows[0]?.dirty !== false) return true;
   const direct = await database.query(`SELECT 1 FROM files f JOIN users u ON u.id=f.owner_id
     WHERE u.account_status='removed' AND f.purpose IN ('artwork','mockup')
       AND f.state IN ('pending_upload','ready','delete_pending')

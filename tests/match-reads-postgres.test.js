@@ -42,7 +42,10 @@ test('matching read graphs have fixed query budgets without unrelated history', 
       await loadHotReadStore(db,'clerk_client',url.pathname,{ searchParams:url.searchParams });
       assert.ok(queries.length <= (url.pathname === '/me/deadline-days' ? 37 : 34),`queries=${queries.length}`);
       assert.ok(!queries.some(q => /FROM (audit_log|notifications|location_pings|notification_push_outbox|order_payments)\b/.test(q.sql)));
-      out.push(queries);
+      // These array parameters are ANY id sets. A different PostgreSQL plan
+      // may return their parent rows in a different order without changing the
+      // graph. Compare the same multiset, SQL and row/query budget exactly.
+      out.push(queries.map(query=>({...query,values:query.values.map(value=>Array.isArray(value)?value.slice().sort():value)})));
     }
     return out;
   };

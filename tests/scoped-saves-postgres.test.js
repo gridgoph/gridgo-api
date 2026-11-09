@@ -2,9 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createDatabase } from '../src/database.js';
 import * as adapter from '../src/postgres-store.js';
-import { setupOrders, instrument } from './fixtures/order-reads.js';
+import { setupOrders as seedOrders, instrument } from './fixtures/order-reads.js';
 import { AT } from './fixtures/reschedule.js';
 const skip = !process.env.DATABASE_URL;
+async function setupOrders(db) {
+  await seedOrders(db);
+  // A complete normalization pass clears the source-write invalidation marker.
+  await db.transaction(async()=>adapter.saveStore(db,await adapter.loadStore(db)));
+}
 
 test('client save graph writes only its delta and preserves sparse global append positions', { skip }, async t => {
   const db = createDatabase(process.env); t.after(() => db.close());

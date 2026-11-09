@@ -13,6 +13,7 @@ import { testerProgramTables, emptyTesterProgram, testerProgramRows, loadTesterP
 import { foundingTesterTable, foundingTesterRows, loadFoundingTesterRows } from './founding-tester-store.js';
 import { enforceReviewData, labelReviewNotifications, reviewReportView } from './review-data.js';
 import { performanceTable, performanceRows, loadPerformanceRows } from './supplier-performance-store.js';
+import { hasPendingSupplierPerformanceOutside } from './supplier-performance.js';
 import { parsePaperSize } from './print-layout.js';
 import { canonicalColourPricing } from './colour-pricing.js';
 import { appendAudit, finalizeAuditEntries } from './audit.js';
@@ -23,7 +24,7 @@ import { sharingTables, emptySharingStore, sharingRows, loadSharingRows } from '
 import { checkoutExitTables, checkoutExitRows, loadCheckoutExitRows } from './checkout-exit-store.js';
 import { voucherTables, emptyVoucherStore, voucherRows, loadVoucherRows } from './voucher-store.js';
 import { loadLegalPenaltyGate } from './legal.js';
-import { synchronizeProductionHours } from "./production-days.js";
+import { synchronizeProductionHours, productionHoursSynchronized } from "./production-days.js";
 import { staffTables, emptyStaffStore, staffRows, loadStaffRows } from './staff-store.js';
 import { refundTableDefinitions, writeRefundRows, readRefundRows } from "./refund-records.js";
 import { availableDispatch, dispatchWorkHeld } from './dispatch-policy.js';
@@ -33,6 +34,7 @@ import { quoteRequestTables, emptyQuoteRequestStore, quoteRequestRows, loadQuote
 
 const BASELINE = Symbol("postgresStoreBaseline");
 const notificationReadStores = new WeakSet();
+const completeDomainTransactions = new WeakMap();
 
 function without(record, keys) {
   const result = { ...record };
@@ -895,6 +897,10 @@ export async function loadStore(database) {
     enumerable: false,
     writable: true,
   });
+  if (database.inWriteTransaction()) {
+    const { rows } = await database.query('SELECT pg_current_xact_id()::text AS id');
+    completeDomainTransactions.set(store, rows[0].id);
+  }
   return store;
 }
 
@@ -1677,6 +1683,7 @@ export async function loadClientSavePreflightStore(database, clerkSubject, pathn
 
 export async function loadClientSaveStore(database, clerkSubject, pathname, body = {}, { preflight = false } = {}) {
   if (preflight ? !database.inTransaction() : !database.inWriteTransaction()) throw new Error('Client save graph requires an active write transaction');
+  if (!preflight && (await database.query('SELECT dirty FROM store_production_normalization WHERE singleton')).rows[0]?.dirty !== false) return null;
   const graph = readGraph(database), { loaded } = graph;
   // Helpers can revisit a table while adding catalogue/workload context. Keep
   // the union: a shop graph must not evict the client's own order facts.
@@ -1745,6 +1752,16 @@ export async function loadClientSaveStore(database, clerkSubject, pathname, body
   await read('supplier_profiles', 'WHERE user_id=ANY($1::text[])', [suppliers]);
   await read('supplier_payment_terms', 'WHERE supplier_id=ANY($1::text[])', [suppliers]);
   await readShopWork(graph, suppliers);
+  // A moved/failed shop can have an unmaterialized incident even when neither
+  // the current order nor its current job is assigned to that shop anymore.
+  // Existing partial/GIN indexes bound these historical incident parents.
+  await read('orders', `WHERE (jsonb_array_length(CASE WHEN jsonb_typeof(data->'shopFailureEvents')='array'
+      THEN data->'shopFailureEvents' ELSE '[]'::jsonb END)>0 AND EXISTS (
+        SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(data->'shopFailureEvents')='array'
+          THEN data->'shopFailureEvents' ELSE '[]'::jsonb END) e WHERE e->>'supplierId'=ANY($1::text[])))
+    OR (data#>'{shopHandover,arrivedPacked}' IS NOT NULL AND data#>'{shopHandover,arrivedPacked}' @> ANY($2::jsonb[]))`,
+  [suppliers, suppliers.map(supplierId => JSON.stringify([{ supplierId }]))]);
+  await read('order_line_items', 'WHERE order_id=ANY($1::text[])', [loaded.orders.map(row => row.id)]);
   // Complete own order/hold/maintenance facts; workload parents stay context.
   for (const name of ['order_jobs', 'order_line_item_options', 'order_payment_allocations', 'payout_milestones',
     'claims', 'escalations', 'refund_requests', 'refund_supplier_payouts', 'order_change_requests',
@@ -1790,7 +1807,7 @@ export async function loadClientSaveStore(database, clerkSubject, pathname, body
       ...(order.data?.shopHandover?.arrivedPacked || []).map(event => event.supplierId)]) if (userId) recipients.add(userId);
   }
   await read('device_tokens', 'WHERE user_id=ANY($1::text[])', [[...recipients]]);
-  const store = storeFromRows(loaded, { writable: false,
+  const store = storeFromRows(loaded, { writable: !preflight,
     surveyLaunchedAt: (await database.query('SELECT launched_at FROM survey_launch WHERE singleton')).rows[0]?.launched_at || null,
     supplierPerformanceLaunchedAt: (await database.query('SELECT launched_at FROM supplier_performance_launch WHERE singleton')).rows[0]?.launched_at || null,
   });
@@ -1798,12 +1815,18 @@ export async function loadClientSaveStore(database, clerkSubject, pathname, body
     notificationReadStores.add(store);
     return store;
   }
+  // Keep the pre-synchronization baseline. A normalization delta can include a
+  // global positioned row, so retain exact legacy compaction rather than guess
+  // its full-array index from this subset. The source marker normally catches
+  // this before hydration; this check is also conservative on legacy anomalies.
+  if (stable(store[BASELINE]) !== stable(rowsFromStore(store))) return null;
   // The full adapter compacts an edited row's ordinal from the complete array.
   // Preserve that legacy behaviour on anomalous layouts rather than guessing
   // a global rank from a partial graph or scanning the history on every save.
   const layouts = new Map((await database.query(`SELECT name,positions_contiguous FROM store_collection_counts
     WHERE name=ANY($1::text[])`, [['orders','files','notifications']])).rows.map(row => [row.name, row.positions_contiguous]));
   const own = store.orders.filter(order => order.clientId === clientId);
+  if (hasPendingSupplierPerformanceOutside(store, own.map(order => order.id), new Date().toISOString())) return null;
   if (layouts.get('orders') === false && own.some(order => order.state === 'issue_window_open'
     || (order.state === 'awaiting_collection' && order.handover?.qrToken && !order.handover.consumedAt)
     || (store.supplierPerformanceLaunchedAt && order.supplierId && order.commercialCommittedAt && order.readyBy
@@ -1819,7 +1842,6 @@ export async function loadClientSaveStore(database, clerkSubject, pathname, body
   if (pathname.endsWith('/lines') && foundingTesterEligible(store, clientId)
     && !store.foundingTesters.find(row => row.clientId === clientId)?.awardedAt
     && !progress.missions.added && progress.completedCount === 4) return null;
-  attachBaseline(store, rowsFromStore(store));
   return bindClientSaveScope(store, { clientId, rawRows: structuredClone(loaded) });
 }
 
@@ -2717,6 +2739,14 @@ export async function saveStore(database, store) {
       if (scope && baselineRows.order_line_items.some(old => old.id === row.id && old.snapshot_finalized)) continue;
       await database.query("UPDATE order_line_items SET snapshot_finalized = true WHERE id = $1", [row.id]);
     }
+  }
+  // Only a complete graph can prove that no normalization outside a request's
+  // subset remains. A shop-hours mutation can leave its new duration view dirty
+  // until the next full load/sweep; clearing must use the post-mutation facts.
+  const completeTransaction = completeDomainTransactions.get(store);
+  if (completeTransaction && productionHoursSynchronized(store)) {
+    await database.query(`UPDATE store_production_normalization SET dirty=false
+      WHERE singleton AND dirty AND pg_current_xact_id()::text=$1`, [completeTransaction]);
   }
   if (scope) scope.rawRows = structuredClone(currentRows);
   if (Object.hasOwn(store, BASELINE)) {

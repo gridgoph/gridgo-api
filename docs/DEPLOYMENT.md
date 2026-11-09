@@ -498,6 +498,12 @@ indexes individually with the same concurrent procedure. These migrations must
 precede the scoped matching/cart-line release; boot never repairs their schema
 or data. Checkout retains the full compatibility writer. See
 [Scoped saves](SCOPED_SAVES.md) for the approved maintenance timing change.
+`1794186800000_production_normalization_pending` adds the singleton normalization
+invalidation marker and statement triggers on its seven source tables. It takes
+the domain lock and initializes the marker dirty, so existing compatibility
+duration corrections run through the next full audited request or the one-second
+upkeep sweep. Only a complete synchronized writer clears it. Apply this migration
+before the revised scoped-save code; it adds no index or new duration formula.
 Apply `npm run migrate` (node-pg-migrate up) to the dev database after merge and before running this API release.
 `pgm.noTransaction()` makes node-pg-migrate leave its default single transaction
 for these migrations only. Earlier migrations and completed index builds can
