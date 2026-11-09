@@ -79,10 +79,12 @@ async function finish(database, store, call, state, { createId, at }) {
 }
 
 /** Called under the domain lock, before save on every mutation and on a 1s tick. */
-export async function reconcileCalls(database, store, { createId, at }) {
-  const { rows } = await database.query(`SELECT * FROM order_calls WHERE ${activeOrderSql('order_calls.order_id')} AND state IN ('ringing','accepted')`);
+export async function reconcileCalls(database, store, { createId, at, orderIds = null }) {
+  const scope = orderIds && new Set(orderIds);
+  const { rows } = await database.query(`SELECT * FROM order_calls WHERE ${activeOrderSql('order_calls.order_id')} AND state IN ('ringing','accepted')${scope ? ' AND order_id = ANY($1::text[])' : ''}`, scope ? [[...scope]] : []);
   let count = 0;
   for (const call of rows) {
+    if (scope && !scope.has(call.order_id)) continue;
     const order = store.orders.find(o => o.id === call.order_id);
     let state;
     if (!currentParties(call, order, store) || !callWindow(order, call.pair, at)) state = "ended";

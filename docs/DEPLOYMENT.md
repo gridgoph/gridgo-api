@@ -484,7 +484,27 @@ only for opaque staff-catalogue cursors containing non-identifier characters;
 normal generated-ID cursors retain the existing page index/collation.
 `1794173300000_staff_report_reads` concurrently adds the pricing date-range
 and monthly-completion candidate indexes.
-Migration `1794181000000_staff_list_pages` adds the opt-in staff list keyset/filter
+Migration `1794180600000_scoped_save_positions` creates transactional collection
+counts for exact audit/inbox append ordinals and conservative order/file/inbox
+layout health. Its initial counts run once under the domain lock and table locks; statement triggers
+maintain them for inserts, updates, deletes and truncates, including bulk
+statements. Logical order removals adjust the visible inbox count and invalidate
+the order/inbox layout markers. `1794180610000_review_payment_normalization` marks old
+review order/basket payments as simulated (and confirmed review payments with
+`confirmationSource: review_data`); amounts, statuses and snapshots are retained.
+`1794180620000_scoped_save_queries` builds the confirmed-payment reference/proof,
+unusual-reference fallback, pending pin, approved catalogue family, approved-fault and pending-colour probe
+indexes individually with the same concurrent procedure. These migrations must
+precede the scoped matching/cart-line release; boot never repairs their schema
+or data. Checkout retains the full compatibility writer. See
+[Scoped saves](SCOPED_SAVES.md) for the approved maintenance timing change.
+`1794186800000_production_normalization_pending` adds the singleton normalization
+invalidation marker and statement triggers on its seven source tables. It takes
+the domain lock and initializes the marker dirty, so existing compatibility
+duration corrections run through the next full audited request or the one-second
+upkeep sweep. Only a complete synchronized writer clears it. Apply this migration
+before the revised scoped-save code; it adds no index or new duration formula.
+Migration `1794190500000_staff_list_pages` adds the opt-in staff list keyset/filter
 indexes with the same individual concurrent build procedure. See
 [staff pagination](STAFF_LIST_PAGINATION_API.md) for route coverage and legacy compatibility.
 Apply `npm run migrate` (node-pg-migrate up) to the dev database after merge and before running this API release.
@@ -523,6 +543,9 @@ WHERE n.nspname = 'public' AND c.relname IN (
   'orders_reschedule_desk_idx', 'orders_hub_escalation_desk_idx',
   'orders_hub_unclaimed_desk_idx', 'notifications_image_reference_idx',
   'orders_pricing_created_idx', 'orders_pricing_completed_idx', 'orders_pricing_timeline_idx',
+  'payments_save_reference_idx', 'payments_save_proof_idx', 'payments_save_unusual_idx',
+  'pin_save_reference_idx', 'pin_save_unusual_idx', 'orders_save_pending_pin_idx',
+  'files_save_pending_colour_idx', 'issues_save_fault_idx', 'catalog_save_approved_family_idx',
   'staff_profiles_page_idx', 'staff_invites_page_idx',
   'staff_roles_page_idx', 'voucher_campaigns_page_idx',
   'vouchers_client_page_idx', 'vouchers_client_status_page_idx',
@@ -558,6 +581,9 @@ WHERE n.nspname = 'public' AND NOT i.indisvalid AND c.relname IN (
   'orders_reschedule_desk_idx', 'orders_hub_escalation_desk_idx',
   'orders_hub_unclaimed_desk_idx', 'notifications_image_reference_idx',
   'orders_pricing_created_idx', 'orders_pricing_completed_idx', 'orders_pricing_timeline_idx',
+  'payments_save_reference_idx', 'payments_save_proof_idx', 'payments_save_unusual_idx',
+  'pin_save_reference_idx', 'pin_save_unusual_idx', 'orders_save_pending_pin_idx',
+  'files_save_pending_colour_idx', 'issues_save_fault_idx', 'catalog_save_approved_family_idx',
   'staff_profiles_page_idx', 'staff_invites_page_idx',
   'staff_roles_page_idx', 'voucher_campaigns_page_idx',
   'vouchers_client_page_idx', 'vouchers_client_status_page_idx',

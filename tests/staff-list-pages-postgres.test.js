@@ -13,7 +13,7 @@ import { voucherTables } from '../src/voucher-store.js';
 const skip = !process.env.DATABASE_URL;
 // Override when comparing a newer baseline. Shallow CI checkouts still run the
 // SQL/HTTP wallet regression below; the historical-source matrix needs this ref.
-const devRef = process.env.STAFF_LIST_DEV_REF || '14aaf31611c02eeef1e175864b00d11678f68b47';
+const devRef = process.env.STAFF_LIST_DEV_REF || 'eb560ac43a6d55753594790d360f70b3e5c503ce';
 const hasDevRef = spawnSync('git', ['cat-file', '-e', `${devRef}:src/server.js`]).status === 0;
 const paths = ['/admin/staff', '/admin/staff/invites', '/admin/staff/roles', '/admin/voucher-campaigns',
   '/ops/vouchers?clientId=client&tab=all', '/ops/hub/escalations', '/ops/hub/unclaimed',

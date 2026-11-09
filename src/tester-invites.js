@@ -53,6 +53,8 @@ export function matchTesterInvites(store, ctx) {
   const { at } = ctx;
   init(store); let changed = false;
   for (const invite of store.testerInvites.filter(i => !i.clientId)) {
+    if (ctx.clientIds && !store.users.some(user => ctx.clientIds.includes(user.id)
+      && String(user.email || '').trim().toLowerCase() === invite.email)) continue;
     const matches = store.users.filter(u => client(store, u.id) && String(u.email || '').trim().toLowerCase() === invite.email);
     const target = matches.length === 1 ? matches[0] : null;
     let reason = matches.length > 1 ? 'ambiguous_email' : 'no_client_account';

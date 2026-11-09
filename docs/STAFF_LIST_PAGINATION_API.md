@@ -101,7 +101,7 @@ Existing paginated desks keep their current contracts.
 
 ## Deployment and verification
 
-Apply `1794181000000_staff_list_pages` before the API release. Its page/filter
+Apply `1794190500000_staff_list_pages` before the API release. Its page/filter
 indexes use individual concurrent builds; use the existing
 [interrupted-build recovery](DEPLOYMENT.md#targeted-read-indexes-and-interrupted-builds).
 No schema work runs at boot. HTTP mutations, advisory locks, save, audit and

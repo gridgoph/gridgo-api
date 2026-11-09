@@ -64,6 +64,7 @@ export function readParityEnv(full, at, { sourceRef = null, planner = null, stab
       if (${stableFixture} && path === 'src/server.js') {
         // Read-only differential children must observe identical fixture facts.
         result = { ...result, source: String(result.source).replace('void runLifecycleWork();', '')
+          .replace('setInterval(sweepSaveUpkeep, 1000)', 'setInterval(() => {}, 3600000)')
           .replaceAll('await fileRetention.reconcile();', '').replace('void runFileRetention();', '') };
       }
       ${full ? `if (path === 'src/postgres-store.js') {
