@@ -511,11 +511,12 @@ Migration `1794217000000_reschedule_request_counts` initializes exact per-shop/g
 reschedule totals once under the domain lock and order/removal table locks.
 Transition-table triggers maintain insert/update deltas per statement; deletion,
 logical removal and truncate triggers preserve visibility and rollback semantics.
-`1794217010000_mixed_list_pages`, `1794217020000_aggregate_page_indexes` and
-`1794217030000_colour_worker_reads` add individual concurrent indexes for mixed
-lists, aggregate pages and selected colour-source/cart-reference probes. Basket
+`1794217010000_mixed_list_pages`, `1794217020000_aggregate_page_indexes`,
+`1794217030000_colour_worker_reads` and `1794217040000_ranking_clock_reads`
+add individual concurrent indexes for mixed lists, aggregate pages, finished-order
+clock summaries and selected colour-source/cart-reference probes. Basket
 page indexes are partial so unpaged queries retain their legacy enumeration.
-Apply all four before this release; no schema repair occurs at boot.
+Apply all five before this release; no schema repair occurs at boot.
 Apply `npm run migrate` (node-pg-migrate up) to the dev database after merge and before running this API release.
 `pgm.noTransaction()` makes node-pg-migrate leave its default single transaction
 for these migrations only. Earlier migrations and completed index builds can
@@ -591,7 +592,8 @@ WHERE n.nspname = 'public' AND c.relname IN (
   'ranking_listing_prices_idx',
   'files_pending_colour_position_idx',
   'cart_lines_artwork_source_idx',
-  'cart_lines_artwork_attachments_idx'
+  'cart_lines_artwork_attachments_idx',
+  'ranking_finished_orders_idx'
 ) ORDER BY c.relname;
 
 SELECT format('REINDEX INDEX CONCURRENTLY %I.%I;', n.nspname, c.relname)
@@ -651,7 +653,8 @@ WHERE n.nspname = 'public' AND NOT i.indisvalid AND c.relname IN (
   'ranking_listing_prices_idx',
   'files_pending_colour_position_idx',
   'cart_lines_artwork_source_idx',
-  'cart_lines_artwork_attachments_idx'
+  'cart_lines_artwork_attachments_idx',
+  'ranking_finished_orders_idx'
 )
 \gexec
 SQL

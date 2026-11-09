@@ -102,6 +102,7 @@ page when a desk changes.
   star totals; JavaScript retains the existing rounding and name/tie ordering.
   The rank cursor seeks by score/count/quality/name/supplier facts, not an offset.
   Only selected shops hydrate finished-order clock inputs and category prices.
+  A partial finished-order index keeps unrelated same-shop orders out of clock reads.
 - The mixed order/basket/issue/credit pages retain existing party, membership,
   selected-role, review-data, file and financial projections. Balance is always
   the account's full current balance, independently of the ledger page. Staff
@@ -135,8 +136,9 @@ Apply `1794190500000_staff_list_pages` before the API release. Its page/filter
 indexes use individual concurrent builds; use the existing
 [interrupted-build recovery](DEPLOYMENT.md#targeted-read-indexes-and-interrupted-builds).
 Apply `1794217000000_reschedule_request_counts`,
-`1794217010000_mixed_list_pages`, `1794217020000_aggregate_page_indexes` and
-`1794217030000_colour_worker_reads` before the finish-slice release. Count
+`1794217010000_mixed_list_pages`, `1794217020000_aggregate_page_indexes`,
+`1794217030000_colour_worker_reads` and `1794217040000_ranking_clock_reads`
+before the finish-slice release. Count
 initialization takes the domain lock and brief order/removal table locks;
 insert/update transition tables aggregate deltas once per statement. Concurrent
 indexes on existing tables follow the same recovery procedure. Basket page
