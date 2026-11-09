@@ -45,6 +45,10 @@ jobs:
       DATABASE_URL: postgresql://gridgo:ci-postgres-only@127.0.0.1:5432/gridgo_test
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Staff-list compatibility tests load the recorded dev source while
+          # keeping its targeted dispatcher enabled.
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: "22"

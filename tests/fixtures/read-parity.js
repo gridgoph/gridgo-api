@@ -45,34 +45,40 @@ export async function setupReadParity(database) {
 }
 
 // Test-only dispatcher bypass and clock; production has no baseline switch.
-export function readParityEnv(full, at) {
+export function readParityEnv(full, at, { sourceRef = null, planner = null, stableFixture = false } = {}) {
   const hook = `
     import { registerHooks } from 'node:module';
+    import { execFileSync } from 'node:child_process';
+    import { fileURLToPath } from 'node:url';
+    import { relative } from 'node:path';
     const NativeDate = Date;
     globalThis.Date = class extends NativeDate {
       constructor(...args) { super(...(args.length ? args : [${at}])); }
       static now() { return ${at}; }
     };
-    ${full ? `registerHooks({ load(url, context, next) {
-      const result = next(url, context);
-      if (url.endsWith('/src/server.js')) {
-        // Baseline retains the original complete-reader call; the current GET
-        // fallback opts into compatibility ordering after page indexes ship.
-        return { ...result, source: String(result.source).replace(
-          "await load({ legacyHeapOrder: req.method === 'GET' })", 'await load()') };
+    registerHooks({ load(url, context, next) {
+      const path = url.startsWith('file:') ? relative(process.cwd(), fileURLToPath(url)) : '';
+      let result = ${sourceRef ? `path.startsWith('src/') && path.endsWith('.js')
+        ? { format: 'module', source: execFileSync('git', ['show', ${JSON.stringify(sourceRef)} + ':' + path], { encoding: 'utf8' }), shortCircuit: true }
+        :` : ''} next(url, context);
+      if (${stableFixture} && path === 'src/server.js') {
+        // Read-only differential children must observe identical fixture facts.
+        result = { ...result, source: String(result.source).replace('void runLifecycleWork();', '')
+          .replaceAll('await fileRetention.reconcile();', '').replace('void runFileRetention();', '') };
       }
-      if (url.endsWith('/src/postgres-store.js')) {
+      ${full ? `if (path === 'src/postgres-store.js') {
         const source = String(result.source).replace(/export function isHotReadPath\\(pathname\\) \\{[^}]+\\}/,
           'export function isHotReadPath() { return false; }');
         if (source === String(result.source)) throw new Error('Full-store baseline was not installed');
         return { ...result, source };
-      }
+      }` : ''}
       return result;
-    } });` : ''}`;
+    } });`;
   // Force plain index scans only in the targeted child, so parity cannot rely
   // on both queries accidentally returning the same physical heap order.
   const databaseUrl = new URL(process.env.DATABASE_URL);
-  if (!full) databaseUrl.searchParams.set('options', '-c enable_seqscan=off -c enable_bitmapscan=off -c jit=off');
+  if (planner) databaseUrl.searchParams.set('options', planner);
+  else if (!full && !sourceRef && !stableFixture) databaseUrl.searchParams.set('options', '-c enable_seqscan=off -c enable_bitmapscan=off -c jit=off');
   return { DATABASE_URL: databaseUrl.href, NODE_OPTIONS: `--import=data:text/javascript,${encodeURIComponent(hook)}`, MINIO_PUBLIC_URL: 'https://storage.example.invalid' };
 }
 
@@ -80,7 +86,7 @@ export function readParityEnv(full, at) {
 // JWT claims must follow the same frozen clock as both API children. Otherwise
 // a slow CI run eventually issues nbf values later than the children's clock.
 export async function parityApiForTest(t, full, at, options = {}) {
-  const api = await apiForTest(t, readParityEnv(full, at), options);
+  const api = await apiForTest(t, readParityEnv(full, at, options), options);
   const seconds = Math.floor(at / 1000);
   return (who, method, path, body, opts = {}) => api(who, method, path, body, {
     ...opts, claims: { iat: seconds - 5, nbf: seconds - 5, exp: seconds + 3600, ...opts.claims },

@@ -139,10 +139,11 @@ export async function readStaffDesk(database, graph, actorIds, path, params, hel
     if (path.startsWith('/ops/shops')) {
       const id = /^\/ops\/shops\/([^/]+)\/hours$/.exec(path)?.[1];
       if (id) await read('supplier_profiles', 'WHERE user_id=$1', [text(id)]);
-      else await readStaffPage(graph, path, params, reviewOnly ? 'WHERE user_id IN (SELECT id FROM users WHERE review_data)' : '');
+      else await readStaffPage(graph, path, params, reviewOnly && staffPageRequested(params) ? 'WHERE user_id IN (SELECT id FROM users WHERE review_data)' : '');
     } else {
       const id = path.split('/')[2], supplierId = actor.role === 'supplier' ? actor.id : params.get('supplierId') || null;
       if (id) await read('supplier_services', 'WHERE id=$1', [text(id)]);
+      else if (!staffPageRequested(params)) await read('supplier_services', 'WHERE ($1::text IS NULL OR supplier_id=$1) AND ($2::text IS NULL OR state=$2)', [text(supplierId), text(params.get('state') || null)]);
       else await readStaffPage(graph, path, params, `WHERE ${supplierId ? 'supplier_id=$1' : '$1::text IS NULL'} AND ${params.get('state') ? 'state=$2' : '$2::text IS NULL'}${reviewOnly ? ' AND supplier_id IN (SELECT id FROM users WHERE review_data)' : ''}`, [text(supplierId), text(params.get('state') || null)]);
       const services = loaded.supplier_services.map(r => r.id);
       for (const table of ['supplier_service_file_formats','supplier_service_price_tiers']) await read(table, 'WHERE supplier_service_id = ANY($1::text[])', [services]);
@@ -154,11 +155,12 @@ export async function readStaffDesk(database, graph, actorIds, path, params, hel
   if (/production-lapses$/.test(path) || /\/performance$/.test(path)) {
     const supplierId = path.startsWith('/users/') ? path.split('/')[2] : /^\/ops\/shops\/([^/]+)\/performance$/.exec(path)?.[1];
     if (supplierId) await read('supplier_profiles', 'WHERE user_id=$1', [text(supplierId)]);
-    else await readStaffPage(graph, path, params, reviewOnly ? 'WHERE user_id IN (SELECT id FROM users WHERE review_data)' : '');
+    else await readStaffPage(graph, path, params, reviewOnly && staffPageRequested(params) ? 'WHERE user_id IN (SELECT id FROM users WHERE review_data)' : '');
     const suppliers = supplierId ? [text(supplierId)] : loaded.supplier_profiles.map(r => r.user_id);
     await identities(suppliers);
     await read('platform_settings', 'WHERE singleton');
-    if (path.endsWith('/production-lapses')) await readStaffPage(graph, path, params,
+    if (path.endsWith('/production-lapses') && !staffPageRequested(params)) await read('production_lapses', 'WHERE supplier_id = ANY($1::text[])', [suppliers]);
+    else if (path.endsWith('/production-lapses')) await readStaffPage(graph, path, params,
       `WHERE supplier_id = $1${reviewOnly && staffPageRequested(params) ? ' AND order_id IN (SELECT id FROM orders WHERE review_data)' : ''}`, [text(supplierId)]);
     else await read('supplier_performance_events', 'WHERE supplier_id = ANY($1::text[])', [suppliers]);
     await read('orders', 'WHERE id = ANY($1::text[])', [[...loaded.supplier_performance_events, ...loaded.production_lapses].map(r => r.order_id)]);
@@ -381,6 +383,7 @@ async function readStaffReports(database, graph, actorIds, path, params, helpers
     const staff = ['ops_admin','super_admin'].some(r => identityHasMembership(actor, r));
     const id = path.split('/')[2];
     if (id) await read('refund_requests', 'WHERE id=$1', [text(id)]);
+    else if (!staffPageRequested(params)) await read('refund_requests', `WHERE ($1::text IS NULL OR status=$1)${staff ? '' : ' AND client_id=$2'}`, staff ? [text(params.get('status') || null)] : [text(params.get('status') || null), actor.id]);
     else await readStaffPage(graph, path, params, `WHERE ${params.get('status') ? 'status=$1' : '$1::text IS NULL'}${staff ? '' : ' AND client_id=$2'}
       ${isTestOperationsUser(initial, actor.id) ? `AND order_id IN (SELECT id FROM orders WHERE review_data)${staffPageRequested(params) ? ' AND client_id IN (SELECT id FROM users WHERE review_data)' : ''}` : staff && params.get('includeReviewData') !== '1' ? 'AND order_id IN (SELECT id FROM orders WHERE NOT review_data)' : ''}`,
       staff ? [text(params.get('status') || null)] : [text(params.get('status') || null), actor.id]);
@@ -405,16 +408,16 @@ async function readStaffReports(database, graph, actorIds, path, params, helpers
   if (path === '/ops/vouchers' || path === '/admin/promotions' || path === '/ops/founding-testers') {
     await read('platform_settings', 'WHERE singleton');
     await read('promotion_settings', "WHERE id='launch'");
-    if (path === '/ops/vouchers') {
+    if (path === '/ops/vouchers' && !staffPageRequested(params)) await read('vouchers', 'WHERE client_id=$1', [text(params.get('clientId'))]);
+    else if (path === '/ops/vouchers') {
       const tab = params.get('tab') || 'available';
-      const paged = staffPageRequested(params);
       const at = new Date().toISOString();
       const expired = `date_trunc('milliseconds', expires_at AT TIME ZONE 'UTC') <= $2::timestamptz AT TIME ZONE 'UTC'`;
       const status = tab === 'all' ? 'TRUE' : tab === 'used' ? "status='used'"
         : tab === 'available' ? `status='available' AND NOT (${expired})`
           : tab === 'expired' ? `(status='void' OR status='available' AND ${expired})` : 'FALSE';
-      await readStaffPage(graph, path, params, `WHERE client_id=$1${paged ? ` AND (${status})${helpers.reviewOnly ? ' AND client_id IN (SELECT id FROM users WHERE review_data)' : ''}` : ''}`,
-        paged && ['available','expired'].includes(tab) ? [text(params.get('clientId')), at] : [text(params.get('clientId'))]);
+      await readStaffPage(graph, path, params, `WHERE client_id=$1 AND (${status})${helpers.reviewOnly ? ' AND client_id IN (SELECT id FROM users WHERE review_data)' : ''}`,
+        ['available','expired'].includes(tab) ? [text(params.get('clientId')), at] : [text(params.get('clientId'))]);
       if (graph.staffPage) graph.staffPage.asOf = at;
     }
     else if (path === '/admin/promotions') {

@@ -876,12 +876,11 @@ function orderedBy(rows, ...columns) {
   });
 }
 
-const LEGACY_HEAP_READ_TABLES = new Set(['staff_profiles','staff_invites','staff_roles','voucher_campaigns','vouchers','production_lapses']);
-export async function loadStore(database, { legacyHeapOrder = false } = {}) {
-  if (!database.inTransaction()) return database.snapshot(() => loadStore(database, { legacyHeapOrder }));
+export async function loadStore(database) {
+  if (!database.inTransaction()) return database.snapshot(() => loadStore(database));
   const loaded = {};
   for (const table of TABLES) {
-    loaded[table.name] = (await database.query(orderReadQuery(table, '', { legacyHeapOrder: legacyHeapOrder && LEGACY_HEAP_READ_TABLES.has(table.name) }))).rows;
+    loaded[table.name] = (await database.query(orderReadQuery(table))).rows;
   }
   const store = storeFromRows(loaded, {
     legalPenaltyGate: await loadLegalPenaltyGate(database),
@@ -904,11 +903,7 @@ function readGraph(database) {
   async function read(name, where, values = [], options = {}) {
     const table = TABLES.find(table => table.name === name);
     if (!table) throw new Error(`Unknown read graph table: ${name}`);
-    // Page indexes also affect sibling readers (for example the client wallet
-    // and supplier's own lapse list). Preserve their legacy enumeration too.
-    const heap = LEGACY_HEAP_READ_TABLES.has(name) && !options.select && options.legacyHeapOrder === undefined
-      && !/\b(?:ORDER\s+BY|LIMIT)\b/i.test(where || '');
-    loaded[name] = (await database.query(orderReadQuery(table, where, heap ? { ...options, legacyHeapOrder: true } : options), values)).rows;
+    loaded[name] = (await database.query(orderReadQuery(table, where, options), values)).rows;
   }
   function finish(options = {}) {
     const store = storeFromRows(loaded, { ...options, writable: false });

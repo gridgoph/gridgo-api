@@ -1776,8 +1776,8 @@ function audit(store, entry) {
  * ending at a different pin.
  */
 
-async function load(options) {
-  return loadStore(database, options);
+async function load() {
+  return loadStore(database);
 }
 
 async function expireElapsedIssueWindows() {
@@ -2482,7 +2482,7 @@ async function handleAuditedRequest(req, res) {
         after: url.searchParams.get('after') || '', status: url.searchParams.get('status'), searchParams: url.searchParams,
         role: req.headers['x-gridgo-role'], includeReviewData: url.searchParams.get('includeReviewData') === '1',
         sessionHash: notificationClaims?.claims?.sid ? crypto.createHash('sha256').update(notificationClaims.claims.sid).digest('hex') : null,
-      }) : await load({ legacyHeapOrder: req.method === 'GET' });
+      }) : await load();
 
     if (
       (req.method === "GET" || req.method === "HEAD")

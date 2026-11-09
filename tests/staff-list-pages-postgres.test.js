@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { createDatabase } from '../src/database.js';
 import { loadHotReadStore, saveStore } from '../src/postgres-store.js';
 import { parseStaffPage, STAFF_LIST_PAGE } from '../src/staff-list-pages.js';
@@ -7,8 +8,13 @@ import { setupStaffDesks } from './fixtures/staff-desks.js';
 import { parityApiForTest } from './fixtures/read-parity.js';
 import { instrument } from './fixtures/order-reads.js';
 import { AT } from './fixtures/reschedule.js';
+import { voucherTables } from '../src/voucher-store.js';
 
 const skip = !process.env.DATABASE_URL;
+// Override when comparing a newer baseline. Shallow CI checkouts still run the
+// SQL/HTTP wallet regression below; the historical-source matrix needs this ref.
+const devRef = process.env.STAFF_LIST_DEV_REF || '14aaf31611c02eeef1e175864b00d11678f68b47';
+const hasDevRef = spawnSync('git', ['cat-file', '-e', `${devRef}:src/server.js`]).status === 0;
 const paths = ['/admin/staff', '/admin/staff/invites', '/admin/staff/roles', '/admin/voucher-campaigns',
   '/ops/vouchers?clientId=client&tab=all', '/ops/hub/escalations', '/ops/hub/unclaimed',
   '/users/supplier/production-lapses', '/supplier-services', '/ops/shops/hours', '/ops/shops/performance',
@@ -65,9 +71,11 @@ test('staff list page parameters are opt-in, bounded and scope-bound', () => {
   }
 });
 
-test('unpaged staff lists retain exact full-store HTTP bodies, order and headers', { skip }, async t => {
+test('unpaged staff lists retain actual-dev targeted HTTP bodies, order and headers', { skip: skip || (!hasDevRef && 'historical dev source is unavailable; set STAFF_LIST_DEV_REF') }, async t => {
   const database = createDatabase(process.env); t.after(() => database.close()); await fixture(database);
-  const at = Date.now() + 120000, old = await parityApiForTest(t, true, at), current = await parityApiForTest(t, false, at);
+  const at = Date.now() + 120000;
+  const old = await parityApiForTest(t, false, at, { sourceRef: devRef, stableFixture: true });
+  const current = await parityApiForTest(t, false, at, { stableFixture: true });
   let comparisons = 0;
   for (const who of [null, 'client', 'supplier', 'rider', 'ops', 'admin', 'test_ops', 'staff', 'dual', 'suspended']) {
     for (const path of [...paths, '/me/vouchers?tab=all', '/me/production-lapses', '/ops/vouchers?clientId=client&tab=available', '/ops/vouchers?clientId=client&tab=used', '/ops/vouchers?clientId=client&tab=expired',
@@ -78,7 +86,74 @@ test('unpaged staff lists retain exact full-store HTTP bodies, order and headers
       comparisons++;
     }
   }
-  t.diagnostic(`${comparisons} exact unpaged HTTP comparisons`);
+  t.diagnostic(`${comparisons} exact unpaged HTTP comparisons against targeted dev ${devRef}`);
+});
+
+test('unpaged voucher enumeration retains dev SQL under sequential and selective indexed plans', { skip }, async t => {
+  const database = createDatabase(process.env);
+  t.after(async () => {
+    try {
+      await database.query("DELETE FROM vouchers WHERE id LIKE 'repro_voucher_%'");
+      await database.query("DELETE FROM voucher_campaigns WHERE id LIKE 'repro_campaign_%'");
+      await database.query('VACUUM ANALYZE vouchers');
+      await database.query('VACUUM ANALYZE voucher_campaigns');
+    } finally { await database.close(); }
+  });
+  await setupStaffDesks(database);
+  await database.query(`INSERT INTO voucher_campaigns
+    (id,name,code,mode,status,value_minor,total_limit,per_account_limit,validity_days,created_at,updated_at)
+    SELECT 'repro_campaign_'||i,'Review','REPRO-'||i,'assigned','active',100,1000000,1,7,'2026-10-05','2026-10-05'
+    FROM generate_series(1,20000) i`);
+  await database.query(`INSERT INTO vouchers
+    (id,campaign_id,client_id,status,value_minor,issued_at,expires_at)
+    SELECT 'repro_voucher_'||i,'repro_campaign_'||i,CASE WHEN i<=6 THEN 'client' ELSE 'other' END,
+      CASE i%3 WHEN 1 THEN 'used' WHEN 2 THEN 'available' ELSE 'void' END,100,'2026-10-05','2030-01-01'
+    FROM generate_series(1,20000) i`);
+  await database.query('VACUUM ANALYZE vouchers');
+  // This is dev's exact targeted query, including its projection width. A
+  // full-store oracle would silently substitute a different enumeration.
+  const sql = `SELECT ${voucherTables.find(table => table.name === 'vouchers').columns.join(', ')} FROM vouchers WHERE client_id=$1`;
+  const indexes = (await database.query(`SELECT indexname,indexdef FROM pg_indexes
+    WHERE schemaname='public' AND indexname IN ('vouchers_client_page_idx','vouchers_client_status_page_idx','vouchers_client_expiry_idx')`)).rows;
+  assert.equal(indexes.length, 3);
+  const at = Date.now() + 120000;
+  let devBody, oldIds;
+  try {
+    for (const index of indexes) await database.query(`DROP INDEX ${index.indexname}`);
+    const plan = (await database.query(`EXPLAIN ${sql}`, ['client'])).rows.map(row => row['QUERY PLAN']).join('\n');
+    assert.match(plan, /Index Scan using vouchers_wallet_idx/);
+    oldIds = (await database.query(sql, ['client'])).rows.map(row => row.id);
+    const heapIds = (await database.query(`${sql} ORDER BY ctid`, ['client'])).rows.map(row => row.id);
+    assert.notDeepEqual(oldIds, heapIds, 'fixture must distinguish native dev enumeration from heap order');
+    if (hasDevRef) {
+      const old = await parityApiForTest(t, false, at, { sourceRef: devRef, stableFixture: true });
+      devBody = await old('ops', 'GET', '/ops/vouchers?clientId=client&tab=all', null, { raw: true });
+    }
+  } finally {
+    for (const index of indexes) await database.query(index.indexdef);
+  }
+  const current = await parityApiForTest(t, false, at, { stableFixture: true });
+  const body = await current('ops', 'GET', '/ops/vouchers?clientId=client&tab=all', null, { raw: true });
+  assert.equal(body.status, 200);
+  assert.deepEqual(JSON.parse(body.body).vouchers.map(row => row.id), oldIds, 'migration must preserve the selective dev response');
+  if (devBody) assert.equal(body.body, devBody.body, 'actual dev before indexes vs current after indexes');
+  for (const [label, planner] of [['sequential', '-c enable_indexscan=off -c enable_bitmapscan=off'], ['indexed', '-c enable_seqscan=off -c enable_bitmapscan=off']]) {
+    const url = new URL(process.env.DATABASE_URL); url.searchParams.set('options', planner);
+    const planned = createDatabase({ ...process.env, DATABASE_URL: url.href });
+    try {
+      const plan = (await planned.query(`EXPLAIN ${sql}`, ['client'])).rows.map(row => row['QUERY PLAN']).join('\n');
+      assert.match(plan, label === 'sequential' ? /Seq Scan on vouchers/ : /Index Scan using/);
+      const expected = (await planned.query(sql, ['client'])).rows.map(row => row.id);
+      const { db, queries } = instrument(planned);
+      const store = await loadHotReadStore(db, 'clerk_ops', '/ops/vouchers', { searchParams: new URLSearchParams('clientId=client&tab=all') });
+      assert.equal(queries.find(query => query.sql.includes('FROM vouchers ')).sql, sql, label);
+      assert.deepEqual(store.vouchers.map(row => row.id), expected, label);
+      const api = await parityApiForTest(t, false, at, { stableFixture: true, planner });
+      const result = await api('ops', 'GET', '/ops/vouchers?clientId=client&tab=all');
+      assert.equal(result.status, 200); assert.deepEqual(result.body.vouchers.map(row => row.id), expected, label);
+    } finally { await planned.close(); }
+  }
+  t.diagnostic('20,000-voucher regression: native wallet order before/after indexes and sequential/indexed SQL + HTTP order match');
 });
 
 test('keyset pages cover equal keys, filters, last/empty pages, cursor errors and authorization', { skip }, async t => {

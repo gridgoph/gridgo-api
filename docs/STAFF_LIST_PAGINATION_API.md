@@ -6,6 +6,9 @@ Existing authentication, role headers, filters and private projections still app
 
 **No `limit` or `cursor`:** the response retains its complete legacy list,
 ordering and shape. There is no default truncation or new response field.
+The existing targeted reader and its SQL remain in use; lists without an
+application sort retain that reader's enumeration. Deterministic keyset ordering
+applies only when the caller supplies page parameters.
 
 **Either parameter supplied:** select a bounded SQL keyset page before loading
 its related rows. `limit` is a decimal integer from 1 through 50; it defaults to
@@ -110,6 +113,21 @@ On an isolated migrated test database, run:
 TEST_DATABASE_URL=postgresql://…/gridgo_task_test npm test -- --maxWorkers=2 tests/staff-list-pages-postgres.test.js
 DATABASE_URL=postgresql://…/gridgo_task_test PERF_BASE_ROWS=10000 PERF_SAMPLES=5 node scripts/benchmark-staff-list-pages.mjs
 ```
+
+The unpaged differential matrix loads the actual pre-pagination dev source from
+Git, keeping its targeted dispatcher enabled, and compares 250 HTTP answers.
+It uses the recorded baseline commit by default; set `STAFF_LIST_DEV_REF` to
+another available pre-pagination dev commit when needed. A shallow checkout
+without that object skips the historical-source matrix explicitly; the CI test
+job retains Git history so this matrix runs there. The wallet
+regression always runs: it seeds 20,000 mixed-status vouchers, compares dev's
+selective wallet query before/after the page indexes, and checks SQL and HTTP
+enumeration with both sequential and indexed plans. Where historical source is
+available it also compares the complete dev HTTP answer before the migration
+against the current answer after it. The full-store oracle is separate: it does
+not define the enumeration of routes that already had targeted readers. Its
+forced-index lapse comparison canonicalizes only equal-time ties, preserving
+timestamp order and every row/field; the actual-dev matrix checks native order.
 
 The destructive benchmark grows matching list parents and unrelated notification,
 audit and location history from 10,000 to 100,000 rows per grown table. It vacuums/analyzes each completed bulk load, then reports
