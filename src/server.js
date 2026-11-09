@@ -33,6 +33,7 @@ import { organizationFeeMoney } from './organization-money.js';
 import { riderPackingFlow, finishedProductPhotos, currentInspection, inspectedPackingPhotos, claimBlocksHandover, handoverRequirements } from './shop-handover.js';
 import { createArtworkPreviews, isPreviewDocument, logPreviewFailure } from './artwork-preview.js';
 import { appendAudit, deriveMissingAudit, readAudit, setAuditActor, withAuditRequest } from './audit.js';
+import { parseGridgoApp, riderPacksMinimumBuilds, isRiderCustodyRoute, riderPacksUpdateRequired } from './app-builds.js';
 import { syncSupplierInvoiceExpectations, routeSupplierInvoices } from './supplier-invoices.js';
 import { routeSurveys } from './survey-routes.js';
 import { routeOrderSharing } from './order-sharing.js';
@@ -901,6 +902,7 @@ function publicOperationalSettings(settings, store = null, user = null) {
   if (file) paymentQr.imageUrl = `${PAYMENT_QR_PUBLIC_PATH}?v=${encodeURIComponent(file.fileId)}`;
   return {
     ...rest,
+    riderPacksMinimumBuilds: riderPacksMinimumBuilds(settings),
     foundingTesterLaunchAt: rest.foundingTesterLaunchAt ?? null,
     testerMonthlyBudgetMinor: rest.testerMonthlyBudgetMinor ?? null,
     testerSignupFormUrlTemplate: rest.testerSignupFormUrlTemplate ?? null,
@@ -2319,6 +2321,16 @@ const TRANSITIONS = {
   completed: { payout_released: ["ops_admin", "super_admin"] },
 };
 
+async function custodyAppUpdateRequired(req, pathname) {
+  const app = parseGridgoApp(req.headers['x-gridgo-app']);
+  if (app?.app !== 'rider' || !isRiderCustodyRoute(req.method, pathname)) return null;
+  // Keep every custody route authenticated. Verify without recording a sign-in
+  // or resolving domain authorization until the compatibility check passes.
+  if (!(await verifiedClerkClaimsFor(req))?.claims?.sub) return null;
+  const body = req.method === 'POST' ? await readBody(req) : null;
+  return riderPacksUpdateRequired(database, app, req.method, pathname, body);
+}
+
 function handleRequest(req, res) {
   return withAuditRequest(req, () => handleAuditedRequest(req, res));
 }
@@ -2362,6 +2374,13 @@ async function handleAuditedRequest(req, res) {
         at: now(),
       });
     }
+    if (req.method === 'GET' && pathname === '/app-minimum-builds') {
+      const { rows: [row] } = await database.query('SELECT version, settings FROM platform_settings WHERE singleton');
+      res.setHeader('Cache-Control', 'no-store');
+      return send(res, 200, { version: row?.version ?? 3, minimumBuilds: riderPacksMinimumBuilds(row?.settings) });
+    }
+    const appUpdate = req.gridgoAppUpdateRequired || await custodyAppUpdateRequired(req, pathname);
+    if (appUpdate) return send(res, 426, appUpdate);
     if (await testOperationsSession(req) && !testOperationsRouteAllowed(req.method, pathname)) {
       return send(res, 403, ORDER_REMOVAL_ROUTE.test(pathname) ? { error: 'forbidden' } : TEST_OPERATIONS_FORBIDDEN);
     }
@@ -3773,6 +3792,8 @@ async function handleAuditedRequest(req, res) {
         );
       }
       return await enqueueMutation(async () => {
+        const appUpdate = await custodyAppUpdateRequired(req, pathname);
+        if (appUpdate) return send(res, 426, appUpdate);
         const latestStore = await load();
         const latestUser = requestActor(req, latestStore, (await authenticateRequest(req, latestStore)).user, eventRole);
         if (!latestUser) {
@@ -4255,6 +4276,8 @@ async function handleAuditedRequest(req, res) {
       }
       const next = {
         ...store.settings,
+        riderPacksMinimumBuilds: Object.hasOwn(body, 'riderPacksMinimumBuilds')
+          ? body.riderPacksMinimumBuilds : riderPacksMinimumBuilds(store.settings),
         testerMonthlyBudgetMinor: Object.hasOwn(body, 'testerMonthlyBudgetMinor') ? body.testerMonthlyBudgetMinor : (store.settings.testerMonthlyBudgetMinor ?? null),
         testerSignupFormUrlTemplate: Object.hasOwn(body, 'testerSignupFormUrlTemplate') ? body.testerSignupFormUrlTemplate : (store.settings.testerSignupFormUrlTemplate ?? null),
         foundingTesterLaunchAt: Object.hasOwn(body, 'foundingTesterLaunchAt') ? body.foundingTesterLaunchAt : (store.settings.foundingTesterLaunchAt ?? null),
@@ -7965,6 +7988,13 @@ const server = http.createServer((req, res) => {
       .then(() => verifyClerkBeforeMutation(req, pathname))
       .then(async (verified) => {
         if (!verified?.claims?.sub) return handleRequest(req, res);
+        const appUpdate = await custodyAppUpdateRequired(req, pathname);
+        if (appUpdate) {
+          // Refuse before opening the domain mutation transaction. The handler
+          // still applies its normal CORS policy, using this request's verdict.
+          req.gridgoAppUpdateRequired = appUpdate;
+          return handleRequest(req, res);
+        }
         if (isCartArtworkWrite(req.method, pathname)) {
           const body = await readBody(req);
           if (hasShortArtworkLinks(body?.artworkAttachments ?? body?.artworkLinks)) {

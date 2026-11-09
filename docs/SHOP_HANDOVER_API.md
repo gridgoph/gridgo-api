@@ -133,6 +133,73 @@ with an inspection but no packed photo for it, `409 packing_photo_required`. A
 client that never inspected is therefore sent back to the checks, not to the
 packing photo.
 
+### Staged minimum rider build
+
+Apps identify their installed build with `X-GRIDGO-App: <app>/<version>+<build>`,
+for example `rider/1.0.260+260`. App names are exactly `client`, `supplier`, or
+`rider`; version is three unsigned decimal components, and build is a
+nonnegative JavaScript safe integer. The build number, rather than the display
+version, determines compatibility. Audit records retain the original header.
+
+`settings.riderPacksMinimumBuilds` is the complete per-app map, defaulting to
+`{"client":0,"supplier":0,"rider":161}`. Zero sets no minimum for that app.
+Only the rider minimum is enforced by this flow. Super Admin edits it through
+the existing `PATCH /settings` handshake, with `expectedVersion`, nonblank
+`reason`, and the complete map. Missing the field preserves the existing map;
+invalid maps return `400 invalid_rider_packs_minimum_builds`. A stale or missing
+version returns `409 settings_version_conflict`. Success increments the shared
+settings version and atomically audits previous/current settings. Other roles
+receive `403 forbidden`; unauthenticated settings writes remain `401`.
+Migration `1794191100000` adds the default to existing settings and increments
+their version, preserving a map already present. The reference seed includes it
+for a fresh database. The web dashboard editor is follow-up work.
+
+Public `GET /app-minimum-builds` requires no Clerk session and returns only:
+
+```json
+{
+  "version": 4,
+  "minimumBuilds": { "client": 0, "supplier": 0, "rider": 161 }
+}
+```
+
+The response uses `Cache-Control: no-store`. Apps can read it at launch before
+sign-in, compare their installed build, and show a blocking update when below
+the published minimum. Older settings rows also project these defaults.
+
+On a `rider_packs` order, a parsed rider header whose build is below the rider
+minimum returns HTTP `426` with exactly
+`{"error":"app_update_required","minimumBuild":161,"app":"rider"}`.
+Clerk signature/expiry verification and CORS still apply. A build already below
+the minimum at preflight is refused before domain authorization, holds,
+state/body-field validation, storage access, audit, notifications, and opening a
+custody mutation transaction. Accepted mutations recheck the live minimum under
+their domain lock, including file attachments after storage inspection. A
+concurrent minimum increase can therefore also return `426` at that final
+recheck, before committing custody evidence.
+
+The gate covers these custody entry points:
+
+| Route | Scope |
+|---|---|
+| `POST /dispatch/:id/accept` | Taking the pickup assignment |
+| `POST /dispatch/:id/arrived-packed` | Reporting an already-packed pickup |
+| `POST /dispatch/:id/pickup-checklist` | Recording unpacked inspection |
+| `POST /dispatch/:id/pickup-confirm` | Signed pickup |
+| `POST /dispatch/:id/delivery` | Recording delivery custody |
+| `POST /orders/:id/transition` | Requested state `rider_assigned`, `picked_up`, `out_for_delivery`, `delivered`, or `issue_window_open` |
+| `GET /orders/:id/handover` | Delivery OTP handover prompt |
+| `POST /orders/:id/handover/escalate` | Reporting a handover mismatch |
+| `POST /orders/:id/acknowledgement-receipt` | Issuing the delivery receipt |
+| `POST /files/:fileId/attach` | Attaching `packing_photo`, `handoff_signature`, `delivery_photo`, `delivery_package_photo`, or `fulfilment_proof` to the order |
+
+Rollout is deliberately staged: missing or malformed headers retain the exact
+released behavior. Builds at/above the minimum, other apps, legacy handover
+flows and all other routes retain their existing checks. Generic file uploads
+have no order target and remain unchanged; their custody attachment is gated.
+Location pings, progress milestones, order reads and receipt reads are unchanged.
+Enforcement on a missing header requires a separate later release decision.
+
 ### Rider client refusal codes
 
 Every refusal a rider app can meet on an assigned trip, by route. Show plain

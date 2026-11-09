@@ -226,7 +226,7 @@ const GET_ROUTES = [
   '/me', '/me/legal/pending', '/legal/documents', '/legal/versions/missing', '/featured-prints', '/season-windows',
   '/catalog', '/catalog/shops', '/catalog/shops?includeReviewData=1', '/catalog/shops/{shop}', '/catalog/items/{item}', '/catalog/media/{photo}',
   '/taxonomy', '/taxonomy/categories', '/taxonomy/subcategories', '/taxonomy/materials', '/taxonomy/finishes', '/zones',
-  '/accepted-file-formats', '/listing-starters', '/supplier-payment-terms', '/settings', '/settings/payment-qr', '/settings/service-fee/preview', '/announcements',
+  '/accepted-file-formats', '/listing-starters', '/supplier-payment-terms', '/settings', '/settings/payment-qr', '/settings/service-fee/preview', '/app-minimum-builds', '/announcements',
   '/web-push/public-key', '/devices', '/notifications', '/notifications?role=ops_admin', '/credits/balance?userId={user}',
   '/orders', '/orders?includeReviewData=1', '/orders/{order}', '/jobs', '/jobs?includeReviewData=1', '/baskets', '/baskets?includeReviewData=1',
   ...['artwork-downloads', 'eligible-suppliers', 'issues', 'invoice', 'qa-checks', 'cancellation-quote', 'refund-requests', 'dropoff-confirmation',
