@@ -104,6 +104,8 @@ export const PURPOSE_POLICIES = Object.freeze({
     maxBytes: 15 * 1024 * 1024,
     contentTypes: ["image/jpeg", "image/png", "image/webp"],
   },
+  promotion_logo: { roles: ['ops_admin', 'super_admin'], maxBytes: 5 * 1024 * 1024, contentTypes: ['image/jpeg', 'image/png', 'image/webp'] },
+  promotion_image: { roles: ['ops_admin', 'super_admin'], maxBytes: 15 * 1024 * 1024, contentTypes: ['image/jpeg', 'image/png', 'image/webp'] },
   announcement_image: {
     roles: ["ops_admin", "super_admin"],
     maxBytes: 1024 * 1024,
@@ -592,7 +594,9 @@ export function authorizeFileUpload(user, purpose) {
   const policy = PURPOSE_POLICIES[purpose];
   if (!policy) {
     fail(400, "invalid_file_purpose", "Choose a supported file purpose, including rider_verification_document for rider evidence.", {
-      allowedPurposes: Object.keys(PURPOSE_POLICIES),
+      allowedPurposes: Object.entries(PURPOSE_POLICIES)
+        .filter(([, candidate]) => candidate.roles.some(role => hasRole(user, role)))
+        .map(([name]) => name),
     });
   }
   if (!user || !policy.roles.some((role) => hasRole(user, role))) forbidden();
@@ -775,6 +779,7 @@ export function findFile(store, fileId) {
 }
 
 export function resolveFileTarget(store, purpose, body, user = null) {
+  if (['promotion_logo', 'promotion_image'].includes(purpose)) fail(409, 'promotion_attachment_route_required', 'Set logo/image on the Promotions route.');
   if (purpose === CLIENT_SHOP_CHAT_PURPOSE) fail(409, 'client_shop_chat_attachment_not_attachable', 'Send attachmentFileIds with the chat message.');
   if (["refund_qr", "refund_receipt", "refund_evidence"].includes(purpose)) {
     fail(409, "refund_file_not_attachable", "Bind this file through the refund request routes.");
@@ -1360,6 +1365,10 @@ export function authorizeFileRead(user, store, file) {
     fail(404, "file_not_found", "That ready file no longer exists. Refresh the record and try again.");
   }
   if (!user) forbidden();
+  if (['promotion_logo', 'promotion_image'].includes(file.purpose)) {
+    if (['client', 'ops_admin', 'super_admin'].some(role => hasRole(user, role))) return;
+    forbidden();
+  }
   // Tracker evidence is the Super Admin's alone; Operations never reads it.
   if (file.purpose === "tracker_decision") {
     if (hasRole(user, "super_admin")) return;

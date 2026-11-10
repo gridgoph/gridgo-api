@@ -132,6 +132,7 @@ export function assertEarlyFileDeletion(store, file, user, reason) {
     if (typeof reason !== 'string' || !reason.trim()) fail(400, 'reason_required');
     if (reason.trim().length > 2000) fail(400, 'reason_too_long');
   } else if (file.ownerId !== user.id || !ARTWORK.has(file.purpose)) fail(403, 'forbidden');
+  if ((file.references || []).some(ref => ref.type === 'home_promotion')) fail(409, 'file_in_use');
   if (isSavedArtwork(file) && user.role !== 'client') fail(409, 'file_retention_hold');
   const links = fileRelationships(store, file);
   if (links.held) fail(409, 'file_retention_hold');

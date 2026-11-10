@@ -1,3 +1,4 @@
+import { seedDevelopmentPromotion } from './seed-home-promotions.js';
 import { organizationFeeMoney } from './organization-money.js';
 import { synchronizeProductionHours } from "./production-days.js";
 import fs from "node:fs";
@@ -1409,6 +1410,7 @@ export async function seedDevelopmentShops(database, {
     await clearDevelopmentOrders(database);
   }
   const privileged = await seedDevelopmentPrivilegedAccounts(database, { clerkBackend: backend, now });
+  await seedDevelopmentPromotion(database, { objectStorage, now });
   return { shops, client, rider, privileged, photos: shops.every((shop) => shop.photos) };
 }
 

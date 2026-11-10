@@ -119,6 +119,8 @@ Parents contain IDs only:
 | `refund_qr` | refund destination plate; owning client and ops/super only |
 | `refund_evidence` | refund request evidence; owning client and ops/super only |
 | `refund_receipt` | client-refund wallet transfer evidence; owning client and ops/super only |
+| `promotion_logo` | ops/super | JPEG, PNG, WebP | 5 MiB (`5242880`) |
+| `promotion_image` | ops/super | JPEG, PNG, WebP | 15 MiB (`15728640`) |
 | `payout_receipt` | `order.payoutReceiptFileIds: string[]` and `payoutMilestone.receiptFileId` (Operations and the assigned shop; bound at `POST /orders/:id/milestones/:code/release`, never through attach) |
 | `rider_verification_document` | `riderDocument.fileId: string` (private evidence; prior rows remain after replacement or deletion) |
 | `tracker_decision` | `tracker_decisions.attachment_ids` (Super Admin only; bound by `POST /admin/tracker/:repo/:number/decisions`, never through attach) |
@@ -129,6 +131,8 @@ Legacy orders may still return `proofFileIds` containing retired supplier-proof 
 `order.artworkName` remains as a backward-compatibility display string and is populated from `originalFilename` when artwork is attached. It is never file identity, never accepted as a key, and never proves an object exists. No artwork and empty file-ID arrays are valid.
 
 ## Purpose policies
+
+`invalid_file_purpose` from upload authorization lists only the purposes available to the caller’s selected GRIDGO memberships in `allowedPurposes`; staff-only promotion purposes are omitted for clients, suppliers and riders.
 
 Validation uses the filename extension, the declared part MIME when it is specific, and file magic bytes. Magic bytes are authoritative; renaming a file is not enough. Empty or `application/octet-stream` declared MIME is accepted for iOS only when extension and magic agree. A conflicting specific MIME is rejected.
 
@@ -148,6 +152,8 @@ Validation uses the filename extension, the declared part MIME when it is specif
 | `supplier_shop_image` | supplier | JPEG, PNG, WebP | 15 MiB (`15728640`) |
 | `verification_document` | supplier, including pending | JPEG, PNG, WebP, PDF | 20 MiB (`20971520`) |
 | `supplier_payout_qr` | supplier, including pending | JPEG, PNG, WebP | 5 MiB (`5242880`) |
+| `promotion_logo` | ops/super | JPEG, PNG, WebP | 5 MiB (`5242880`) |
+| `promotion_image` | ops/super | JPEG, PNG, WebP | 15 MiB (`15728640`) |
 | `payout_receipt` | ops/super | JPEG, PNG, WebP | 15 MiB (`15728640`) |
 | `refund_qr` | client | JPEG, PNG, WebP | 5 MiB (`5242880`) |
 | `refund_evidence` | client/ops/super | JPEG, PNG, WebP | 15 MiB (`15728640`) |
@@ -155,6 +161,8 @@ Validation uses the filename extension, the declared part MIME when it is specif
 | `delivery_chat_image` | client or rider | JPEG, PNG, WebP | 15 MiB (`15728640`) |
 | `rider_verification_document` | rider, including pending | JPEG, PNG, WebP, PDF | 20 MiB (`20971520`) |
 | `tracker_decision` | super | JPEG, PNG, WebP, PDF | 10 MiB (`10485760`) |
+
+Promotion files bind through staff `POST/PATCH /ops/promotions` using `logo`/`image` file refs, rather than `/files/:id/attach`. They are readable by clients and staff, and bound media is retained. See [Home promotions](HOME_PROMOTIONS_API.md).
 
 Accepted detected types are `image/jpeg`, `image/png`, `image/webp`, and where shown `application/pdf`. Artwork also accepts Photoshop (`image/vnd.adobe.photoshop`) and DOCX (`application/vnd.openxmlformats-officedocument.wordprocessingml.document`, `.docx`). HEIC/HEIF is deliberately rejected with `415 invalid_file_type` with `reason: "heic_not_supported"`; the app must request JPEG camera output or convert before upload. 3MF and STL are listing chips only until a dedicated model-file sniff exists — they are not stored through `POST /files`.
 
