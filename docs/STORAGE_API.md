@@ -132,6 +132,8 @@ Legacy orders may still return `proofFileIds` containing retired supplier-proof 
 
 ## Purpose policies
 
+`invalid_file_purpose` from upload authorization lists only the purposes available to the caller’s selected GRIDGO memberships in `allowedPurposes`; staff-only promotion purposes are omitted for clients, suppliers and riders.
+
 Validation uses the filename extension, the declared part MIME when it is specific, and file magic bytes. Magic bytes are authoritative; renaming a file is not enough. Empty or `application/octet-stream` declared MIME is accepted for iOS only when extension and magic agree. A conflicting specific MIME is rejected.
 
 | Purpose | Upload role | Allowed detected types | Maximum |

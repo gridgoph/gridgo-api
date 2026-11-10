@@ -594,7 +594,9 @@ export function authorizeFileUpload(user, purpose) {
   const policy = PURPOSE_POLICIES[purpose];
   if (!policy) {
     fail(400, "invalid_file_purpose", "Choose a supported file purpose, including rider_verification_document for rider evidence.", {
-      allowedPurposes: Object.keys(PURPOSE_POLICIES),
+      allowedPurposes: Object.entries(PURPOSE_POLICIES)
+        .filter(([, candidate]) => candidate.roles.some(role => hasRole(user, role)))
+        .map(([name]) => name),
     });
   }
   if (!user || !policy.roles.some((role) => hasRole(user, role))) forbidden();
