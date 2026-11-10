@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { identityHasMembership } from './authorization-context.js';
+import { isPlayOptinRoute, routePlayOptin, playOpsRead, PLAY_SETTING_KEYS, validatePlaySettings, writePlaySettings } from './play-optin.js';
 
 const APPS = ['client', 'supplier', 'rider'];
 const DAY_MS = 86_400_000;
@@ -36,7 +37,7 @@ export function testerDayBoxes(enrollment, dates, today) {
 }
 
 export function isTesterProgramRoute(pathname) {
-  return /^\/me\/tester-program(?:\/(?:check-in|feedback))?$/.test(pathname)
+  return isPlayOptinRoute(pathname) || /^\/me\/tester-program(?:\/(?:check-in|feedback))?$/.test(pathname)
     || pathname === '/ops/testers' || pathname === '/ops/testers/settings'
     || /^\/ops\/testers\/[^/]+\/[^/]+$/.test(pathname);
 }
@@ -111,13 +112,15 @@ async function opsRead(database, app, at) {
       feedback: { shownCount: feedback.length, tappedAt: feedback.find(row => row.tapped_at)?.tapped_at || null,
         dismissedCount: feedback.filter(row => row.dismissed_at).length } });
   }
-  return { app, stats: { activeToday: testers.filter(row => row.lastCheckInDate === today).length,
-    fullStreak: testers.filter(row => row.streak >= 14).length, needed: 12,
+  const playOptIn = await playOpsRead(database, app);
+  return { app, playOptIn, stats: { activeToday: testers.filter(row => row.lastCheckInDate === today).length,
+    fullStreak: testers.filter(row => row.streak >= 14).length, needed: playOptIn.target,
     playClockStartDate: config.play_clock_start_date, optedInCount: config.opted_in_count, productionApprovedAt: config.production_approved_at }, testers };
 }
 
 /** All mutations (including audit) share the domain advisory lock; reads use a snapshot. */
-export async function routeTesterProgram({ req, url, user, database, readBody, auditEvent, now = () => new Date().toISOString() }) {
+export async function routeTesterProgram({ req, url, user, database, readBody, auditEvent, broadcast, now = () => new Date().toISOString() }) {
+  if (isPlayOptinRoute(url.pathname)) return routePlayOptin({ req, url, user, database, readBody, auditEvent, broadcast, now });
   const path = url.pathname;
   if (!isTesterProgramRoute(path)) return null;
   if (!user) return fail(401, 'unauthorized');
@@ -163,10 +166,12 @@ export async function routeTesterProgram({ req, url, user, database, readBody, a
         return ok({ ok: true });
       }
       if (req.method === 'PATCH' && path === '/ops/testers/settings') {
-        if (Object.keys(body).some(key => !['app', 'playClockStartDate', 'optedInCount', 'productionApprovedAt'].includes(key))) return fail(400, 'unexpected_field');
+        if (Object.keys(body).some(key => !['app', 'playClockStartDate', 'optedInCount', 'productionApprovedAt', ...PLAY_SETTING_KEYS].includes(key))) return fail(400, 'unexpected_field');
         if (body.playClockStartDate !== undefined && body.playClockStartDate !== null && !validDate(body.playClockStartDate)) return fail(400, 'invalid_play_clock_start_date');
         if (body.optedInCount !== undefined && (!Number.isSafeInteger(body.optedInCount) || body.optedInCount < 0 || body.optedInCount > 2147483647)) return fail(400, 'invalid_opted_in_count');
         if (body.productionApprovedAt !== undefined && body.productionApprovedAt !== null && (!validTimestamp(body.productionApprovedAt) || Date.parse(body.productionApprovedAt) > Date.parse(at))) return fail(400, 'invalid_production_approved_at');
+        const playError = validatePlaySettings(body);
+        if (playError) return fail(400, playError);
         const previous = await settings(database, app);
         const current = { play_clock_start_date: body.playClockStartDate === undefined ? previous.play_clock_start_date : body.playClockStartDate,
           opted_in_count: body.optedInCount ?? previous.opted_in_count,
@@ -174,6 +179,8 @@ export async function routeTesterProgram({ req, url, user, database, readBody, a
         await database.query(`INSERT INTO tester_program_settings(app,play_clock_start_date,opted_in_count,production_approved_at) VALUES($1,$2,$3,$4)
           ON CONFLICT(app) DO UPDATE SET play_clock_start_date=$2, opted_in_count=$3, production_approved_at=$4`,
         [app, current.play_clock_start_date, current.opted_in_count, current.production_approved_at]);
+        await writePlaySettings(database, app, body);
+        Object.assign(current, await settings(database, app));
         await auditEvent({ actor: user, action: 'tester_program.settings_updated', entityType: 'tester_program_settings', entityId: app, before: previous, after: current });
         return ok({ ok: true });
       }

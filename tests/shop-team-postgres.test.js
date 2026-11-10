@@ -10,10 +10,11 @@ import { OWNER_ROUTES, STAFF_ROUTES } from './fixtures/shop-team-routes.js';
 import { PICKUP_CHECK_CODES } from '../src/operational-model.js';
 import { up } from '../migrations/1794192200000_shop_teams.js';
 import { notificationVisible } from '../src/notifications.js';
+import { inviteHash } from '../src/shop-team.js';
 const skip = !process.env.DATABASE_URL;
 const supplier = { headers: { 'X-GRIDGO-Role': 'supplier' } };
 const bodyOf = result => JSON.stringify(result.body);
-async function setup(t, change = () => {}) {
+async function setup(t, change = () => {}, onOutput) {
   const db = createDatabase(process.env); t.after(()=>db.close());
   await resetDatabase(db, 'TRUNCATE users, platform_settings, taxonomy_categories, accepted_file_formats RESTART IDENTITY CASCADE');
   const store = fixture();
@@ -37,14 +38,149 @@ async function setup(t, change = () => {}) {
   });
   await new Promise(resolve=>clerk.listen(0,'127.0.0.1',resolve));
   t.after(()=>new Promise(resolve=>clerk.close(resolve)));
-  const api = await apiForTest(t,{CLERK_API_URL:`http://127.0.0.1:${clerk.address().port}`,NOTIFICATION_HEARTBEAT_MS:'1000'});
-  return {db,api};
+  const env = {CLERK_API_URL:`http://127.0.0.1:${clerk.address().port}`,NOTIFICATION_HEARTBEAT_MS:'1000'};
+  const api = await apiForTest(t,env,{onOutput});
+  return {db,api,env};
 }
 async function mutate(db, fn) { return db.transaction(async()=>{const store=await loadStore(db);await fn(store);await saveStore(db,store);}); }
 async function invite(api,kind='link',identity) {
   const r=await api('supplier','POST','/me/shop-team/invites',{kind,identity},supplier);
   assert.equal(r.status,201,bodyOf(r)); return r.body;
 }
+
+test('HTTP replace keeps recipient, delivery and unrelated invites; old links and QR fail without leaking secrets', {skip}, async t => {
+  let output = '';
+  const {db,api} = await setup(t,()=>{},chunk=>{output+=chunk;});
+  const unrelated = await invite(api);
+  const before = await loadStore(db);
+  const secrets = [];
+  for (const [kind,identity] of [['email','new@example.invalid'],['phone','+639171234567'],['qr',null],['link',null]]) {
+    const original = await invite(api,kind,identity);
+    const replaced = await api('supplier','POST',`/me/shop-team/invites/${original.invite.id}/replace`,{kind:'link',identity:'ignored@example.invalid'},supplier);
+    assert.equal(replaced.status,201);
+    assert.equal(replaced.headers.get('cache-control'),'private, no-store');
+    assert.equal(replaced.body.invite.kind,kind);
+    assert.equal(replaced.body.invite.identity,identity);
+    assert.equal(replaced.body.delivery,'share_link');
+    assert.notEqual(replaced.body.invite.id,original.invite.id);
+    assert.match(replaced.body.token,/^[A-Za-z0-9_-]{43}$/);
+    assert.notEqual(replaced.body.token,original.token);
+    assert.equal(Date.parse(replaced.body.invite.expiresAt)-Date.parse(replaced.body.invite.createdAt),172800000);
+    const old = await api('new','POST','/auth/shop-invites/claim',{token:original.token});
+    assert.equal(old.status,409); assert.equal(old.body.error,'shop_invite_revoked');
+    if (['email','phone'].includes(kind)) {
+      const byId = await api('new','POST','/auth/shop-invites/claim',{inviteId:original.invite.id});
+      assert.equal(byId.body.error,'shop_invite_revoked');
+    }
+    const account = kind==='phone' ? 'phone' : 'new';
+    const claimed = await api(account,'POST','/auth/shop-invites/claim',{token:replaced.body.token});
+    assert.equal(claimed.status,200); assert.equal(claimed.body.member.status,'pending');
+    assert.equal(claimed.body.member.role,'staff');
+    assert.equal((await api(account,'POST','/auth/shop-invites/claim',{token:replaced.body.token})).body.error,'shop_invite_used');
+    assert.equal((await api('supplier','DELETE',`/me/shop-team/members/${claimed.body.member.userId}`,null,supplier)).status,200);
+    secrets.push(original.token,replaced.body.token,inviteHash(original.token),inviteHash(replaced.body.token));
+    assert.equal(JSON.stringify(replaced.body).includes('tokenHash'),false);
+    assert.equal(JSON.stringify(replaced.body).includes(inviteHash(replaced.body.token)),false);
+  }
+  const team = await api('supplier','GET','/me/shop-team',null,supplier);
+  assert.equal(team.body.invites.find(row=>row.id===unrelated.invite.id).status,'open');
+  const after = await loadStore(db);
+  assert.deepEqual(after.orders,before.orders);
+  assert.deepEqual(after.orderJobs,before.orderJobs);
+  assert.deepEqual(after.userRoleMemberships,before.userRoleMemberships);
+  assert.ok(after.auditLog.some(row=>row.action==='shop_team.invite_revoked'&&row.actorId==='supplier'));
+  const visible = JSON.stringify({team:team.body,audit:after.auditLog,notifications:after.notifications,output});
+  for (const secret of secrets) assert.equal(visible.includes(secret),false,'invite secrets stay out of lists, audit, notifications and logs');
+  assert.ok(after.shopInvites.every(row=>!row.token));
+});
+
+test('HTTP replacement refuses Staff, non-members, other shops and consumed or expired invites', {skip}, async t => {
+  const {db,api} = await setup(t);
+  const original = await invite(api);
+  const path = `/me/shop-team/invites/${original.invite.id}/replace`;
+  const before = await db.query('SELECT * FROM shop_invites ORDER BY id');
+  for (const [account,options,code] of [
+    ['other',supplier,'shop_owner_required'],
+    ['client',{headers:{'X-GRIDGO-Role':'supplier','X-GRIDGO-Shop-Id':'supplier'}},'shop_membership_required'],
+    ['replacement',supplier,'shop_invite_not_found'],
+  ]) {
+    const result = await api(account,'POST',path,{},options);
+    assert.equal(result.status,code==='shop_invite_not_found'?404:403);
+    assert.equal(result.body.error,code);
+  }
+  assert.equal((await api(null,'POST',path,{},supplier)).status,401);
+  assert.deepEqual((await db.query('SELECT * FROM shop_invites ORDER BY id')).rows,before.rows);
+  await db.query(`INSERT INTO shop_invites(id,shop_id,kind,token_hash,created_by,created_at,expires_at)
+    VALUES ('expired','supplier','qr',$1,'supplier',now()-interval '48 hours',now())`,[inviteHash('z'.repeat(43))]);
+  assert.equal((await api('supplier','POST','/me/shop-team/invites/expired/replace',{},supplier)).body.error,'shop_invite_expired');
+  assert.equal((await api('client','POST','/auth/shop-invites/claim',{token:original.token})).status,200);
+  assert.equal((await api('supplier','POST',path,{},supplier)).body.error,'shop_invite_used');
+  const revoked = await invite(api);
+  await api('supplier','DELETE',`/me/shop-team/invites/${revoked.invite.id}`,null,supplier);
+  assert.equal((await api('supplier','POST',`/me/shop-team/invites/${revoked.invite.id}/replace`,{},supplier)).body.error,'shop_invite_revoked');
+  assert.equal((await db.query('SELECT count(*)::int AS count FROM shop_invites')).rows[0].count,3);
+});
+
+test('HTTP claim versus replace serializes across API processes with one winner', {skip}, async t => {
+  const {db,api,env} = await setup(t);
+  const secondApi = await apiForTest(t,env);
+  for (let attempt=0;attempt<4;attempt++) {
+    const original = await invite(api);
+    const replacePath = `/me/shop-team/invites/${original.invite.id}/replace`;
+    const [claimed,replaced] = await Promise.all([
+      api('client','POST','/auth/shop-invites/claim',{token:original.token}),
+      secondApi('supplier','POST',replacePath,{},supplier),
+    ]);
+    if (claimed.status===200) {
+      assert.equal(replaced.status,409); assert.equal(replaced.body.error,'shop_invite_used');
+    } else {
+      assert.equal(replaced.status,201);
+      assert.equal(claimed.status,409); assert.equal(claimed.body.error,'shop_invite_revoked');
+      assert.equal((await api('client','POST','/auth/shop-invites/claim',{token:replaced.body.token})).status,200);
+    }
+    assert.equal((await api('client','POST','/auth/shop-invites/claim',{token:original.token})).status,409);
+    assert.equal((await api('supplier','POST',replacePath,{},supplier)).status,409);
+    const {rows} = await db.query("SELECT count(*)::int AS count FROM shop_invites WHERE claimed_at IS NULL AND revoked_at IS NULL");
+    assert.equal(rows[0].count,0);
+    assert.equal((await api('supplier','DELETE','/me/shop-team/members/client',null,supplier)).status,200);
+  }
+  const original = await invite(api);
+  const path = `/me/shop-team/invites/${original.invite.id}/replace`;
+  const replacements = await Promise.all([api,secondApi].map(call=>call('supplier','POST',path,{},supplier)));
+  assert.deepEqual(replacements.map(r=>r.status).sort(),[201,409]);
+  assert.equal(replacements.find(r=>r.status===409).body.error,'shop_invite_revoked');
+  assert.equal((await db.query('SELECT count(*)::int AS count FROM shop_invites WHERE claimed_at IS NULL AND revoked_at IS NULL')).rows[0].count,1);
+});
+
+test('HTTP failed replacement rolls back revocation and audit together', {skip}, async t => {
+  let output = '';
+  const {db,api} = await setup(t,()=>{},chunk=>{output+=chunk;});
+  const original = await invite(api);
+  const before = await loadStore(db);
+  await db.query(`CREATE FUNCTION reject_test_invite() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN RAISE EXCEPTION 'test issuance failure %', NEW.token_hash USING DETAIL = row_to_json(NEW)::text; END $$;
+    CREATE TRIGGER reject_test_invite BEFORE INSERT ON shop_invites FOR EACH ROW EXECUTE FUNCTION reject_test_invite()`);
+  try {
+    const result = await api('supplier','POST',`/me/shop-team/invites/${original.invite.id}/replace`,{},supplier);
+    assert.equal(result.status,500);
+    const after = await loadStore(db);
+    assert.deepEqual(after.shopInvites,before.shopInvites);
+    assert.deepEqual(after.auditLog,before.auditLog);
+    assert.match(output,/shop_invite_request_failed/,'the invite failure is logged through the sanitized branch');
+    assert.equal(/[a-f0-9]{64}/.test(output+JSON.stringify(result.body)),false,'database errors must not expose invite hashes');
+  } finally {
+    await db.query('DROP TRIGGER reject_test_invite ON shop_invites; DROP FUNCTION reject_test_invite()');
+  }
+  assert.equal((await api('client','POST','/auth/shop-invites/claim',{token:original.token})).status,200);
+});
+
+test('HTTP invite diagnostics preserve the error boundary for unrelated malformed reads', {skip}, async t => {
+  const {api} = await setup(t);
+  const result = await api('client','GET','/me/carts/%zz');
+  assert.equal(result.status,500);
+  assert.equal(result.body.error,'server_error');
+  assert.equal((await api(null,'GET','/health')).status,200,'an unexpected read error must not terminate the API');
+});
 
 test('HTTP Staff reads own legacy multi-shop artwork and mockups without crossing job scope', {skip}, async t => {
   const {db,api} = await setup(t, s => {

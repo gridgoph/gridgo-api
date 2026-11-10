@@ -336,6 +336,7 @@ import {
   saveDeviceTokenStore,
   saveStore,
 } from "./postgres-store.js";
+import { PLAY_OPTIN_COPY } from './play-optin.js';
 import { isTesterProgramRoute, routeTesterProgram as routePlayTesterProgram } from './tester-program.js';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -438,10 +439,21 @@ async function refreshFoundingTester(store, clientId) {
   });
 }
 
-async function save(view) {
+async function save(view, { notificationsOnly = false } = {}) {
   // A test operations view commits through its underlying full store.
   const store = mergeTestOperationsView(view);
   if (store !== view) moveQueuedInvalidates(view, store);
+  if (notificationsOnly) {
+    // Tester broadcasts share the durable save/outbox/realtime boundary but
+    // never invoke order, file, reward or lifecycle maintenance.
+    const previousIds = originalNotificationIds(store);
+    const created = store.notifications.filter(notification => !previousIds.has(notification.id));
+    await saveStore(database, store);
+    const queued = await enqueueNotificationPushes(database, store, created);
+    if (queued > 0 && (pushDelivery.configured || webPushDelivery.configured)) database.afterCommit(kickPushDrain);
+    await realtimeTransport.enqueue(store, created);
+    return;
+  }
   const scope = clientSaveScope(store);
   const maintenance = saveMaintenanceView(store);
   const flushMaintenanceInvalidates = () => { if (maintenance !== store) moveQueuedInvalidates(maintenance, store); };
@@ -2341,6 +2353,7 @@ function handleRequest(req, res) {
 }
 
 async function handleAuditedRequest(req, res) {
+  let pathname = "/";
   try {
     const requestOrigin = typeof req.headers.origin === "string" ? req.headers.origin : null;
     res.gridgoCorsHeaders = { Vary: "Origin" };
@@ -2362,7 +2375,7 @@ async function handleAuditedRequest(req, res) {
     if (req.method === "OPTIONS") return send(res, 204, {});
 
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
-    const { pathname } = url;
+    pathname = url.pathname;
 
     if (req.method === "GET" && pathname === "/health") {
       const databaseHealth = await database.health();
@@ -2571,7 +2584,16 @@ async function handleAuditedRequest(req, res) {
       if (role && (!EVENT_ROLES.includes(role) || !hasRole(identityStore, auth.user.id, role))) return send(res, 403, { error: 'forbidden' });
       const user = selectActorRole(identityStore, auth.user, role || auth.user.role, { restrictMemberships: Boolean(role) });
       const result = await routePlayTesterProgram({ req, url, user, database, readBody, now,
-        auditEvent: entry => appendTesterProgramAudit(database, entry, now()) });
+        auditEvent: entry => appendTesterProgramAudit(database, entry, now()),
+        broadcast: async ({ app, recipientIds, actor, at }) => {
+          const store = await load();
+          const { announcement } = appendAnnouncement(store, {
+            audience: `${app}s`, app, recipientIds, actor, type: 'play_optin',
+            title: 'Help us launch GRIDGO on Play', body: PLAY_OPTIN_COPY,
+          }, { id, at, audit });
+          await save(store, { notificationsOnly: true });
+          return announcement;
+        } });
       return send(res, result.status, result.body);
     }
 
@@ -7864,7 +7886,13 @@ async function handleAuditedRequest(req, res) {
     if (err instanceof AttachmentError || (err && Number.isInteger(err.status) && err.code)) {
       return sendDomainError(res, err, { afterCommit: false });
     }
-    console.error(err);
+    if (/^\/me\/shop-team\/invites(?:\/|$)/.test(pathname)) {
+      // PostgreSQL errors can include entire invite rows in detail/message.
+      // Keep hashes and recipient data out of diagnostics, including failed saves.
+      console.error({ event: 'shop_invite_request_failed', code: /^[0-9A-Z]{5}$/.test(err?.code || '') ? err.code : 'unknown' });
+    } else {
+      console.error(err);
+    }
     return send(res, 500, {
       error: "server_error",
       message: "GRIDGO could not complete that request. Try again, or check the API log if the problem continues.",
