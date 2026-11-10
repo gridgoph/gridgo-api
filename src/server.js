@@ -7864,7 +7864,13 @@ async function handleAuditedRequest(req, res) {
     if (err instanceof AttachmentError || (err && Number.isInteger(err.status) && err.code)) {
       return sendDomainError(res, err, { afterCommit: false });
     }
-    console.error(err);
+    if (/^\/me\/shop-team\/invites(?:\/|$)/.test(pathname)) {
+      // PostgreSQL errors can include entire invite rows in detail/message.
+      // Keep hashes and recipient data out of diagnostics, including failed saves.
+      console.error({ event: 'shop_invite_request_failed', code: /^[0-9A-Z]{5}$/.test(err?.code || '') ? err.code : 'unknown' });
+    } else {
+      console.error(err);
+    }
     return send(res, 500, {
       error: "server_error",
       message: "GRIDGO could not complete that request. Try again, or check the API log if the problem continues.",

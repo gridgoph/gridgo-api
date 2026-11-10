@@ -78,8 +78,8 @@ phone must be E.164, e.g. `+639171234567`. Omit `identity` for QR/link.
 }
 ```
 
-The API returns the token **once**, only on creation. It persists only a SHA-256
-hash of 32 random bytes. All kinds expire exactly 48 hours after creation and
+The API returns each token **once**, only on creation or replacement. It persists
+only a SHA-256 hash of 32 random bytes. All kinds expire exactly 48 hours after creation and
 work once. The frontend builds its own configured universal/app join URL with
 the token in the fragment (for example `/join-team#token=...`); the QR encodes
 that same join URL. Both submit the token in the claim request body. Do not put
@@ -89,6 +89,36 @@ This release sends no email/SMS. No provider is added, and support-desk SMTP is
 not repurposed. `delivery: share_link` tells the Owner to share the link with the
 recipient. Email/phone matching at sign-in works independently of delivery.
 The companion app/web must implement the join URL and QR scanner.
+
+### New code — replace an invite, Owner only
+
+`POST /me/shop-team/invites/:id/replace` with no body (or `{}`).
+
+Response `201` is the same `{invite, token, delivery}` shape as creation, with a
+new invite ID, a new single-use token and a fresh 48-hour lifetime. The server
+copies the original `kind` and normalized `identity`; delivery remains
+`share_link`. Body fields cannot change the recipient, kind, role or delivery.
+The app/web builds the new join link and QR from the returned token and replaces
+the displayed code only after success. The token cannot be retrieved later.
+
+Revoking the selected invite, creating its replacement and writing both audit
+entries commit in one transaction under the same domain lock as claims. The old
+link, QR and email/phone discovery ID are refused immediately after commit with
+`409 shop_invite_revoked`. Other invites and existing memberships are unchanged.
+Failure rolls back both issuance and revocation. Replacing an already claimed,
+revoked or expired invite returns `409 shop_invite_used`,
+`409 shop_invite_revoked` or `410 shop_invite_expired`; an invite outside the
+selected shop returns `404 shop_invite_not_found`.
+
+When claim and replacement race, exactly one operation wins: a successful claim
+leaves no replacement and replacement returns `409 shop_invite_used`; a
+successful replacement leaves only its new token usable and the old claim
+returns `409 shop_invite_revoked`. Concurrent replacements similarly yield one
+`201` and one `409 shop_invite_revoked`. An uncertain network result requires
+refreshing the invite list; retrying the old ID never issues another token.
+Successful responses are `Cache-Control: private, no-store`. Tokens and hashes stay out of
+lists, audit, notifications and logs; only the newly issued raw token is returned
+in the successful private response.
 
 ### Discover invitations after sign-in
 
@@ -129,6 +159,7 @@ A new invitation is required after removal/decline.
 | --- | --- | --- |
 | `GET /me/shop-team` | — | `{members:[...], invites:[...]}` |
 | `POST /me/shop-team/invites` | Above | `{invite, token, delivery}` |
+| `POST /me/shop-team/invites/:id/replace` | — or `{}` | `201 {invite, token, delivery}`; atomically replaces only this open invite |
 | `DELETE /me/shop-team/invites/:id` | — | `{invite}` with `status: revoked` |
 | `PATCH /me/shop-team/members/:userId` | `{"status":"active"}` | `{member}`; approve pending |
 | `DELETE /me/shop-team/members/:userId` | — | `{member}` with `status: removed`; decline or remove |
