@@ -151,6 +151,14 @@ Then apply `1794316000000_home_promotion_color` before deploying the color-aware
 API. It adds a nonnull uppercase six-digit hex `color` column and backfills all
 existing rows (including disabled/removed rows) from `style`: light to `#FFFFFF`,
 yellow to `#FFDE58`. It preserves media, dates, counters and permissions.
+A table-scoped BEFORE trigger keeps the previous API writer working while the
+migration is applied before API replacement: inserts omitting color derive it
+from style, and updates that change style without changing color derive the new
+color from style. Updates that change color retain that explicit value; unrelated
+legacy edits preserve custom colors. The color-aware API validates explicit null
+and invalid colors before SQL. Keep this compatibility trigger while old API
+processes may still write promotions. Deploy this API before the color-picker
+clients: the previous API rejects an unknown `color` request field.
 
 `npm run seed:dev` adds the committed DavaoGo logo to MinIO and its metadata to
 PostgreSQL, then creates an enabled Partner promotion with the fields above,
