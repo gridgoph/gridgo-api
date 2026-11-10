@@ -244,6 +244,7 @@ import { routeAccountProfile, themePreferenceFor } from "./account-profile-route
 import { clientHomeSummary } from './client-home.js';
 import { routeSeasonWindows, applySeasonNotices, manilaDate } from "./season-windows.js";
 import { publicFeaturedPrints, routeFeaturedPrints } from './featured-prints.js';
+import { routeHomePromotions } from './home-promotions.js';
 import { requestDropoffConfirmation, routeDropoffConfirmation, deliveryDestination } from "./dropoff-confirmation.js";
 import { routePhysicalInvoice } from "./physical-invoice-routes.js";
 import { gridgoOfficePoint } from "./gridgo-office.js";
@@ -2940,6 +2941,14 @@ async function handleAuditedRequest(req, res) {
       if (pageStore[STAFF_LIST_PAGE]) store[STAFF_LIST_PAGE] = pageStore[STAFF_LIST_PAGE];
     }
     if (user) setAuditActor(user);
+    const homePromotionResponse = await routeHomePromotions({ req, url, store, user, database,
+      storage: objectStorage, readBody, now, id, audit });
+    if (homePromotionResponse) {
+      res.setHeader('Cache-Control', 'private, no-store');
+      if (homePromotionResponse.mutated) await save(store);
+      return send(res, homePromotionResponse.status, homePromotionResponse.body);
+    }
+
     if (req.method === 'GET' && pathname === '/me/home-summary') {
       // Targeted read (loadHotReadStore): the caller's own orders, missions and tester vouchers.
       if (!user) return send(res, auth.status || 401, authFailureBody(auth));

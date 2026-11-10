@@ -879,3 +879,34 @@ test('unattached rider packing uploads are private to their owner and staff', ()
   expectError(() => authorizeFileRead(client, store, file), 403, 'forbidden');
   expectError(() => authorizeFileRead({ ...rider, id: 'another-rider' }, store, file), 403, 'forbidden');
 });
+
+test('invalid upload purpose hints list only the caller memberships, including staff-only promotions', () => {
+  function allowed(user) {
+    let failure;
+    try { authorizeFileUpload(user, 'invalid'); } catch (error) { failure = error; }
+    assert.equal(failure?.code, 'invalid_file_purpose');
+    return failure.details.allowedPurposes;
+  }
+  assert.deepEqual(allowed(client), [
+    'approval_signature', 'approval_sample_photo', 'artwork', 'mockup', 'payment_proof',
+    'refund_qr', 'refund_evidence', 'client_verification_document', 'client_shop_chat_attachment',
+    'support_chat_image', 'delivery_chat_image',
+  ]);
+  for (const actor of [ops, superAdmin]) {
+    assert.ok(allowed(actor).includes('promotion_logo'));
+    assert.ok(allowed(actor).includes('promotion_image'));
+    assert.ok(!allowed(actor).includes('artwork'));
+  }
+  for (const actor of [supplier, rider]) {
+    assert.ok(!allowed(actor).includes('promotion_logo'));
+    assert.ok(!allowed(actor).includes('promotion_image'));
+  }
+  const member = { ...client, id: 'multi-upload' };
+  const store = { users: [member], userRoleMemberships: [
+    { userId: member.id, role: 'client' }, { userId: member.id, role: 'ops_admin' },
+  ], approvalCases: [] };
+  const clientActor = selectActorRole(store, member, 'client', { restrictMemberships: true });
+  const opsActor = selectActorRole(store, member, 'ops_admin', { restrictMemberships: true });
+  assert.ok(!allowed(clientActor).includes('promotion_logo'));
+  assert.ok(allowed(opsActor).includes('promotion_logo'));
+});

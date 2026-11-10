@@ -137,6 +137,8 @@ Missing Clerk or database configuration refuses startup with the variable name o
 
 Staff list pagination is an opt-in, compatible rollout: [parameters, route coverage and dashboard adoption](docs/STAFF_LIST_PAGINATION_API.md).
 
+Home partner cards, staff CRUD, private media and Manila daily reporting: [Home promotions](docs/HOME_PROMOTIONS_API.md).
+
 ## Main route groups
 
 All routes except `/health`, `/catalog`, `/season-windows`, `/app-minimum-builds`, public `/legal/documents` and effective `/legal/versions/*` reads, public support-ticket and issue-report submit, and the documented anonymous device registration calls require a verified Clerk bearer. The support desk (ticket list/reply/delete, `/issue-reports` read/mark) additionally requires the Clerk account's verified primary email to be on `SUPPORT_DESK_ALLOWED_EMAILS`. `POST /admin/login` is retired (`404`). The API has no password desk administrator seed or local desk tokens; only the desk email allowlist remains as desk access configuration.

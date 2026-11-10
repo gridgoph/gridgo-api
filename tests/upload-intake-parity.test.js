@@ -45,7 +45,7 @@ export const uploadStorage = (req, res) => {
   }
 };
 test(
-  'client intake and pending/ready saves retain baseline HTTP and all money/audit/inbox rows',
+  'client intake retains baseline HTTP and money/audit/inbox rows except membership-scoped purpose hints',
   { skip },
   async (t) => {
     const db = createDatabase(process.env);
@@ -94,6 +94,18 @@ test(
           rows: await saveRows(db),
         });
         for (const close of cleanup.splice(0).reverse()) await close();
+      }
+      if (input.purpose === 'invalid') {
+        const clientPurposes = [
+          'approval_signature', 'approval_sample_photo', 'artwork', 'mockup', 'payment_proof',
+          'refund_qr', 'refund_evidence', 'client_verification_document', 'client_shop_chat_attachment',
+          'support_chat_image', 'delivery_chat_image',
+        ];
+        assert.deepEqual(answers[1].body.allowedPurposes, clientPurposes);
+        // The historical API advertised other roles' upload purposes. Only this
+        // intentional hint change is exempt from full response and row parity.
+        assert.ok(answers[0].body.allowedPurposes.includes('payment_qr'));
+        answers[0].body.allowedPurposes = clientPurposes;
       }
       assert.deepEqual(answers[1], answers[0], JSON.stringify(input));
       assert.equal(
