@@ -1,11 +1,33 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { staffRouteAllowed, supplierShopActor, assertStaffFile, claimShopInvite, inviteHash } from '../src/shop-team.js';
+import { staffRouteAllowed, supplierShopActor, assertStaffFile, claimShopInvite, inviteHash, routeShopTeam } from '../src/shop-team.js';
 import { fixture, AT, id, audit } from './fixtures/reschedule.js';
 import { staffOrderProjection } from '../src/shop-staff-order.js';
 import { identityHasMembership } from '../src/authorization-context.js';
 
 import { OWNER_ROUTES, STAFF_ROUTES } from './fixtures/shop-team-routes.js';
+
+test('replacement invalidates only the selected invite and preserves its kind and recipient', async () => {
+  for (const [kind, identity] of [['email', 'staff@example.invalid'], ['phone', '+639171234567'], ['qr', null], ['link', null]]) {
+    const store = fixture(), oldToken = 'a'.repeat(43);
+    const original = {id:'old',shopId:'supplier',kind,identity,tokenHash:inviteHash(oldToken),createdBy:'supplier',createdAt:AT,expiresAt:'2099-01-01T00:00:00.000Z'};
+    store.shopInvites = [original, {...original,id:'unrelated',tokenHash:inviteHash('b'.repeat(43))}];
+    const before = structuredClone(store.shopInvites[1]);
+    const result = await routeShopTeam({req:{method:'POST',headers:{}},url:new URL('http://local/me/shop-team/invites/old/replace'),
+      store,user:store.users.find(u=>u.id==='supplier'),readBody:async()=>({kind:'link',identity:'ignored@example.invalid'}),id,now:()=>AT,audit});
+    assert.equal(result?.status,201);
+    assert.equal(result.mutated,true);
+    assert.equal(original.revokedAt,AT);
+    assert.deepEqual(store.shopInvites[1],before);
+    assert.equal(result.body.invite.kind,kind);
+    assert.equal(result.body.invite.identity,identity);
+    assert.equal(result.body.delivery,'share_link');
+    assert.equal(Date.parse(result.body.invite.expiresAt)-Date.parse(AT),172800000);
+    assert.match(result.body.token,/^[A-Za-z0-9_-]{43}$/);
+    assert.notEqual(result.body.token,oldToken);
+    assert.equal(JSON.stringify(result.body.invite).includes('tokenHash'),false);
+  }
+});
 
 test('staff capabilities fail closed for every owner route and any future route', () => {
   for (const [method,path] of OWNER_ROUTES) assert.equal(staffRouteAllowed(method,path),false,`${method} ${path}`);

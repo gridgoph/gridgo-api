@@ -119,6 +119,14 @@ function publicMember(store, member) {
   return { userId: member.userId, name: person?.name || 'Member', role: member.role, status: member.status,
     createdAt: member.createdAt, updatedAt: member.updatedAt };
 }
+function issueShopInvite({ store, user, shopId, kind, identity, at, id, audit }) {
+  const token = randomBytes(32).toString('base64url');
+  const invite = { id: id('shi'), shopId, kind, identity, tokenHash: inviteHash(token), createdBy: user.id,
+    createdAt: at, expiresAt: new Date(Date.parse(at) + 48 * 3600000).toISOString() };
+  store.shopInvites.push(invite);
+  audit(store, { actor: user, action: 'shop_team.invite_created', entityType: 'shop_invite', entityId: invite.id, detail: { shopId, kind } });
+  return { status: 201, mutated: true, body: { invite: publicInvite(invite, at), token, delivery: 'share_link' } };
+}
 export function discoverShopInvites(store, clerkUser, at = isoNow()) {
   const verified = verifiedIdentities(clerkUser);
   return (store.shopInvites || []).filter(row => !row.claimedAt && !row.revokedAt && Date.parse(row.expiresAt) > Date.parse(at)
@@ -160,7 +168,8 @@ export function claimShopInvite({ store, claims, clerkUser, body, id, at, audit 
 export async function routeShopTeam({ req, url, store, user, readBody, id, now, audit }) {
   const path = url.pathname;
   const operations = /^\/ops\/shops\/([^/]+)\/team(?:\/([^/]+))?$/.exec(path);
-  const own = /^\/me\/shop-team(?:\/(invites|members)(?:\/([^/]+))?)?$/.exec(path);
+  const own = /^\/me\/shop-team(?:\/(invites|members)(?:\/([^/]+))?)?$/.exec(path)
+    || /^\/me\/shop-team\/(invites)\/([^/]+)\/(replace)$/.exec(path);
   if (path !== '/me/shop-memberships' && !operations && !own) return null;
   if (!user) shopTeamError(401, 'unauthorized');
   if ((user.accountStatus || 'active') !== 'active') shopTeamError(403, 'forbidden');
@@ -193,17 +202,16 @@ export async function routeShopTeam({ req, url, store, user, readBody, id, now, 
       identity = String(body.identity || '').trim();
       if (!/^\+[1-9][0-9]{7,14}$/.test(identity)) shopTeamError(400, 'invalid_invite_identity');
     }
-    const token = randomBytes(32).toString('base64url');
-    const invite = { id: id('shi'), shopId, kind: body.kind, identity, tokenHash: inviteHash(token), createdBy: user.id,
-      createdAt: at, expiresAt: new Date(Date.parse(at) + 48 * 3600000).toISOString() };
-    store.shopInvites.push(invite);
-    audit(store, { actor: user, action: 'shop_team.invite_created', entityType: 'shop_invite', entityId: invite.id, detail: { shopId, kind: invite.kind } });
-    return { status: 201, mutated: true, body: { invite: publicInvite(invite, at), token, delivery: 'share_link' } };
+    return issueShopInvite({ store, user, shopId, kind: body.kind, identity, at, id, audit });
   }
-  if (!operations && own?.[1] === 'invites' && own[2] && req.method === 'DELETE') {
+  if (!operations && own?.[1] === 'invites' && own[2]
+    && ((!own[3] && req.method === 'DELETE') || (own[3] === 'replace' && req.method === 'POST'))) {
     const invite = store.shopInvites.find(row => row.id === own[2] && row.shopId === shopId);
     inviteAvailable(invite, at); invite.revokedAt = at;
     audit(store, { actor: user, action: 'shop_team.invite_revoked', entityType: 'shop_invite', entityId: invite.id, detail: { shopId } });
+    // Both rows and their audit entries persist through the existing locked
+    // HTTP transaction, shared with claims. Failed issuance rolls back revocation.
+    if (own[3] === 'replace') return issueShopInvite({ store, user, shopId, kind: invite.kind, identity: invite.identity, at, id, audit });
     return { status: 200, mutated: true, body: { invite: publicInvite(invite, at) } };
   }
   if (memberId && (req.method === 'DELETE' || (!operations && req.method === 'PATCH'))) {

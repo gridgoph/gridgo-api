@@ -88,9 +88,11 @@ async function startApi(extraEnv = {}) {
 }
 
 async function stopApi(instance) {
-  if (!instance) return;
-  instance.child.kill("SIGTERM");
-  await new Promise((resolve) => instance.child.once("exit", resolve));
+  if (!instance || instance.child.exitCode !== null || instance.child.signalCode !== null) return;
+  await new Promise((resolve) => {
+    instance.child.once("exit", resolve);
+    instance.child.kill("SIGTERM");
+  });
 }
 
 async function request(api, pathname, { method = "GET", token, role, body, headers = {} } = {}) {
@@ -179,6 +181,12 @@ async function staffNotices(database, occurrenceKey) {
   );
   return result.rows;
 }
+
+test("support-chat API cleanup handles an already-exited child", { timeout: 2000 }, async () => {
+  const child = spawn(process.execPath, ["--eval", "process.exit(0)"], { stdio: "ignore" });
+  await new Promise(resolve => child.once("exit", resolve));
+  await stopApi({ child });
+});
 
 test("support-chat helpers keep messages honest", () => {
   assert.equal(isSupportChatRoute("/support-chat/me"), true);

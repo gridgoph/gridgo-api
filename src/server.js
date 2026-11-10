@@ -2353,6 +2353,7 @@ function handleRequest(req, res) {
 }
 
 async function handleAuditedRequest(req, res) {
+  let pathname = "/";
   try {
     const requestOrigin = typeof req.headers.origin === "string" ? req.headers.origin : null;
     res.gridgoCorsHeaders = { Vary: "Origin" };
@@ -2374,7 +2375,7 @@ async function handleAuditedRequest(req, res) {
     if (req.method === "OPTIONS") return send(res, 204, {});
 
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
-    const { pathname } = url;
+    pathname = url.pathname;
 
     if (req.method === "GET" && pathname === "/health") {
       const databaseHealth = await database.health();
@@ -7885,7 +7886,13 @@ async function handleAuditedRequest(req, res) {
     if (err instanceof AttachmentError || (err && Number.isInteger(err.status) && err.code)) {
       return sendDomainError(res, err, { afterCommit: false });
     }
-    console.error(err);
+    if (/^\/me\/shop-team\/invites(?:\/|$)/.test(pathname)) {
+      // PostgreSQL errors can include entire invite rows in detail/message.
+      // Keep hashes and recipient data out of diagnostics, including failed saves.
+      console.error({ event: 'shop_invite_request_failed', code: /^[0-9A-Z]{5}$/.test(err?.code || '') ? err.code : 'unknown' });
+    } else {
+      console.error(err);
+    }
     return send(res, 500, {
       error: "server_error",
       message: "GRIDGO could not complete that request. Try again, or check the API log if the problem continues.",
