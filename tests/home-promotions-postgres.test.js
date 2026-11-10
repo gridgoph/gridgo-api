@@ -6,6 +6,7 @@ import { defaultOperationalSettings } from '../src/operational-model.js';
 import { resetDatabase } from './fixtures/reset-database.js';
 import { apiForTest } from './fixtures/reschedule-http.js';
 import { routeHomePromotions, recordPromotionEvent } from '../src/home-promotions.js';
+import { up as migrateColor } from '../migrations/1794316000000_home_promotion_color.js';
 import { seedDevelopmentPromotion } from '../src/seed-home-promotions.js';
 
 const DB = process.env.DATABASE_URL;
@@ -159,4 +160,53 @@ test('promotion writes, media references, audits and staff inbox rows roll back 
   assert.deepEqual(after.files, before.files);
   assert.deepEqual(after.auditLog, before.auditLog);
   assert.deepEqual(after.notifications, before.notifications);
+});
+
+
+test('color migration backfills both legacy styles, including removed rows, and constrains storage', { skip: !DB }, async t => {
+  const db = createDatabase({ DATABASE_URL: DB }); t.after(() => db.close());
+  await db.transaction(async () => {
+    // A transaction-local table shadows the real table without changing its schema or data.
+    await db.query('CREATE TEMP TABLE home_promotions (id text, style text, removed_at timestamptz) ON COMMIT DROP');
+    await db.query("INSERT INTO home_promotions VALUES ('light','light',NULL),('yellow','yellow',now())");
+    const statements = [];
+    await migrateColor({ sql: sql => statements.push(sql) });
+    for (const sql of statements) await db.query(sql);
+    assert.deepEqual((await db.query('SELECT id,color FROM home_promotions ORDER BY id')).rows,
+      [{ id: 'light', color: '#FFFFFF' }, { id: 'yellow', color: '#FFDE58' }]);
+    for (const color of [null, '#abcdef', '#FFF', '#123456\n']) {
+      await db.query('SAVEPOINT bad_color');
+      await assert.rejects(db.query('UPDATE home_promotions SET color=$1', [color]), error => ['23502', '23514'].includes(error.code));
+      await db.query('ROLLBACK TO SAVEPOINT bad_color');
+    }
+  });
+});
+
+test('both staff roles write colors; all read projections derive legacy style; legacy patches replace color', { skip: !DB }, async t => {
+  const { db, api } = await setup(t);
+  const { style, ...colorValues } = values;
+  for (const role of ['ops', 'admin']) {
+    const created = await api(role, 'POST', '/ops/promotions', { ...colorValues, color: '#aBcDef' });
+    assert.equal(created.status, 201, JSON.stringify(created.body));
+    const promo = created.body.promotion, path = `/ops/promotions/${promo.id}`;
+    assert.equal(promo.color, '#ABCDEF'); assert.equal(promo.style, 'light');
+    assert.equal((await db.query('SELECT color FROM home_promotions WHERE id=$1', [promo.id])).rows[0].color, '#ABCDEF');
+    for (const color of [null, '#fff', '#12345678', 'red', '#123456\n']) {
+      const response = await api(role, 'PATCH', path, { color });
+      assert.equal(response.status, 400); assert.equal(response.body.field, 'color');
+    }
+    assert.equal((await api(role, 'PATCH', path, { name: 'Kept color' })).body.promotion.color, '#ABCDEF');
+    for (const [legacyStyle, color] of [['yellow', '#FFDE58'], ['light', '#FFFFFF']]) {
+      const updated = await api(role, 'PATCH', path, { style: legacyStyle });
+      assert.equal(updated.body.promotion.color, color); assert.equal(updated.body.promotion.style, legacyStyle);
+    }
+    await api(role, 'PATCH', path, { color: '#ffde58', style: 'light' });
+    // Reads must derive style from color even if the retained compatibility column disagrees.
+    await db.query("UPDATE home_promotions SET style='light' WHERE id=$1", [promo.id]);
+    for (const [reader, route] of [[role, path], [role, '/ops/promotions'], ['client', '/me/promotions/home']]) {
+      const response = await api(reader, 'GET', route);
+      const result = response.body.promotion || response.body.promotions.find(p => p.id === promo.id);
+      assert.equal(result.color, '#FFDE58'); assert.equal(result.style, 'yellow');
+    }
+  }
 });
