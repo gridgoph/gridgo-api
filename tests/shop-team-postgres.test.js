@@ -166,11 +166,20 @@ test('HTTP failed replacement rolls back revocation and audit together', {skip},
     const after = await loadStore(db);
     assert.deepEqual(after.shopInvites,before.shopInvites);
     assert.deepEqual(after.auditLog,before.auditLog);
+    assert.match(output,/shop_invite_request_failed/,'the invite failure is logged through the sanitized branch');
     assert.equal(/[a-f0-9]{64}/.test(output+JSON.stringify(result.body)),false,'database errors must not expose invite hashes');
   } finally {
     await db.query('DROP TRIGGER reject_test_invite ON shop_invites; DROP FUNCTION reject_test_invite()');
   }
   assert.equal((await api('client','POST','/auth/shop-invites/claim',{token:original.token})).status,200);
+});
+
+test('HTTP invite diagnostics preserve the error boundary for unrelated malformed reads', {skip}, async t => {
+  const {api} = await setup(t);
+  const result = await api('client','GET','/me/carts/%zz');
+  assert.equal(result.status,500);
+  assert.equal(result.body.error,'server_error');
+  assert.equal((await api(null,'GET','/health')).status,200,'an unexpected read error must not terminate the API');
 });
 
 test('HTTP Staff reads own legacy multi-shop artwork and mockups without crossing job scope', {skip}, async t => {

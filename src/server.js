@@ -2353,6 +2353,7 @@ function handleRequest(req, res) {
 }
 
 async function handleAuditedRequest(req, res) {
+  let pathname = "/";
   try {
     const requestOrigin = typeof req.headers.origin === "string" ? req.headers.origin : null;
     res.gridgoCorsHeaders = { Vary: "Origin" };
@@ -2374,7 +2375,7 @@ async function handleAuditedRequest(req, res) {
     if (req.method === "OPTIONS") return send(res, 204, {});
 
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
-    const { pathname } = url;
+    pathname = url.pathname;
 
     if (req.method === "GET" && pathname === "/health") {
       const databaseHealth = await database.health();
