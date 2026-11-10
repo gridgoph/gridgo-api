@@ -21,15 +21,15 @@ function receivesRelease(store, userId, app, releaseChannel) {
 }
 
 /** Shared inbox/audit boundary. The caller saves and delivers after commit. */
-export function appendAnnouncement(store, { audience, title, body, imageUrl = null, app = null, releaseChannel = null, actor, reason = null }, { id, at, audit }) {
+export function appendAnnouncement(store, { audience, title, body, imageUrl = null, app = null, releaseChannel = null, actor, reason = null, recipientIds = null, type = "announcement" }, { id, at, audit }) {
   const roles = ANNOUNCEMENT_AUDIENCES.get(audience);
-  const recipients = store.users.filter(candidate => (roles === null || roles.some(role => hasRole(store, candidate.id, role)))
+  const recipients = store.users.filter(candidate => (!recipientIds || recipientIds.includes(candidate.id)) && (roles === null || roles.some(role => hasRole(store, candidate.id, role)))
     && (!releaseChannel || receivesRelease(store, candidate.id, app, releaseChannel)));
   const release = releaseChannel ? { releaseChannel, storeTarget: RELEASE_STORE_TARGETS[releaseChannel] } : {};
   const announcementId = id("anc");
   for (const recipient of recipients) {
     store.notifications.push({
-      id: id("ntf"), userId: recipient.id, type: "announcement",
+      id: id("ntf"), userId: recipient.id, type,
       ...(roles ? { audienceRoles: roles } : {}),
       ...(app ? { appRole: app } : {}),
       orderId: null, announcementId, title, body, ...release,
@@ -37,7 +37,7 @@ export function appendAnnouncement(store, { audience, title, body, imageUrl = nu
     });
   }
   // Fresh anonymous installs have no appRole. Never guess their installed app.
-  const unclaimed = unclaimedDeviceTokens(store).filter(device => (app ? device.appRole === app : audience === "everyone")
+  const unclaimed = (recipientIds ? [] : unclaimedDeviceTokens(store)).filter(device => (app ? device.appRole === app : audience === "everyone")
     && (!releaseChannel || installChannelOf(device) === releaseChannel));
   audit(store, {
     actor, action: "announcement.broadcast", entityType: "announcement", entityId: announcementId,

@@ -336,6 +336,7 @@ import {
   saveDeviceTokenStore,
   saveStore,
 } from "./postgres-store.js";
+import { PLAY_OPTIN_COPY } from './play-optin.js';
 import { isTesterProgramRoute, routeTesterProgram as routePlayTesterProgram } from './tester-program.js';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -438,10 +439,21 @@ async function refreshFoundingTester(store, clientId) {
   });
 }
 
-async function save(view) {
+async function save(view, { notificationsOnly = false } = {}) {
   // A test operations view commits through its underlying full store.
   const store = mergeTestOperationsView(view);
   if (store !== view) moveQueuedInvalidates(view, store);
+  if (notificationsOnly) {
+    // Tester broadcasts share the durable save/outbox/realtime boundary but
+    // never invoke order, file, reward or lifecycle maintenance.
+    const previousIds = originalNotificationIds(store);
+    const created = store.notifications.filter(notification => !previousIds.has(notification.id));
+    await saveStore(database, store);
+    const queued = await enqueueNotificationPushes(database, store, created);
+    if (queued > 0 && (pushDelivery.configured || webPushDelivery.configured)) database.afterCommit(kickPushDrain);
+    await realtimeTransport.enqueue(store, created);
+    return;
+  }
   const scope = clientSaveScope(store);
   const maintenance = saveMaintenanceView(store);
   const flushMaintenanceInvalidates = () => { if (maintenance !== store) moveQueuedInvalidates(maintenance, store); };
@@ -2571,7 +2583,16 @@ async function handleAuditedRequest(req, res) {
       if (role && (!EVENT_ROLES.includes(role) || !hasRole(identityStore, auth.user.id, role))) return send(res, 403, { error: 'forbidden' });
       const user = selectActorRole(identityStore, auth.user, role || auth.user.role, { restrictMemberships: Boolean(role) });
       const result = await routePlayTesterProgram({ req, url, user, database, readBody, now,
-        auditEvent: entry => appendTesterProgramAudit(database, entry, now()) });
+        auditEvent: entry => appendTesterProgramAudit(database, entry, now()),
+        broadcast: async ({ app, recipientIds, actor, at }) => {
+          const store = await load();
+          const { announcement } = appendAnnouncement(store, {
+            audience: `${app}s`, app, recipientIds, actor, type: 'play_optin',
+            title: 'Help us launch GRIDGO on Play', body: PLAY_OPTIN_COPY,
+          }, { id, at, audit });
+          await save(store, { notificationsOnly: true });
+          return announcement;
+        } });
       return send(res, result.status, result.body);
     }
 
