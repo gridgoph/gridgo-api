@@ -6,6 +6,7 @@ import { defaultOperationalSettings } from '../src/operational-model.js';
 import { resetDatabase } from './fixtures/reset-database.js';
 import { apiForTest } from './fixtures/reschedule-http.js';
 import { routeHomePromotions, recordPromotionEvent } from '../src/home-promotions.js';
+import { up as migrateColor } from '../migrations/1794316000000_home_promotion_color.js';
 import { seedDevelopmentPromotion } from '../src/seed-home-promotions.js';
 
 const DB = process.env.DATABASE_URL;
@@ -159,4 +160,88 @@ test('promotion writes, media references, audits and staff inbox rows roll back 
   assert.deepEqual(after.files, before.files);
   assert.deepEqual(after.auditLog, before.auditLog);
   assert.deepEqual(after.notifications, before.notifications);
+});
+
+
+test('color migration backfills both legacy styles, including removed rows, and constrains storage', { skip: !DB }, async t => {
+  const db = createDatabase({ DATABASE_URL: DB }); t.after(() => db.close());
+  await db.transaction(async () => {
+    // Isolate both the table and trigger function from the already-migrated public schema.
+    await db.query('CREATE SCHEMA promotion_color_migration_test');
+    await db.query('SET LOCAL search_path TO promotion_color_migration_test, public');
+    await db.query('CREATE TABLE home_promotions (id text, style text, removed_at timestamptz)');
+    await db.query("INSERT INTO home_promotions VALUES ('light','light',NULL),('yellow','yellow',now())");
+    const statements = [];
+    await migrateColor({ sql: sql => statements.push(sql) });
+    for (const sql of statements) await db.query(sql);
+    assert.deepEqual((await db.query('SELECT id,color FROM home_promotions ORDER BY id')).rows,
+      [{ id: 'light', color: '#FFFFFF' }, { id: 'yellow', color: '#FFDE58' }]);
+    for (const color of [null, '#abcdef', '#FFF', '#123456\n']) {
+      await db.query('SAVEPOINT bad_color');
+      await assert.rejects(db.query('UPDATE home_promotions SET color=$1', [color]), error => ['23502', '23514'].includes(error.code));
+      await db.query('ROLLBACK TO SAVEPOINT bad_color');
+    }
+    await db.query('DROP SCHEMA promotion_color_migration_test CASCADE');
+  });
+});
+
+test('both staff roles write colors; all read projections derive legacy style; legacy patches replace color', { skip: !DB }, async t => {
+  const { db, api } = await setup(t);
+  const { style, ...colorValues } = values;
+  for (const role of ['ops', 'admin']) {
+    const created = await api(role, 'POST', '/ops/promotions', { ...colorValues, color: '#aBcDef' });
+    assert.equal(created.status, 201, JSON.stringify(created.body));
+    const promo = created.body.promotion, path = `/ops/promotions/${promo.id}`;
+    assert.equal(promo.color, '#ABCDEF'); assert.equal(promo.style, 'light');
+    assert.equal((await db.query('SELECT color FROM home_promotions WHERE id=$1', [promo.id])).rows[0].color, '#ABCDEF');
+    for (const color of [null, '#fff', '#12345678', 'red', '#123456\n']) {
+      const response = await api(role, 'PATCH', path, { color });
+      assert.equal(response.status, 400); assert.equal(response.body.field, 'color');
+    }
+    assert.equal((await api(role, 'PATCH', path, { name: 'Kept color' })).body.promotion.color, '#ABCDEF');
+    for (const [legacyStyle, color] of [['yellow', '#FFDE58'], ['light', '#FFFFFF']]) {
+      const updated = await api(role, 'PATCH', path, { style: legacyStyle });
+      assert.equal(updated.body.promotion.color, color); assert.equal(updated.body.promotion.style, legacyStyle);
+    }
+    await api(role, 'PATCH', path, { color: '#ffde58', style: 'light' });
+    // Reads must derive style from color even if the retained compatibility column disagrees.
+    await db.query("UPDATE home_promotions SET style='light',color='#FFFFFF' WHERE id=$1", [promo.id]);
+    await db.query("UPDATE home_promotions SET color='#FFDE58' WHERE id=$1", [promo.id]);
+    for (const [reader, route] of [[role, path], [role, '/ops/promotions'], ['client', '/me/promotions/home']]) {
+      const response = await api(reader, 'GET', route);
+      const result = response.body.promotion || response.body.promotions.find(p => p.id === promo.id);
+      assert.equal(result.color, '#FFDE58'); assert.equal(result.style, 'yellow');
+    }
+  }
+});
+
+
+test('previous API writer SQL can create and edit promotions after the color migration', { skip: !DB }, async t => {
+  const { db, api } = await setup(t);
+  // Frozen FIELDS order and generated SQL from home-promotions.js at 980da2eb.
+  // The previous API sends every old column on PATCH, but never sends color.
+  const columns = ['name', 'logo_file_id', 'image_file_id', 'description', 'tag', 'link_text',
+    'link_url', 'tap_action', 'style', 'starts_at', 'ends_at', 'enabled', 'display_order'];
+  const oldValues = style => ['Legacy', 'promo_logo', null, '', 'partner', 'Visit',
+    'https://davaogo.app/', 'sheet', style, values.startsAt, null, true, 1];
+  const insert = `INSERT INTO home_promotions(id,${columns.join(',')},created_at,updated_at)
+    VALUES ($1,${columns.map((_, n) => `$${n + 2}`).join(',')},$15,$15) RETURNING *`;
+  const update = `UPDATE home_promotions SET ${columns.map((column, n) => `${column}=$${n + 2}`).join(',')},updated_at=$15
+    WHERE id=$1 RETURNING *`;
+  for (const [style, color] of [['light', '#FFFFFF'], ['yellow', '#FFDE58']]) {
+    const id = `legacy_${style}`;
+    const created = await db.transaction(() => db.query(insert, [id, ...oldValues(style), at]));
+    assert.equal(created.rows[0].color, color);
+    const nextStyle = style === 'light' ? 'yellow' : 'light';
+    const nextColor = nextStyle === 'yellow' ? '#FFDE58' : '#FFFFFF';
+    const changed = await db.transaction(() => db.query(update, [id, ...oldValues(nextStyle), at]));
+    assert.equal(changed.rows[0].color, nextColor);
+    const read = (await api('ops', 'GET', `/ops/promotions/${id}`)).body.promotion;
+    assert.equal(read.style, nextStyle); assert.equal(read.color, nextColor);
+    // New writers may change both fields together; explicit custom color wins.
+    await db.transaction(() => db.query("UPDATE home_promotions SET style='light',color='#3366CC' WHERE id=$1", [id]));
+    const renamed = await db.transaction(() => db.query(update, [id, ...oldValues('light'), at]));
+    assert.equal(renamed.rows[0].color, '#3366CC');
+    assert.equal((await api('ops', 'PATCH', `/ops/promotions/${id}`, { color: '#3366CC' })).body.promotion.color, '#3366CC');
+  }
 });

@@ -25,9 +25,9 @@ export async function seedDevelopmentPromotion(database, { objectStorage, now = 
     bindPromotionMedia(store, promotionId, { logo: { fileId } }, at);
     await saveStore(database, store);
     await database.query(`INSERT INTO home_promotions(id,name,logo_file_id,description,tag,link_text,link_url,
-      tap_action,style,starts_at,enabled,display_order,created_at,updated_at)
+      tap_action,style,color,starts_at,enabled,display_order,created_at,updated_at)
       VALUES ($1,'DavaoGo',$2,'Our partner app in Davao. Tap to visit.','partner','Visit DavaoGo',
-        'https://davaogo.app/','sheet','yellow',$3,true,1,$3,$3)`, [promotionId, fileId, at]);
+        'https://davaogo.app/','sheet','yellow','#FFDE58',$3,true,1,$3,$3)`, [promotionId, fileId, at]);
     return true;
   });
 }
