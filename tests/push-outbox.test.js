@@ -290,3 +290,24 @@ test("token pruning waits for an in-flight domain mutation to commit", async () 
   assert.equal(committed, true);
   assert.deepEqual(f.pruned, [["d0", "u", "token-0"]]);
 });
+
+test('Play campaign push requires Android, exact app and non-Play channel and rechecks opt-in before retries', async () => {
+  const { createOutboxWorker } = await import('../src/push-outbox.js');
+  const f = workerFixture(1);
+  const n = { ...f.store.notifications[0], type: 'play_optin' };
+  const device = { ...f.store.deviceTokens[0], platform: 'android', installChannel: 'apk' };
+  f.store.notifications = [n]; f.store.deviceTokens = [device];
+  assert.equal(deviceAcceptsNotification(f.store, device, n), true);
+  for (const patch of [{platform:'ios'},{platform:'web'},{appRole:null},{appRole:'supplier'},{installChannel:'play'}]) {
+    assert.equal(deviceAcceptsNotification(f.store, { ...device,...patch }, n), false);
+  }
+  let rechecked = 0; let suppressed = 0; let sends = 0;
+  const query = f.database.query;
+  f.database.query = async (sql, values) => {
+    if (sql.includes('SELECT 1 FROM tester_program_settings')) { rechecked++; assert.deepEqual(values,['u','client']); return {rowCount:0}; }
+    if (sql.includes("SET status='suppressed'")) { suppressed++; return {rowCount:1}; }
+    return query(sql,values);
+  };
+  await createOutboxWorker({ ...f,loadStore:async()=>f.store,delivery:{configured:true,send:async()=>{sends++;return [];}} })();
+  assert.equal(rechecked,1); assert.equal(suppressed,1); assert.equal(sends,0);
+});

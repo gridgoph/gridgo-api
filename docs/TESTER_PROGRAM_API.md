@@ -3,8 +3,9 @@
 This program tracks GRIDGO check-ins for explicitly enrolled accounts, separately
 from Founding Tester, referrals and vouchers. Apply migration
 `1794065000000_tester_program` before starting this API. Migration and reference
-seed enroll nobody. There are no Google integrations, push sends, scheduled
-server reminders, order hooks, or changes to order processing.
+seed enroll nobody. The optional [Play opt-in campaign](PLAY_OPTIN_API.md) adds group joining,
+Android broadcasts and enrollment from Play-install reports. There are no
+scheduled server reminders, order hooks, or changes to order processing.
 
 All routes require a Clerk session and database memberships. App values are
 `client`, `supplier`, `rider`. Each `/me` request requires the corresponding app
