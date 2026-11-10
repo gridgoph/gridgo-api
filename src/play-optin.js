@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { identityHasMembership } from './authorization-context.js';
 import { createTesterGoogleGroup } from './tester-google-group.js';
+import { hasKnownPlayInstall, knownPlayInstallSql } from './play-install.js';
 
 const APPS = ['client', 'supplier', 'rider'];
 const googleGroup = createTesterGoogleGroup();
@@ -48,8 +49,8 @@ export function validGoogleEmail(email, googleAccount) {
   if (local.length > 64 || local.startsWith('.') || local.endsWith('.') || local.includes('..')) return false;
   return ['gmail.com', 'googlemail.com'].includes(domain) || googleAccount === true;
 }
-export const playEligible = (config, row, platform, channel) => Boolean(config.campaign_enabled && !config.production_approved_at
-  && platform === 'android' && channel !== 'play' && !row?.opted_in_at && (row?.dismiss_count || 0) < 3);
+export const playEligible = (config, row, platform, channel, knownPlayInstall = false) => Boolean(config.campaign_enabled && !config.production_approved_at
+  && platform === 'android' && channel !== 'play' && !knownPlayInstall && !row?.opted_in_at && (row?.dismiss_count || 0) < 3);
 const stepFor = row => row?.opted_in_at ? 'opted_in' : row?.optin_opened_at ? 'install_from_play'
   : row?.group_joined_at || row?.group_opened_at ? 'open_optin' : row?.email ? 'join_group' : 'confirm_gmail';
 async function ownRow(database, userId, app) {
@@ -63,9 +64,13 @@ async function markOptedIn(database, userId, app, at, source, actor, auditEvent)
   const row = await ownRow(database, userId, app);
   if (row.opted_in_at) return;
   await database.query(`UPDATE tester_program_play_optins SET opted_in_at=$3,opted_in_source=$4,updated_at=$3 WHERE user_id=$1 AND app=$2`, [userId, app, at, source]);
+  // Opt-in is independent of staff enrollment. A prior explicit removal can
+  // only be reversed by POST /ops/testers, never by install telemetry or a mark.
   const id = randomUUID();
   const enrolled = await database.query(`INSERT INTO tester_program_enrollments(id,user_id,app,added_at,added_by)
-    VALUES($1,$2,$3,$4,$5) ON CONFLICT(user_id,app) WHERE removed_at IS NULL DO NOTHING RETURNING id`, [id, userId, app, at, actor.id]);
+    SELECT $1,$2,$3,$4,$5 WHERE NOT EXISTS (
+      SELECT 1 FROM tester_program_enrollments WHERE user_id=$2 AND app=$3 AND removed_at IS NOT NULL
+    ) ON CONFLICT(user_id,app) WHERE removed_at IS NULL DO NOTHING RETURNING id`, [id, userId, app, at, actor.id]);
   if (enrolled.rowCount) await auditEvent({ actor, action: 'tester_program.enrolled', entityType: 'tester_program', entityId: id, detail: { userId, app, source } });
   await auditEvent({ actor, action: 'tester_program.play_opted_in', entityType: 'tester_program', entityId: userId, detail: { app, source } });
 }
@@ -120,22 +125,22 @@ export async function routePlayOptin({ req, url, user, database, readBody, audit
         LEFT JOIN tester_program_play_optins p ON p.user_id=u.id AND p.app=$1
         WHERE COALESCE(d.data->>'installChannel','apk') <> 'play' AND p.opted_in_at IS NULL
         AND COALESCE(p.dismiss_count,0)<3 AND COALESCE(p.last_channel,'sideload')<>'play'
-        AND NOT EXISTS(SELECT 1 FROM device_tokens pd WHERE pd.user_id=u.id AND pd.platform='android'
-          AND pd.data->>'appRole'=$1 AND pd.data->>'installChannel'='play')`, [app])).rows.map(row => row.id);
+        AND NOT ${knownPlayInstallSql('u.id', '$1')}`, [app])).rows.map(row => row.id);
       const announcement = await broadcast({ app, recipientIds: recipients, actor: user, at });
       return { status: 201, body: { announcement } };
     }
+    const knownPlayInstall = await hasKnownPlayInstall(database, user.id, app);
     if (read) {
       await ensureRow(database, user.id, app, at);
       await database.query(`UPDATE tester_program_play_optins SET last_channel=$3,last_platform=$4,updated_at=$5 WHERE user_id=$1 AND app=$2`, [user.id, app, channel, platform, at]);
-      if (platform === 'android' && channel === 'play') await markOptedIn(database, user.id, app, at, 'play_channel', user, auditEvent);
+      if (knownPlayInstall || (platform === 'android' && channel === 'play')) await markOptedIn(database, user.id, app, at, 'play_channel', user, auditEvent);
     }
     const row = await ownRow(database, user.id, app);
-    const state = () => ({ app, show: playEligible(config, row, platform, channel), step: stepFor(row),
+    const state = () => ({ app, show: playEligible(config, row, platform, channel, knownPlayInstall), step: stepFor(row),
       gmailSuggestion: row?.email || user.email || null, ...publicConfig(config, groups), optedIn: Boolean(row?.opted_in_at),
       dismissCount: row?.dismiss_count || 0, playStoreUrl: `https://play.google.com/store/apps/details?id=ph.gridgo.${app}` });
     if (read) return ok(state());
-    if (!playEligible(config, row, platform, channel)) return fail(409, 'campaign_not_available');
+    if (!playEligible(config, row, platform, channel, knownPlayInstall)) return fail(409, 'campaign_not_available');
     if (!row) return fail(409, 'install_not_reported');
     if (url.pathname.endsWith('/confirm-gmail')) {
       const email = typeof body.email === 'string' ? body.email.toLowerCase() : body.email;

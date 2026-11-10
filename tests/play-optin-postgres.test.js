@@ -143,3 +143,91 @@ test('broadcast targets eligible Android installs of one app, uses outbox, and l
   checked(await api('ops','PATCH','/ops/testers/settings',{app:'client',campaignEnabled:false}));
   checked(await api('ops','POST','/ops/testers/broadcast',{app:'client'}),409);
 });
+
+test('first Play detection records opt-in without reversing staff removal, for every app', { skip: !DB }, async t => {
+  const { db, api } = await setup(t);
+  for (const app of ['client', 'supplier', 'rider']) {
+    checked(await api('ops', 'POST', '/ops/testers', { app, email: `${app}@example.invalid` }));
+    checked(await api('ops', 'DELETE', `/ops/testers/${app}/${app}`));
+    const removed = (await db.query('SELECT * FROM tester_program_enrollments WHERE user_id=$1 AND app=$2', [app, app])).rows;
+    assert.equal(checked(await api(app, 'GET', `/me/tester-program?app=${app}`)).enrolled, false);
+    const play = checked(await api(app, 'GET', own(app, 'play')));
+    assert.equal(play.optedIn, true); assert.equal(play.show, false);
+    assert.equal(checked(await api(app, 'GET', `/me/tester-program?app=${app}`)).enrolled, false);
+    checked(await api(app, 'POST', '/me/tester-program/check-in', { app, version: 'test-play', source: 'open' }), 404);
+    assert.deepEqual((await db.query('SELECT * FROM tester_program_enrollments WHERE user_id=$1 AND app=$2', [app, app])).rows, removed);
+    assert.equal(checked(await api('ops', 'GET', `/ops/testers?app=${app}`)).playOptIn.optedInCount, 1);
+    // Only explicit staff enrollment reverses removal; another Play report
+    // preserves the newly active run, then still respects a later removal.
+    checked(await api('ops', 'POST', '/ops/testers', { app, email: `${app}@example.invalid` }));
+    const active = (await db.query('SELECT * FROM tester_program_enrollments WHERE user_id=$1 AND app=$2 AND removed_at IS NULL', [app, app])).rows;
+    checked(await api(app, 'GET', own(app, 'play')));
+    assert.deepEqual((await db.query('SELECT * FROM tester_program_enrollments WHERE user_id=$1 AND app=$2 AND removed_at IS NULL', [app, app])).rows, active);
+    checked(await api('ops', 'DELETE', `/ops/testers/${app}/${app}`));
+    checked(await api(app, 'GET', own(app, 'play')));
+    assert.equal(checked(await api(app, 'GET', `/me/tester-program?app=${app}`)).enrolled, false);
+  }
+});
+
+test('staff opt-in marking preserves removal and removal in another app does not block first enrollment', { skip: !DB }, async t => {
+  const { db, api } = await setup(t);
+  checked(await api('ops', 'POST', '/ops/testers', { app: 'client', email: 'other@example.invalid' }));
+  checked(await api('ops', 'DELETE', '/ops/testers/client/other'));
+  checked(await api('ops', 'POST', '/ops/testers/client/other/opt-in', {}));
+  assert.equal(checked(await api('other', 'GET', own())).optedIn, true);
+  assert.equal(checked(await api('other', 'GET', '/me/tester-program?app=client')).enrolled, false);
+  await db.query("INSERT INTO user_role_memberships(user_id,role,created_at) VALUES ('supplier','client',now())");
+  checked(await api('ops', 'POST', '/ops/testers', { app: 'supplier', email: 'supplier@example.invalid' }));
+  checked(await api('ops', 'DELETE', '/ops/testers/supplier/supplier'));
+  checked(await api('supplier', 'GET', own('client', 'play')));
+  assert.equal(checked(await api('supplier', 'GET', '/me/tester-program?app=client')).enrolled, true);
+  assert.equal(checked(await api('supplier', 'GET', '/me/tester-program?app=supplier')).enrolled, false);
+});
+
+test('a registered same-app Android Play install hides an APK Home card before its first campaign report', { skip: !DB }, async t => {
+  const { db, api, enable } = await setup(t);
+  for (const app of ['client', 'supplier', 'rider']) {
+    await enable(app);
+    checked(await api(app, 'POST', '/devices', { token: `known-${app}-play`, appRole: app, platform: 'android', installChannel: 'play' }), 201);
+    checked(await api(app, 'POST', '/devices', { token: `known-${app}-apk`, appRole: app, platform: 'android', installChannel: 'apk' }), 201);
+    assert.equal((await db.query('SELECT count(*) FROM tester_program_play_optins WHERE user_id=$1 AND app=$2', [app, app])).rows[0].count, 0);
+    assert.equal(checked(await api('ops', 'POST', '/ops/testers/broadcast', { app }), 201).announcement.notifiedUsers, 0);
+    const state = checked(await api(app, 'GET', own(app)));
+    assert.equal(state.show, false); assert.equal(state.optedIn, true); assert.equal(state.step, 'opted_in');
+    assert.equal(checked(await api(app, 'GET', `/me/tester-program?app=${app}`)).enrolled, true);
+    // Removing the registration later must not clear the observed opt-in.
+    checked(await api(app, 'POST', '/devices/unregister', { token: `known-${app}-play` }));
+    assert.equal(checked(await api(app, 'GET', own(app))).show, false);
+  }
+});
+
+test('known Play registration excludes campaign writes even before Home refreshes and preserves removed enrollment', { skip: !DB }, async t => {
+  const { db, api, enable } = await setup(t); await enable();
+  checked(await api('client', 'GET', own()));
+  checked(await api('ops', 'POST', '/ops/testers', { app: 'client', email: 'client@example.invalid' }));
+  checked(await api('ops', 'DELETE', '/ops/testers/client/client'));
+  checked(await api('client', 'POST', '/devices', { token: 'known-client-play', appRole: 'client', platform: 'android', installChannel: 'play' }), 201);
+  assert.equal(checked(await api('client', 'POST', '/me/play-optin/confirm-gmail', { app: 'client', email: 'tester@gmail.com', ...install }), 409).error, 'campaign_not_available');
+  assert.equal(checked(await api('client', 'POST', '/me/play-optin/event', { app: 'client', type: 'tapped', ...install }), 409).error, 'campaign_not_available');
+  const row = (await db.query("SELECT * FROM tester_program_play_optins WHERE user_id='client' AND app='client'")).rows[0];
+  assert.equal(row.email, null); assert.equal(row.tapped_at, null);
+  const state = checked(await api('client', 'GET', own()));
+  assert.equal(state.show, false); assert.equal(state.optedIn, true);
+  assert.equal(checked(await api('client', 'GET', '/me/tester-program?app=client')).enrolled, false);
+});
+
+test('known Play lookup ignores other accounts, apps, unknown app scopes and non-Android registrations', { skip: !DB }, async t => {
+  const { db, api, enable } = await setup(t); await enable(); await enable('supplier');
+  // A multi-role supplier can have Play on a different app without opting
+  // their supplier app in. Registration still uses the real membership gate.
+  await db.query("INSERT INTO user_role_memberships(user_id,role,created_at) VALUES ('supplier','client',now())");
+  checked(await api('supplier', 'POST', '/devices', { token: 'scope-other-app', appRole: 'client', platform: 'android', installChannel: 'play' }), 201);
+  checked(await api('other', 'POST', '/devices', { token: 'scope-other-account', appRole: 'client', platform: 'android', installChannel: 'play' }), 201);
+  checked(await api('client', 'POST', '/devices', { token: 'scope-unknown-app', platform: 'android', installChannel: 'play' }), 201);
+  checked(await api('client', 'POST', '/devices', { token: 'scope-web', appRole: 'client', platform: 'web', installChannel: 'play' }), 201);
+  checked(await api('client', 'POST', '/devices', { token: 'scope-ios', appRole: 'client', platform: 'ios', installChannel: 'play' }), 201);
+  assert.equal(checked(await api('client', 'GET', own())).show, true);
+  assert.equal(checked(await api('supplier', 'GET', own('supplier'))).show, true);
+  checked(await api('client', 'POST', '/me/play-optin/confirm-gmail', { app: 'client', email: 'tester@gmail.com', ...install }));
+  assert.equal((await db.query('SELECT count(*) FROM tester_program_enrollments')).rows[0].count, 0);
+});

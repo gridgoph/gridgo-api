@@ -30,14 +30,20 @@ responses are private and noncached. Errors use `{ "error": "snake_case" }`.
 `platform` is `android | ios | web`; `channel` is `play | sideload` (apps map their
 APK distribution to `sideload`; device registration retains its existing `apk`
 value). Both are required on GET and every own POST below. GET records the
-install report under the transaction lock. An Android `play` report permanently
-records `optedIn=true` with source `play_channel`, and idempotently enrolls the
-account/app in the existing tester program. It does not check in. Existing
+install report under the transaction lock. An Android `play` report, or an
+existing Android Play device registration scoped to this account and app,
+permanently records `optedIn=true` with source `play_channel`. It idempotently
+enrolls the account/app if staff has not previously removed it from the program. It does not check in. Existing
 active enrollments and completed runs are preserved. Operations removal still
-requires explicit re-enrollment; repeated Play reports do not undo removal.
+requires explicit re-enrollment through `POST /ops/testers`, even when removal
+precedes the first Play detection or staff opt-in mark. Opt-in is recorded
+without restarting the removed tester program; active runs are preserved.
 
 `show` is true only for Android, non-Play, campaign enabled, no production
-approval, no recorded opt-in, and fewer than three dismissals. Card and push taps
+approval, no recorded opt-in or known same-app Android Play install, and fewer
+than three dismissals. A known Play registration also refuses campaign POSTs
+before Home refreshes; another account/app or an unscoped/non-Android device
+does not count as this app's Play install. Card and push taps
 open this flow. Always honor `show`; do not infer eligibility from cached local
 state. An old APK reporting again never clears an earlier opt-in. Install reports
 are app telemetry, not Google verification and never an authorization grant.
@@ -118,15 +124,17 @@ uses the configured target. Adds:
 ```
 
 `playOptIn.optedInCount` counts app reports plus staff confirmations;
-`detectedPlayCount` counts reports with `play_channel` source only. These are
+`detectedPlayCount` counts opt-ins first detected from a Play report or known
+app-scoped Android Play registration (`play_channel` source). These are
 GRIDGO signals, not a replacement for Google's authoritative Console figure.
 Label that figure separately. `unfinished` contains at most 500 newest users
 who tapped/confirmed/opened but lack opt-in, sorted by last activity; Gmail may
 be null before confirmation. Dismissed users remain visible for follow-up.
 
 `POST /ops/testers/:app/:userId/opt-in {}` manually confirms an existing member
-and enrolls them, without altering an active run. Returns `200 {"ok":true}`;
-missing membership is `404 user_not_found`. Confirmation is sticky and audited.
+and enrolls them if they have never been explicitly removed, without altering
+an active run. Use `POST /ops/testers` to re-enroll a removed tester. Returns
+`200 {"ok":true}`; missing membership is `404 user_not_found`. Confirmation is sticky and audited.
 
 `POST /ops/testers/broadcast {"app":"client"}` returns `201 {"announcement":...}`
 with existing announcement metadata/counts. Requires enabled campaign and group
