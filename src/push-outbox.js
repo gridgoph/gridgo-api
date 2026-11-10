@@ -1,3 +1,4 @@
+import { playBelowTargetSql } from './play-optin.js';
 import { knownPlayInstallSql } from './play-install.js';
 import { listWebSubscriptions } from "./web-push.js";
 import { seasonPushAllowed } from "./season-windows.js";
@@ -145,8 +146,8 @@ export function createOutboxWorker({
           const allowed = await database.query(`SELECT 1 FROM tester_program_settings s
             LEFT JOIN tester_program_play_optins p ON p.app=s.app AND p.user_id=$1
             WHERE s.app=$2 AND s.campaign_enabled AND s.production_approved_at IS NULL
+              AND ${playBelowTargetSql()}
               AND p.opted_in_at IS NULL AND COALESCE(p.dismiss_count,0)<3
-              AND COALESCE(p.last_channel,'sideload')<>'play'
               AND NOT ${knownPlayInstallSql('$1', '$2')}`, [n.userId, n.appRole]);
           if (!allowed.rowCount) {
             await database.query("UPDATE notification_push_outbox SET status='suppressed',updated_at=now() WHERE id=$1 AND status='sending' AND attempts=$2", [row.id, row.attempts]);

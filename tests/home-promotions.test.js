@@ -41,3 +41,19 @@ test('promotion media is staff uploaded, client readable and retained while boun
   assert.equal(retentionDecision({}, file, '2026-11-10T00:00:00Z').eligible, false);
   assert.throws(() => assertEarlyFileDeletion({}, file, { role: 'super_admin' }, 'Remove'), error => error.code === 'file_in_use');
 });
+
+
+test('promotion color is strict hex, uppercase, authoritative, and compatible with legacy style patches', () => {
+  const { style, ...colorOnly } = promotion;
+  const custom = validatePromotion({ ...colorOnly, color: '#abcdef' });
+  assert.equal(custom.color, '#ABCDEF');
+  assert.equal(custom.style, 'light');
+  assert.equal(validatePromotion(promotion).color, '#FFDE58');
+  assert.equal(validatePromotion({ style: 'light' }, custom).color, '#FFFFFF');
+  assert.equal(validatePromotion({ style: 'yellow' }, custom).color, '#FFDE58');
+  assert.equal(validatePromotion({ name: 'Preserved' }, custom).color, '#ABCDEF');
+  assert.equal(validatePromotion({ color: '#ffde58', style: 'light' }, custom).style, 'yellow');
+  for (const color of [null, 123456, '', '#fff', 'FFFFFF', '#12345678', '#GGGGGG', ' #123456', '#123456 ', '#123456\n']) {
+    assert.throws(() => validatePromotion({ ...promotion, color }), error => error.status === 400 && error.details.field === 'color');
+  }
+});

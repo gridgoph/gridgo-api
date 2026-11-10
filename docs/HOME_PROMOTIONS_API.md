@@ -23,6 +23,7 @@ An explicit `X-GRIDGO-Role` continues to restrict membership context.
   "linkText": "Visit DavaoGo",
   "linkUrl": "https://davaogo.app/",
   "tapAction": "sheet",
+  "color": "#FFDE58",
   "style": "yellow",
   "startsAt": "2026-11-10T00:00:00.000Z",
   "endsAt": null,
@@ -57,7 +58,17 @@ Write validation:
 - `name`: trimmed, required, 1–120 characters; `description`: string, up to 140
   characters (may be empty); `linkText`: trimmed, required, 1–80 characters.
 - `linkUrl`: HTTPS only, maximum 2048 characters, no embedded credentials.
-- `tag`: `partner | sponsored | featured_shop`; `style`: `light | yellow`.
+- `tag`: `partner | sponsored | featured_shop`.
+- `color`: required on new writes unless legacy `style` is supplied; a string
+  containing exactly `#` and six hexadecimal digits (`#RRGGBB`). Lowercase hex
+  is accepted, stored and returned uppercase. Null, shorthand, alpha, names,
+  whitespace and nonstrings return `400 invalid_promotion` with `field: "color"`.
+- Legacy `style: light | yellow` writes still work: `light` sets `#FFFFFF`,
+  `yellow` sets `#FFDE58`. An explicit `color` takes precedence when both are
+  supplied (a supplied `style` must still be valid). PATCH with neither preserves
+  color. Every staff/client response includes `color` and a derived `style`:
+  `yellow` only for `#FFDE58`, otherwise `light`, for installed older apps.
+  New clients should prefer `color` and fall back to `style` on older APIs.
 - `tapAction`: `sheet | link`, default `sheet`.
 - `startsAt`: required ISO timestamp with explicit offset, including seconds;
   `endsAt`: null or a strictly later timestamp. Stored and returned in UTC.
@@ -135,6 +146,19 @@ Apply forward migration `1794283200000_home_promotions` before deploying the
 API. It adds `home_promotions`, `home_promotion_daily_stats`,
 `home_promotion_view_sessions`, and the `home_promotion` file-reference kind.
 It contains no production data.
+
+Then apply `1794316000000_home_promotion_color` before deploying the color-aware
+API. It adds a nonnull uppercase six-digit hex `color` column and backfills all
+existing rows (including disabled/removed rows) from `style`: light to `#FFFFFF`,
+yellow to `#FFDE58`. It preserves media, dates, counters and permissions.
+A table-scoped BEFORE trigger keeps the previous API writer working while the
+migration is applied before API replacement: inserts omitting color derive it
+from style, and updates that change style without changing color derive the new
+color from style. Updates that change color retain that explicit value; unrelated
+legacy edits preserve custom colors. The color-aware API validates explicit null
+and invalid colors before SQL. Keep this compatibility trigger while old API
+processes may still write promotions. Deploy this API before the color-picker
+clients: the previous API rejects an unknown `color` request field.
 
 `npm run seed:dev` adds the committed DavaoGo logo to MinIO and its metadata to
 PostgreSQL, then creates an enabled Partner promotion with the fields above,

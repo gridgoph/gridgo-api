@@ -5,9 +5,11 @@ import { manilaDate } from './season-windows.js';
 
 const FIELDS = {
   name: 'name', logo: 'logo_file_id', image: 'image_file_id', description: 'description', tag: 'tag',
-  linkText: 'link_text', linkUrl: 'link_url', tapAction: 'tap_action', style: 'style',
+  linkText: 'link_text', linkUrl: 'link_url', tapAction: 'tap_action', style: 'style', color: 'color',
   startsAt: 'starts_at', endsAt: 'ends_at', enabled: 'enabled', displayOrder: 'display_order',
 };
+const colorForStyle = style => style === 'yellow' ? '#FFDE58' : '#FFFFFF';
+const styleForColor = color => color === '#FFDE58' ? 'yellow' : 'light';
 const staff = user => ['super_admin', 'ops_admin'].some(role => identityHasMembership(user, role));
 const fail = (status, code, field) => { throw Object.assign(new Error(code), { status, code, details: field ? { field } : {} }); };
 const invalid = field => fail(400, 'invalid_promotion', field);
@@ -37,10 +39,16 @@ export function validatePromotion(body, previous = null) {
     if (typeof input[field] !== 'string' || input[field].trim().length > max || (required && !input[field].trim())) invalid(field);
     value[field] = input[field].trim();
   }
-  for (const [field, options] of [['tag', ['partner', 'sponsored', 'featured_shop']], ['style', ['light', 'yellow']], ['tapAction', ['sheet', 'link']]]) {
+  for (const [field, options] of [['tag', ['partner', 'sponsored', 'featured_shop']], ['tapAction', ['sheet', 'link']]]) {
     if (!options.includes(input[field])) invalid(field);
     value[field] = input[field];
   }
+  if (Object.hasOwn(body, 'style') && !['light', 'yellow'].includes(body.style)) invalid('style');
+  const color = Object.hasOwn(body, 'color') ? body.color
+    : Object.hasOwn(body, 'style') ? colorForStyle(body.style) : input.color;
+  if (typeof color !== 'string' || color.length !== 7 || !/^#[0-9a-fA-F]{6}$/.test(color)) invalid('color');
+  value.color = color.toUpperCase();
+  value.style = styleForColor(value.color);
   let link;
   try { link = new URL(input.linkUrl); } catch { invalid('linkUrl'); }
   if (typeof input.linkUrl !== 'string' || input.linkUrl.length > 2048 || link.protocol !== 'https:' || !link.hostname || link.username || link.password) invalid('linkUrl');
@@ -63,8 +71,9 @@ export function validatePromotion(body, previous = null) {
 }
 
 function valuesFromRow(row) {
-  return Object.fromEntries(Object.entries(FIELDS).map(([js, sql]) => [js,
+  const value = Object.fromEntries(Object.entries(FIELDS).map(([js, sql]) => [js,
     ['logo', 'image'].includes(js) ? (row[sql] ? { fileId: row[sql] } : null) : row[sql]]));
+  return { ...value, style: styleForColor(value.color) };
 }
 
 async function project(row, { storage, store, at, totals = false }) {
