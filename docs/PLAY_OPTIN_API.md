@@ -5,6 +5,11 @@ Apply migration `1794286800000_play_optin_campaign`. It inserts missing per-app
 settings with `campaignEnabled=false`, `target=12` and
 `https://play.google.com/apps/testing/ph.gridgo.<app>`. It enrolls nobody and sends
 nothing. Reference seed does not reset these settings.
+Apply `1794314000000_play_optin_daily_reminders` before this API release. It adds
+per-app daily reminder settings and durable daily run/recipient records; existing
+campaigns keep their enabled state. Daily reminders default on at 10 AM Manila,
+but disabled campaigns send nothing. Prior manual campaign notifications are
+backfilled into the daily recipient ledger to prevent deployment-day duplicates.
 
 ## API contract
 
@@ -103,7 +108,8 @@ or staff confirmation. Staff must reconcile this with the Play Console count.
 `PATCH /ops/testers/settings` retains existing fields and adds optional
 `campaignEnabled` (boolean), `optInUrl` (HTTPS Play `/apps/testing/<package>` URL),
 `groupJoinUrl` (HTTPS `groups.google.com/g/...` or managed-domain `groups.google.com/a/<domain>/g/...` URL or null), and `target`
-(integer 1–10000), alongside required `app`. Omitted values stay unchanged.
+(integer 1–10000), `dailyReminderEnabled` (boolean, default true), and
+`dailyReminderHour` (integer 0–23, default 10, Asia/Manila), alongside required `app`. Omitted values stay unchanged.
 `optedInCount` remains the manually entered Play Console figure. This is tester
 configuration, with the existing Operations/Super Admin access and audit.
 
@@ -114,6 +120,7 @@ uses the configured target. Adds:
 {
   "playOptIn":{
     "campaignEnabled":false,"target":12,"groupMode":"link",
+    "dailyReminderEnabled":true,"dailyReminderHour":10,
     "optInUrl":"https://play.google.com/apps/testing/ph.gridgo.client",
     "groupJoinUrl":null,"optedInCount":1,"detectedPlayCount":1,
     "playConsoleOptedInCount":5,
@@ -138,9 +145,31 @@ an active run. Use `POST /ops/testers` to re-enroll a removed tester. Returns
 
 `POST /ops/testers/broadcast {"app":"client"}` returns `201 {"announcement":...}`
 with existing announcement metadata/counts. Requires enabled campaign and group
-configuration (`409 campaign_disabled` / `group_not_configured`). Trigger client
-and supplier first; enable/trigger rider separately later. There is no automatic
-send or schedule. Each POST is an intentional new broadcast.
+configuration (`409 campaign_disabled` / `group_not_configured`). A completed
+target returns `409 campaign_target_reached`. Trigger client and supplier first;
+enable/trigger rider separately later. Each POST records an announcement, but
+recipients already queued a campaign push for this app on this Manila date are
+excluded (including automatic reminders); its notified count can be zero.
+
+The existing API lifecycle scheduler automatically records one reminder run per
+app per Manila date, at or after `dailyReminderHour`, while
+`dailyReminderEnabled` and `campaignEnabled` are true. A restart after that hour
+catches up the current day only; earlier dates are never replayed. Each app stops
+when production is approved or either its recorded opt-in count or the manually
+entered Play Console `optedInCount` reaches `target` (12 by default). Group
+configuration is required, just as for manual broadcasts. Disabling daily
+reminders leaves manual broadcasts available.
+
+Automatic reminders use the same copy, `play_optin` deep link, announcement audit,
+inbox and committed push outbox as the manual broadcast. Daily run records,
+per-person/app/date recipient claims, notifications and the outbox commit in one
+transaction under the domain lock. Competing API instances, retries and restarts
+cannot enqueue another campaign push for that person/app/day. A failed transaction
+rolls back the run and may retry; a committed run never runs again that day. A
+manual broadcast before the reminder consumes the same recipient's daily slot;
+a later manual broadcast can reach newly eligible people but cannot notify the
+same recipient again that day. This is daily enqueue idempotency; transport
+retries retain the existing push outbox delivery guarantees.
 
 It reuses announcement inbox/audit and the committed push outbox, with
 notification `type=play_optin`, `appRole=<app>`, the fixed campaign copy, and no
@@ -149,7 +178,7 @@ order reference. The existing push data allowlist is unchanged (`type`,
 Only accounts with the selected membership and an explicitly app-scoped Android
 non-Play device qualify; no anonymous, unknown-app, iOS, web, or other-app push.
 Any recorded opt-in, Play install of that app, or third dismissal excludes the
-account. The outbox rechecks device/channel/campaign/opt-in before delivery and
+account. The outbox rechecks device/channel/campaign/opt-in, dismissals and target before delivery and
 retry. Campaign broadcasts do not invoke order maintenance.
 
 ## Setup required from the operator
@@ -184,7 +213,9 @@ retry. Campaign broadcasts do not invoke order maintenance.
    the operational fallback. Credential rotation takes effect on API restart.
 3. Set the Console count (currently operator-reported), target, and URLs through
    `/ops/testers/settings`; enable client/supplier only when companion builds
-   support this contract. Trigger broadcasts separately. Enable riders later.
+   support this contract. Daily reminders start automatically at the configured
+   Manila hour while enabled; manual broadcasts share the daily recipient limit.
+   Enable riders later.
    Establish the 14-day Play clock from Play Console, independently of daily
    GRIDGO check-ins; this API cannot establish continuous Google opt-in days.
 

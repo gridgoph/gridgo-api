@@ -336,7 +336,7 @@ import {
   saveDeviceTokenStore,
   saveStore,
 } from "./postgres-store.js";
-import { PLAY_OPTIN_COPY } from './play-optin.js';
+import { PLAY_OPTIN_COPY, runPlayOptinReminders } from './play-optin.js';
 import { isTesterProgramRoute, routeTesterProgram as routePlayTesterProgram } from './tester-program.js';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -437,6 +437,16 @@ async function refreshFoundingTester(store, clientId) {
     if (changed) await save(latest);
     return latest;
   });
+}
+
+async function broadcastPlayOptin({ app, recipientIds, actor, at }) {
+  const store = await load();
+  const { announcement } = appendAnnouncement(store, {
+    audience: `${app}s`, app, recipientIds, actor, type: 'play_optin',
+    title: 'Help us launch GRIDGO on Play', body: PLAY_OPTIN_COPY,
+  }, { id, at, audit });
+  await save(store, { notificationsOnly: true });
+  return announcement;
 }
 
 async function save(view, { notificationsOnly = false } = {}) {
@@ -2585,15 +2595,7 @@ async function handleAuditedRequest(req, res) {
       const user = selectActorRole(identityStore, auth.user, role || auth.user.role, { restrictMemberships: Boolean(role) });
       const result = await routePlayTesterProgram({ req, url, user, database, readBody, now,
         auditEvent: entry => appendTesterProgramAudit(database, entry, now()),
-        broadcast: async ({ app, recipientIds, actor, at }) => {
-          const store = await load();
-          const { announcement } = appendAnnouncement(store, {
-            audience: `${app}s`, app, recipientIds, actor, type: 'play_optin',
-            title: 'Help us launch GRIDGO on Play', body: PLAY_OPTIN_COPY,
-          }, { id, at, audit });
-          await save(store, { notificationsOnly: true });
-          return announcement;
-        } });
+        broadcast: broadcastPlayOptin });
       return send(res, result.status, result.body);
     }
 
@@ -8143,6 +8145,7 @@ async function runLifecycleWork() {
   lifecycleBusy = true;
   try {
     await continueAfterStepFailure([
+      () => runPlayOptinReminders({ database, broadcast: broadcastPlayOptin, at: now() }),
       sweepRescheduleRequests,
       async () => {
         const candidate = await database.query(`SELECT 1 FROM orders

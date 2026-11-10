@@ -6,7 +6,7 @@ export async function resetDatabase(database, sql) {
   // A full domain reset also owns independent configuration tables. They have
   // no user FK, so CASCADE alone leaves the previous desk fixture behind.
   if (/\busers\b/.test(sql) && /\bplatform_settings\b/.test(sql)) {
-    for (const table of ['staff_roles', 'season_windows']) {
+    for (const table of ['staff_roles', 'season_windows', 'tester_program_settings']) {
       if (!new RegExp(`\\b${table}\\b`).test(sql)) sql = sql.replace(/TRUNCATE\s+/i, `TRUNCATE ${table}, `);
     }
   }

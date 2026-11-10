@@ -19,7 +19,7 @@ async function setup(t) {
   await db.transaction(() => saveStore(db, store));
   const api = await apiForTest(t);
   const enable = async (app = 'client') => checked(await api('ops', 'PATCH', '/ops/testers/settings', {
-    app, campaignEnabled: true, groupJoinUrl: 'https://groups.google.com/g/gridgo-testers', target: 12 }));
+    app, campaignEnabled: true, dailyReminderEnabled: false, groupJoinUrl: 'https://groups.google.com/g/gridgo-testers', target: 12 }));
   const event = (type, app = 'client', user = app) => api(user, 'POST', '/me/play-optin/event', { app, type, ...install });
   return { db, api, enable, event, store };
 }
