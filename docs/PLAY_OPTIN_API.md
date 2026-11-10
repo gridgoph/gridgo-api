@@ -154,7 +154,10 @@ excluded (including automatic reminders); its notified count can be zero.
 The existing API lifecycle scheduler automatically records one reminder run per
 app per Manila date, at or after `dailyReminderHour`, while
 `dailyReminderEnabled` and `campaignEnabled` are true. A restart after that hour
-catches up the current day only; earlier dates are never replayed. Each app stops
+catches up the current day only; earlier dates are never replayed. The scheduler
+refreshes its timestamp after acquiring the domain lock and rechecks that day's
+hour and eligibility. A lock wait across midnight cannot consume yesterday's slot;
+if the new day is before the configured hour, it waits for that hour. Each app stops
 when production is approved or either its recorded opt-in count or the manually
 entered Play Console `optedInCount` reaches `target` (12 by default). Group
 configuration is required, just as for manual broadcasts. Disabling daily
@@ -163,8 +166,12 @@ reminders leaves manual broadcasts available.
 Automatic reminders use the same copy, `play_optin` deep link, announcement audit,
 inbox and committed push outbox as the manual broadcast. Daily run records,
 per-person/app/date recipient claims, notifications and the outbox commit in one
-transaction under the domain lock. Competing API instances, retries and restarts
-cannot enqueue another campaign push for that person/app/day. A failed transaction
+transaction under the domain lock. Before claiming recipients, both new manual
+and scheduled sends reconcile that app/day's existing `play_optin` notifications
+into the recipient ledger. This also covers an old server's manual broadcast
+committed after the migration backfill but before replacement. Competing API
+instances, retries and restarts cannot enqueue another campaign push for that
+person/app/day. A failed transaction
 rolls back the run and may retry; a committed run never runs again that day. A
 manual broadcast before the reminder consumes the same recipient's daily slot;
 a later manual broadcast can reach newly eligible people but cannot notify the
@@ -180,6 +187,18 @@ non-Play device qualify; no anonymous, unknown-app, iOS, web, or other-app push.
 Any recorded opt-in, Play install of that app, or third dismissal excludes the
 account. The outbox rechecks device/channel/campaign/opt-in, dismissals and target before delivery and
 retry. Campaign broadcasts do not invoke order maintenance.
+
+## Deployment compatibility
+
+Keep each campaign disabled (`campaignEnabled=false`) while replacing an API
+version that lacks daily recipient deduplication. Stop all old API instances
+before re-enabling campaigns on the new version. Do not leave old manual
+broadcast writers running alongside the enabled new scheduler: an old writer
+cannot consult the new ledger and could send after a new instance has already
+claimed that day's slot. New instances reconcile old notifications already
+committed, including those written after migration, but cannot fence a future
+write from an old binary. Apply the migration before starting the new version;
+resume the desired per-app campaign switches only after replacement completes.
 
 ## Setup required from the operator
 

@@ -8145,7 +8145,7 @@ async function runLifecycleWork() {
   lifecycleBusy = true;
   try {
     await continueAfterStepFailure([
-      () => runPlayOptinReminders({ database, broadcast: broadcastPlayOptin, at: now() }),
+      () => runPlayOptinReminders({ database, broadcast: broadcastPlayOptin, now }),
       sweepRescheduleRequests,
       async () => {
         const candidate = await database.query(`SELECT 1 FROM orders

@@ -7,6 +7,7 @@ import { enqueueNotificationPushes, createOutboxWorker } from '../src/push-outbo
 import * as play from '../src/play-optin.js';
 import { fixture, id } from './fixtures/reschedule.js';
 import { apiForTest } from './fixtures/reschedule-http.js';
+import { resolveAuthorizationContext } from '../src/authorization-context.js';
 import { resetDatabase } from './fixtures/reset-database.js';
 const DB = process.env.DATABASE_URL;
 const checked = (res, status=200) => { assert.equal(res.status,status,JSON.stringify(res.body)); return res.body; };
@@ -30,7 +31,10 @@ async function setup(t) {
     return announcement;
   };
   const broadcast=broadcastFor(db);
-  const run=(at, database=db, send=broadcastFor(database))=>play.runPlayOptinReminders({database,broadcast:send,at});
+  const run=(clock, database=db, send=broadcastFor(database))=>{
+    const now=typeof clock==='function'?clock:()=>clock;
+    return play.runPlayOptinReminders({database,broadcast:send,now});
+  };
   const notices=async()=> (await db.query("SELECT user_id,data->>'appRole' AS app FROM notifications WHERE type='play_optin' ORDER BY user_id,app")).rows;
   return {db,api,enable,device,run,notices,broadcast};
 }
@@ -56,7 +60,7 @@ test('daily reminders use eligible app-scoped Android recipients and existing an
   assert.equal(checked(await api('client','GET','/me/play-optin?app=client&platform=ios&channel=play')).optedIn,false);
   await run('2026-11-10T02:00:00Z');
   assert.deepEqual(await notices(),[{user_id:'client',app:'client'},{user_id:'rider',app:'rider'},{user_id:'supplier',app:'supplier'}]);
-  assert.equal((await db.query('SELECT count(*) FROM notification_push_outbox')).rows[0].count,3);
+  assert.equal((await db.query("SELECT count(*) FROM notification_push_outbox o JOIN notifications n ON n.id=o.notification_id WHERE n.type='play_optin'")).rows[0].count,3);
   const n=(await db.query("SELECT data->>'title' AS title,data->>'body' AS body FROM notifications WHERE type='play_optin' LIMIT 1")).rows[0];
   assert.deepEqual(n,{title:'Help us launch GRIDGO on Play',body:'Help us launch GRIDGO on Play, become a tester.'});
   await device('other','client');
@@ -111,7 +115,7 @@ test('failed run rolls back its ledger, inbox and outbox before a restart retrie
   const {db,enable,device,run,notices,broadcast}=await setup(t); await enable(); await device('client');
   await assert.rejects(run('2026-11-10T02:00:00Z',db,async input=>{await broadcast(input); throw Error('interrupted');}),/interrupted/);
   assert.equal((await notices()).length,0);
-  assert.equal((await db.query('SELECT count(*) FROM notification_push_outbox')).rows[0].count,0);
+  assert.equal((await db.query("SELECT count(*) FROM notification_push_outbox o JOIN notifications n ON n.id=o.notification_id WHERE n.type='play_optin'")).rows[0].count,0);
   assert.equal((await db.query('SELECT count(*) FROM tester_program_play_reminder_runs')).rows[0].count,0);
   await run('2026-11-10T02:00:00Z'); assert.equal((await notices()).length,1);
 });
@@ -122,7 +126,7 @@ test('server startup scheduler commits the normal inbox/outbox and a restarted A
   await apiForTest(t);
   for(let n=0;n<200 && !(await notices()).length;n++) await new Promise(resolve=>setTimeout(resolve,25));
   assert.deepEqual(await notices(),[{user_id:'client',app:'client'}]);
-  assert.equal((await db.query('SELECT count(*) FROM notification_push_outbox')).rows[0].count,1);
+  assert.equal((await db.query("SELECT count(*) FROM notification_push_outbox o JOIN notifications n ON n.id=o.notification_id WHERE n.type='play_optin'")).rows[0].count,1);
   assert.equal((await db.query("SELECT count(*) FROM audit_log WHERE action='announcement.broadcast' AND actor_role='system'")).rows[0].count,1);
   await apiForTest(t);
   assert.deepEqual(await notices(),[{user_id:'client',app:'client'}]);
@@ -161,10 +165,76 @@ test('outbox delivers to eligible Android after non-Android Play telemetry and s
   const drain=createOutboxWorker({database:db,loadStore:()=>loadStore(db),delivery:{configured:true,
     send:async(message,devices)=>devices.map(d=>({deviceId:d.id,ok:true}))}});
   await drain();
-  assert.deepEqual((await db.query('SELECT status FROM notification_push_outbox')).rows,[{status:'delivered'}]);
+  assert.deepEqual((await db.query("SELECT o.status FROM notification_push_outbox o JOIN notifications n ON n.id=o.notification_id WHERE n.type='play_optin'")).rows,[{status:'delivered'}]);
   await run('2026-11-11T02:00:00Z');
   await db.query("UPDATE tester_program_settings SET opted_in_count=12 WHERE app='client'");
   await drain();
-  assert.deepEqual((await db.query('SELECT status FROM notification_push_outbox ORDER BY status')).rows,
+  assert.deepEqual((await db.query("SELECT o.status FROM notification_push_outbox o JOIN notifications n ON n.id=o.notification_id WHERE n.type='play_optin' ORDER BY o.status")).rows,
     [{status:'delivered'},{status:'suppressed'}]);
+});
+
+for (const hour of [0,10]) test(`a real domain-lock wait crossing Manila midnight rechecks the new day's hour (${hour})`, {skip:!DB}, async t=>{
+  const {db,enable,device,run,notices,broadcast}=await setup(t);
+  await enable('client',{dailyReminderHour:hour}); await device('client');
+  const workerUrl=new URL(DB); const workerName=id('midnight-worker');
+  workerUrl.searchParams.set('application_name',workerName);
+  const worker=createDatabase({DATABASE_URL:workerUrl.href}); t.after(()=>worker.close());
+  let current='2026-11-19T15:59:59.000Z';
+  const held=Promise.withResolvers(), release=Promise.withResolvers();
+  const holding=db.transaction(async()=>{held.resolve();await release.promise;});
+  await held.promise;
+  const running=run(()=>current,worker);
+  try {
+    let blocked=false;
+    for(let attempt=0;attempt<200;attempt++) {
+      blocked=Boolean((await db.query(`SELECT 1 FROM pg_stat_activity WHERE application_name=$1
+        AND wait_event_type='Lock' AND wait_event='advisory' AND cardinality(pg_blocking_pids(pid))>0`,[workerName])).rowCount);
+      if(blocked) break;
+      await new Promise(resolve=>setTimeout(resolve,10));
+    }
+    assert.equal(blocked,true,'the reminder must actually wait for the domain advisory lock');
+    current='2026-11-19T16:00:01.000Z';
+  } finally { release.resolve(); await holding; await running; }
+  const runs=await db.query('SELECT manila_date,queued_at FROM tester_program_play_reminder_runs');
+  assert.deepEqual(runs.rows,hour===0?[{manila_date:'2026-11-20',queued_at:'2026-11-19T16:00:01.000Z'}]:[]);
+  assert.equal((await notices()).length,hour===0?1:0);
+  const store=await loadStore(db), actor=store.users.find(user=>user.id==='ops');
+  resolveAuthorizationContext(store,actor);
+  const manual=checked(await play.routePlayOptin({database:db,user:actor,req:{method:'POST'},
+    url:new URL('http://test/ops/testers/broadcast'),readBody:async()=>({app:'client'}),
+    broadcast,auditEvent:async()=>{},now:()=>current}),201);
+  assert.equal(manual.announcement.notifiedUsers,hour===0?0:1);
+  await run('2026-11-20T02:00:00.000Z');
+  assert.deepEqual(await notices(),[{user_id:'client',app:'client'}]);
+  await createOutboxWorker({database:db,loadStore:()=>loadStore(db),delivery:{configured:true,
+    send:async(message,devices)=>devices.map(d=>({deviceId:d.id,ok:true}))}})();
+  assert.deepEqual((await db.query("SELECT o.status FROM notification_push_outbox o JOIN notifications n ON n.id=o.notification_id WHERE n.type='play_optin'")).rows,[{status:'delivered'}]);
+});
+
+test('a legacy broadcast committed after migration consumes the same Manila-day slot for the new scheduler and manual route', {skip:!DB}, async t=>{
+  const {db,enable,device,run,notices,broadcast}=await setup(t);
+  await enable(); await device('client');
+  const at='2026-11-21T02:00:00.000Z';
+  // The pre-upgrade server writes the ordinary announcement/inbox/outbox but
+  // knows nothing about the recipient ledger added by the migration.
+  await db.transaction(()=>broadcast({app:'client',recipientIds:['client'],actor:{id:'ops',role:'ops_admin'},at:'2026-11-20T23:59:59.000Z'}));
+  assert.equal((await db.query('SELECT count(*) FROM tester_program_play_reminder_recipients')).rows[0].count,0);
+  assert.deepEqual(await notices(),[{user_id:'client',app:'client'}]);
+  await run(at);
+  assert.deepEqual(await notices(),[{user_id:'client',app:'client'}]);
+  assert.deepEqual((await db.query('SELECT app,manila_date,user_id,queued_at FROM tester_program_play_reminder_recipients')).rows,
+    [{app:'client',manila_date:'2026-11-21',user_id:'client',queued_at:'2026-11-20T23:59:59.000Z'}]);
+  const store=await loadStore(db), actor=store.users.find(user=>user.id==='ops');
+  resolveAuthorizationContext(store,actor);
+  const manual=checked(await play.routePlayOptin({database:db,user:actor,req:{method:'POST'},
+    url:new URL('http://test/ops/testers/broadcast'),readBody:async()=>({app:'client'}),
+    broadcast,auditEvent:async()=>{},now:()=>at}),201);
+  assert.equal(manual.announcement.notifiedUsers,0);
+  await createOutboxWorker({database:db,loadStore:()=>loadStore(db),delivery:{configured:true,
+    send:async(message,devices)=>devices.map(d=>({deviceId:d.id,ok:true}))}})();
+  assert.deepEqual((await db.query("SELECT o.status FROM notification_push_outbox o JOIN notifications n ON n.id=o.notification_id WHERE n.type='play_optin'")).rows,[{status:'delivered'}]);
+  await run('2026-11-21T16:00:00.000Z'); // New Manila day before the default hour.
+  assert.equal((await notices()).length,1);
+  await run('2026-11-22T02:00:00.000Z');
+  assert.equal((await notices()).length,2);
 });

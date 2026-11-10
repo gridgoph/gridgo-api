@@ -98,6 +98,17 @@ async function playCampaignBelowTarget(database, app) {
 
 /** Caller holds the domain transaction; the daily claims and outbox commit together. */
 async function queuePlayOptinBroadcast({ database, app, actor, at, broadcast }) {
+  // A pre-upgrade API can write a manual announcement after migration's
+  // backfill. Adopt those committed notifications under the same domain lock.
+  await database.query(`WITH day AS (
+      SELECT ($2::timestamptz AT TIME ZONE 'Asia/Manila')::date AS manila_date
+    ) INSERT INTO tester_program_play_reminder_recipients(app,manila_date,user_id,queued_at)
+    SELECT $1,day.manila_date,n.user_id,min(n.created_at)
+    FROM notifications n CROSS JOIN day
+    WHERE n.type='play_optin' AND n.data->>'appRole'=$1
+      AND n.created_at >= (day.manila_date::timestamp AT TIME ZONE 'Asia/Manila')
+      AND n.created_at < ((day.manila_date+1)::timestamp AT TIME ZONE 'Asia/Manila')
+    GROUP BY day.manila_date,n.user_id ON CONFLICT DO NOTHING`, [app, at]);
   const recipients = (await database.query(`INSERT INTO tester_program_play_reminder_recipients(app,manila_date,user_id,queued_at)
     SELECT DISTINCT $1,($2::timestamptz AT TIME ZONE 'Asia/Manila')::date,u.id,$2::timestamptz FROM users u
     JOIN user_role_memberships m ON m.user_id=u.id AND m.role=$1
@@ -111,15 +122,19 @@ async function queuePlayOptinBroadcast({ database, app, actor, at, broadcast }) 
 }
 
 /** Existing lifecycle tick: catch up today's run after its Manila hour, never replay past days. */
-export async function runPlayOptinReminders({ database, broadcast, at = new Date().toISOString(), groups = googleGroup }) {
+export async function runPlayOptinReminders({ database, broadcast, now = () => new Date().toISOString(), groups = googleGroup }) {
+  const probeAt = now();
   const dueSql = `s.campaign_enabled AND s.production_approved_at IS NULL AND s.daily_reminder_enabled
     AND s.daily_reminder_hour <= EXTRACT(HOUR FROM $1::timestamptz AT TIME ZONE 'Asia/Manila')
     AND ${playBelowTargetSql()}
     AND NOT EXISTS (SELECT 1 FROM tester_program_play_reminder_runs r WHERE r.app=s.app
       AND r.manila_date=($1::timestamptz AT TIME ZONE 'Asia/Manila')::date)`;
   // Probe without taking the domain lock on every idle lifecycle tick.
-  const candidates = (await database.query(`SELECT s.app FROM tester_program_settings s WHERE ${dueSql}`, [at])).rows;
+  const candidates = (await database.query(`SELECT s.app FROM tester_program_settings s WHERE ${dueSql}`, [probeAt])).rows;
   for (const { app } of candidates) await database.transaction(async () => {
+    // Lock waits can cross midnight. Recompute the hour/date from the clock
+    // only after this transaction owns the domain lock.
+    const at = now();
     const config = (await database.query(`SELECT s.* FROM tester_program_settings s WHERE s.app=$2 AND ${dueSql}`, [at, app])).rows[0];
     if (!config || (!groups.configured(app) && !config.group_join_url)) return;
     const claimed = await database.query(`INSERT INTO tester_program_play_reminder_runs(app,manila_date,queued_at)
