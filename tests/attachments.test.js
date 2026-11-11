@@ -895,11 +895,13 @@ test('invalid upload purpose hints list only the caller memberships, including s
   for (const actor of [ops, superAdmin]) {
     assert.ok(allowed(actor).includes('promotion_logo'));
     assert.ok(allowed(actor).includes('promotion_image'));
+    assert.ok(allowed(actor).includes('promotion_card_image'));
     assert.ok(!allowed(actor).includes('artwork'));
   }
   for (const actor of [supplier, rider]) {
     assert.ok(!allowed(actor).includes('promotion_logo'));
     assert.ok(!allowed(actor).includes('promotion_image'));
+    assert.ok(!allowed(actor).includes('promotion_card_image'));
   }
   const member = { ...client, id: 'multi-upload' };
   const store = { users: [member], userRoleMemberships: [

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { validatePromotion, promotionStatus } from '../src/home-promotions.js';
-import { authorizeFileUpload, authorizeFileRead, validateUpload } from '../src/attachments.js';
+import { authorizeFileUpload, authorizeFileRead, validateUpload, resolveFileTarget } from '../src/attachments.js';
 import { retentionDecision, assertEarlyFileDeletion } from '../src/file-retention-policy.js';
 
 export const promotion = { name: 'DavaoGo', logo: { fileId: 'promo_logo' }, description: 'Our partner app in Davao. Tap to visit.',
@@ -56,4 +56,37 @@ test('promotion color is strict hex, uppercase, authoritative, and compatible wi
   for (const color of [null, 123456, '', '#fff', 'FFFFFF', '#12345678', '#GGGGGG', ' #123456', '#123456 ', '#123456\n']) {
     assert.throws(() => validatePromotion({ ...promotion, color }), error => error.status === 400 && error.details.field === 'color');
   }
+});
+
+
+test('card image is optional, strictly referenced, preserved by omission and independently clearable', () => {
+  assert.equal(validatePromotion(promotion).cardImage, null);
+  const current = validatePromotion({ ...promotion, cardImage: { fileId: 'card' }, image: { fileId: 'cover' } });
+  assert.deepEqual(validatePromotion({ name: 'Edited' }, current).cardImage, { fileId: 'card' });
+  const cleared = validatePromotion({ cardImage: null }, current);
+  assert.equal(cleared.cardImage, null);
+  assert.deepEqual(cleared.image, { fileId: 'cover' });
+  for (const cardImage of ['', [], {}, { fileId: '' }, { fileId: 1 }, { fileId: 'x', downloadUrl: 'url' }]) {
+    assert.throws(() => validatePromotion({ ...promotion, cardImage }), e => e.code === 'invalid_promotion' && e.details.field === 'cardImage');
+  }
+});
+
+test('card image upload policy and bound retention match cover images', () => {
+  const purpose = 'promotion_card_image';
+  const file = { fileId: 'card', ownerId: 'ops', purpose, state: 'ready', readyAt: '2026-01-01T00:00:00Z',
+    references: [{ type: 'home_promotion', id: 'promo', field: 'cardImage' }] };
+  for (const role of ['ops_admin', 'super_admin']) assert.doesNotThrow(() => authorizeFileUpload({ role }, purpose));
+  for (const role of ['client', 'supplier', 'rider', 'staff']) assert.throws(() => authorizeFileUpload({ role }, purpose), e => e.status === 403);
+  for (const role of ['client', 'ops_admin', 'super_admin']) assert.doesNotThrow(() => authorizeFileRead({ role }, {}, file));
+  for (const role of ['supplier', 'rider', 'staff']) assert.throws(() => authorizeFileRead({ role }, {}, file), e => e.status === 403);
+  assert.throws(() => validateUpload({ size: 15 * 1024 * 1024 + 1 }, purpose), e => e.status === 413);
+  for (const [hex, type] of [['89504e470d0a1a0a', 'image/png'], ['ffd8ff', 'image/jpeg'], ['524946460000000057454250', 'image/webp']]) {
+    const bytes = Buffer.from(hex, 'hex');
+    assert.doesNotThrow(() => validateUpload({ size: 15 * 1024 * 1024, sniffBytes: bytes, declaredContentType: type, originalFilename: `card.${type.split('/')[1]}` }, purpose));
+  }
+  assert.throws(() => validateUpload({ size: 8, sniffBytes: Buffer.from('%PDF-1.7'), declaredContentType: 'application/pdf', originalFilename: 'card.pdf' }, purpose), e => e.status === 415);
+  assert.throws(() => resolveFileTarget({}, purpose, {}), e => e.code === 'promotion_attachment_route_required');
+  assert.equal(retentionDecision({}, file, '2026-11-11T00:00:00Z').eligible, false);
+  assert.throws(() => assertEarlyFileDeletion({}, file, { role: 'super_admin' }, 'Remove'), e => e.code === 'file_in_use');
+  assert.equal(retentionDecision({}, { ...file, references: [] }, '2026-11-11T00:00:00Z').eligible, true);
 });

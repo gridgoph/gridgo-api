@@ -4,7 +4,7 @@ import { privilegedAdminMemberships, queueInvalidate } from './notifications.js'
 import { manilaDate } from './season-windows.js';
 
 const FIELDS = {
-  name: 'name', logo: 'logo_file_id', image: 'image_file_id', description: 'description', tag: 'tag',
+  name: 'name', logo: 'logo_file_id', image: 'image_file_id', cardImage: 'card_image_file_id', description: 'description', tag: 'tag',
   linkText: 'link_text', linkUrl: 'link_url', tapAction: 'tap_action', style: 'style', color: 'color',
   startsAt: 'starts_at', endsAt: 'ends_at', enabled: 'enabled', displayOrder: 'display_order',
 };
@@ -33,7 +33,7 @@ function timestamp(value, field) {
 export function validatePromotion(body, previous = null) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) invalid('body');
   if (Object.keys(body).some(key => !Object.hasOwn(FIELDS, key))) invalid('body');
-  const input = { tapAction: 'sheet', enabled: false, displayOrder: 0, image: null, endsAt: null, ...previous, ...body };
+  const input = { tapAction: 'sheet', enabled: false, displayOrder: 0, image: null, cardImage: null, endsAt: null, ...previous, ...body };
   const value = {};
   for (const [field, max, required] of [['name', 120, true], ['description', 140, false], ['linkText', 80, true]]) {
     if (typeof input[field] !== 'string' || input[field].trim().length > max || (required && !input[field].trim())) invalid(field);
@@ -60,9 +60,9 @@ export function validatePromotion(body, previous = null) {
   value.startsAt = timestamp(input.startsAt, 'startsAt');
   value.endsAt = input.endsAt === null ? null : timestamp(input.endsAt, 'endsAt');
   if (value.endsAt && Date.parse(value.endsAt) <= Date.parse(value.startsAt)) invalid('endsAt');
-  for (const field of ['logo', 'image']) {
+  for (const field of ['logo', 'image', 'cardImage']) {
     const ref = input[field];
-    if (field === 'image' && ref === null) { value[field] = null; continue; }
+    if (field !== 'logo' && ref === null) { value[field] = null; continue; }
     if (!ref || typeof ref !== 'object' || Array.isArray(ref) || typeof ref.fileId !== 'string'
       || !ref.fileId || ref.fileId.length > 200 || Object.keys(ref).some(key => key !== 'fileId')) invalid(field);
     value[field] = { fileId: ref.fileId };
@@ -72,13 +72,13 @@ export function validatePromotion(body, previous = null) {
 
 function valuesFromRow(row) {
   const value = Object.fromEntries(Object.entries(FIELDS).map(([js, sql]) => [js,
-    ['logo', 'image'].includes(js) ? (row[sql] ? { fileId: row[sql] } : null) : row[sql]]));
+    ['logo', 'image', 'cardImage'].includes(js) ? (row[sql] ? { fileId: row[sql] } : null) : row[sql]]));
   return { ...value, style: styleForColor(value.color) };
 }
 
 async function project(row, { storage, store, at, totals = false }) {
   const result = { id: row.id, ...valuesFromRow(row), status: promotionStatus(row, at) };
-  for (const field of ['logo', 'image']) {
+  for (const field of ['logo', 'image', 'cardImage']) {
     const ref = result[field];
     if (!ref) continue;
     const file = store.files.find(item => item.fileId === ref.fileId && item.state === 'ready');
@@ -91,10 +91,10 @@ async function project(row, { storage, store, at, totals = false }) {
 }
 
 function media(store, value, user) {
-  for (const field of ['logo', 'image']) {
+  for (const field of ['logo', 'image', 'cardImage']) {
     if (!value[field]) continue;
     const file = store.files.find(item => item.fileId === value[field].fileId);
-    if (!file || file.state !== 'ready' || file.purpose !== `promotion_${field}` || !file.objectKey
+    if (!file || file.state !== 'ready' || file.purpose !== (field === 'cardImage' ? 'promotion_card_image' : `promotion_${field}`) || !file.objectKey
       || !['image/png', 'image/jpeg', 'image/webp'].includes(file.detectedContentType)) fail(409, 'promotion_file_not_ready', field);
     // Staff may reuse existing promotion media; an unbound upload belongs to its uploader.
     if (file.ownerId !== user.id && !(file.references || []).some(ref => ref.type === 'home_promotion')) fail(403, 'forbidden');
@@ -104,7 +104,7 @@ function media(store, value, user) {
 export function bindPromotionMedia(store, promotionId, value, at) {
   for (const file of store.files) {
     file.references = (file.references || []).filter(ref => ref.type !== 'home_promotion' || ref.id !== promotionId);
-    for (const field of ['logo', 'image']) if (value?.[field]?.fileId === file.fileId) {
+    for (const field of ['logo', 'image', 'cardImage']) if (value?.[field]?.fileId === file.fileId) {
       file.references.push({ type: 'home_promotion', id: promotionId, field, attachedAt: at });
     }
   }
@@ -194,7 +194,7 @@ export async function routeHomePromotions({ req, url, user, store, database, sto
     await database.query('UPDATE home_promotions SET removed_at=$2,updated_at=$2 WHERE id=$1', [currentId, at]);
   } else {
     const fields = Object.keys(FIELDS);
-    const values = fields.map(key => ['logo', 'image'].includes(key) ? value[key]?.fileId || null : value[key]);
+    const values = fields.map(key => ['logo', 'image', 'cardImage'].includes(key) ? value[key]?.fileId || null : value[key]);
     if (creating) {
       row = (await database.query(`INSERT INTO home_promotions(id,${Object.values(FIELDS).join(',')},created_at,updated_at)
         VALUES ($1,${fields.map((_, n) => `$${n + 2}`).join(',')},$${fields.length + 2},$${fields.length + 2}) RETURNING *`, [currentId, ...values, at])).rows[0];
