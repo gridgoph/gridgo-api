@@ -26,7 +26,7 @@ async function setup(t) {
     store.userRoleMemberships.push({ userId: id, role, createdAt: at });
   }
   for (const [fileId, purpose, ownerId] of [['promo_logo', 'promotion_logo', 'ops'], ['promo_image', 'promotion_image', 'ops'],
-    ['admin_logo', 'promotion_logo', 'admin'], ['wrong', 'artwork', 'client']]) store.files.push({
+    ['promo_card', 'promotion_card_image', 'ops'], ['replacement_card', 'promotion_card_image', 'ops'], ['admin_card', 'promotion_card_image', 'admin'], ['admin_logo', 'promotion_logo', 'admin'], ['wrong', 'artwork', 'client']]) store.files.push({
     fileId, purpose, ownerId, state: 'ready', objectKey: `private/${fileId}`, size: 100, originalFilename: `${fileId}.png`,
     declaredContentType: 'image/png', detectedContentType: 'image/png', createdAt: at, readyAt: at, references: [],
   });
@@ -114,6 +114,7 @@ test('Manila days, concurrent deduplication and rollback are durable; developmen
   const options = { objectStorage: storage, env: { NODE_ENV: 'test', CLERK_SECRET_KEY: 'sk_test_fake' }, now: () => '2026-11-10T00:00:00Z' };
   assert.equal(await seedDevelopmentPromotion(db, options), true);
   const promoId = 'promo_dev_davaogo';
+  assert.equal((await api('ops', 'GET', `/ops/promotions/${promoId}`)).body.promotion.cardImage, null);
   const event = { type: 'view', sessionId: 'one-session' };
   const write = instant => db.transaction(() => recordPromotionEvent(db, promoId, event, instant));
   await Promise.all(Array.from({ length: 5 }, () => write('2026-11-10T15:59:59Z')));
@@ -147,7 +148,7 @@ test('promotion writes, media references, audits and staff inbox rows roll back 
     const result = await routeHomePromotions({ req: { method: 'POST' }, url: new URL('http://api.test/ops/promotions'),
       user: { id: 'ops', role: 'ops_admin' }, store, database: db,
       storage: { presignGet: async () => ({ url: 'https://storage.test/signed', expiresAt: at }) },
-      readBody: async () => values, now: () => at, id: (() => { let n = 0; return prefix => `${prefix}_rollback_${n++}`; })(),
+      readBody: async () => ({ ...values, cardImage: { fileId: 'promo_card' } }), now: () => at, id: (() => { let n = 0; return prefix => `${prefix}_rollback_${n++}`; })(),
       audit: (store, entry) => store.auditLog.push({ id: 'audit_promo_rollback', at, actorId: entry.actor.id,
         actorRole: entry.actor.role, action: entry.action, entityType: entry.entityType, entityId: entry.entityId, detail: entry.detail }),
     });
@@ -232,6 +233,7 @@ test('previous API writer SQL can create and edit promotions after the color mig
     const id = `legacy_${style}`;
     const created = await db.transaction(() => db.query(insert, [id, ...oldValues(style), at]));
     assert.equal(created.rows[0].color, color);
+    assert.equal(created.rows[0].card_image_file_id, null);
     const nextStyle = style === 'light' ? 'yellow' : 'light';
     const nextColor = nextStyle === 'yellow' ? '#FFDE58' : '#FFFFFF';
     const changed = await db.transaction(() => db.query(update, [id, ...oldValues(nextStyle), at]));
@@ -244,4 +246,76 @@ test('previous API writer SQL can create and edit promotions after the color mig
     assert.equal(renamed.rows[0].color, '#3366CC');
     assert.equal((await api('ops', 'PATCH', `/ops/promotions/${id}`, { color: '#3366CC' })).body.promotion.color, '#3366CC');
   }
+});
+
+
+test('card images persist across all projections, enforce ownership and detach on clear, replace and removal', { skip: !DB }, async t => {
+  const { db, api } = await setup(t);
+  for (const role of ['ops', 'admin']) {
+    const fileId = role === 'ops' ? 'promo_card' : 'admin_card';
+    const created = await api(role, 'POST', '/ops/promotions', { ...values, logo: { fileId: role === 'ops' ? 'promo_logo' : 'admin_logo' }, cardImage: { fileId }, image: role === 'ops' ? { fileId: 'promo_image' } : null });
+    assert.equal(created.status, 201, JSON.stringify(created.body));
+    const path = `/ops/promotions/${created.body.promotion.id}`;
+    for (const [reader, route] of [[role, path], [role, '/ops/promotions'], ['client', '/me/promotions/home']]) {
+      const response = await api(reader, 'GET', route);
+      const promo = response.body.promotion || response.body.promotions.find(p => p.id === created.body.promotion.id);
+      assert.deepEqual(Object.keys(promo.cardImage).sort(), ['contentType', 'downloadUrl', 'expiresAt', 'fileId']);
+      assert.equal(promo.cardImage.fileId, fileId);
+      assert.ok(promo.cardImage.downloadUrl.includes('X-Amz-Signature'));
+    }
+    for (const reader of ['client', 'ops', 'admin']) for (const suffix of ['', '/download-url']) {
+      assert.equal((await api(reader, 'GET', `/files/${fileId}${suffix}`)).status, 200);
+    }
+    for (const reader of ['supplier', 'rider', null]) {
+      assert.equal((await api(reader, 'GET', `/files/${fileId}/download-url`)).status, reader ? 403 : 401);
+    }
+    for (const cardImage of [{}, { fileId }, 'bad']) {
+      const response = await api(role, 'PATCH', path, { cardImage: typeof cardImage === 'object' && cardImage.fileId ? { ...cardImage, downloadUrl: 'bad' } : cardImage });
+      assert.equal(response.status, 400); assert.equal(response.body.field, 'cardImage');
+    }
+    for (const wrongId of ['wrong', 'promo_logo', 'promo_image', 'missing']) {
+      assert.equal((await api(role, 'PATCH', path, { cardImage: { fileId: wrongId } })).status, 409);
+    }
+    if (role === 'ops') assert.equal((await api(role, 'PATCH', path, { cardImage: { fileId: 'admin_card' } })).status, 403);
+    assert.equal((await api(role === 'ops' ? 'admin' : 'ops', 'PATCH', path, { name: 'Preserved' })).body.promotion.cardImage.fileId, fileId);
+    let store = await loadStore(db);
+    assert.ok(store.files.find(f => f.fileId === fileId).references.some(r => r.id === created.body.promotion.id && r.field === 'cardImage'));
+    const cleared = await api(role, 'PATCH', path, { cardImage: null });
+    assert.equal(cleared.body.promotion.cardImage, null);
+    assert.equal(cleared.body.promotion.image?.fileId || null, role === 'ops' ? 'promo_image' : null);
+    store = await loadStore(db);
+    assert.ok(!store.files.find(f => f.fileId === fileId).references.some(r => r.id === created.body.promotion.id));
+    await api(role, 'PATCH', path, { cardImage: { fileId } });
+    if (role === 'ops') {
+      const replacement = await api(role, 'PATCH', path, { cardImage: { fileId: 'replacement_card' } });
+      assert.equal(replacement.body.promotion.cardImage.fileId, 'replacement_card');
+      store = await loadStore(db);
+      assert.equal(store.files.find(f => f.fileId === fileId).references.length, 0);
+      assert.ok(store.files.find(f => f.fileId === 'replacement_card').references.some(r => r.id === created.body.promotion.id));
+    }
+    await api(role, 'DELETE', path, undefined, { raw: true });
+    store = await loadStore(db);
+    assert.ok(!store.files.find(f => f.fileId === fileId).references.some(r => r.id === created.body.promotion.id));
+    assert.equal(store.files.find(f => f.fileId === 'replacement_card').references.length, 0);
+  }
+});
+
+
+test('previous color-aware writer omits card image on insert and preserves it on update', { skip: !DB }, async t => {
+  const { db, api } = await setup(t);
+  // Freeze the immediately previous API's full column list (including color).
+  const columns = ['name', 'logo_file_id', 'image_file_id', 'description', 'tag', 'link_text',
+    'link_url', 'tap_action', 'style', 'color', 'starts_at', 'ends_at', 'enabled', 'display_order'];
+  const oldValues = ['Legacy', 'promo_logo', 'promo_image', '', 'partner', 'Visit',
+    'https://davaogo.app/', 'sheet', 'light', '#FFFFFF', values.startsAt, null, true, 1];
+  const inserted = await db.transaction(() => db.query(`INSERT INTO home_promotions(id,${columns.join(',')},created_at,updated_at)
+    VALUES ($1,${columns.map((_, n) => `$${n + 2}`).join(',')},$16,$16) RETURNING *`, ['legacy_color', ...oldValues, at]));
+  assert.equal(inserted.rows[0].card_image_file_id, null);
+  assert.equal(inserted.rows[0].image_file_id, 'promo_image');
+  const path = '/ops/promotions/legacy_color';
+  await api('ops', 'PATCH', path, { cardImage: { fileId: 'promo_card' } });
+  const updated = await db.transaction(() => db.query(`UPDATE home_promotions SET
+    ${columns.map((column, n) => `${column}=$${n + 2}`).join(',')},updated_at=$16 WHERE id=$1 RETURNING *`, ['legacy_color', ...oldValues, at]));
+  assert.equal(updated.rows[0].card_image_file_id, 'promo_card');
+  assert.equal((await api('client', 'GET', '/me/promotions/home')).body.promotions[0].cardImage.fileId, 'promo_card');
 });

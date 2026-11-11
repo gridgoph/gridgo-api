@@ -17,6 +17,7 @@ An explicit `X-GRIDGO-Role` continues to restrict membership context.
   "id": "promo_example",
   "name": "DavaoGo",
   "logo": {"fileId": "file_example", "contentType": "image/png", "downloadUrl": "https://storage.example/signed-url", "expiresAt": "2026-11-10T01:05:00.000Z"},
+  "cardImage": null,
   "image": null,
   "description": "Our partner app in Davao. Tap to visit.",
   "tag": "partner",
@@ -38,12 +39,13 @@ An explicit `X-GRIDGO-Role` continues to restrict membership context.
 
 `views`, `opens`, `taps` are lifetime totals on **staff responses only**. The
 client receives the other fields above, with signed media URLs and no owners,
-private object keys or filenames. `image` and `endsAt` are nullable.
+private object keys or filenames. `cardImage`, `image` and `endsAt` are nullable.
 
-Use existing multipart `POST /files` with `purpose=promotion_logo` (5 MiB max)
-or `purpose=promotion_image` (15 MiB max), plus the `file` part. Both are staff
+Use existing multipart `POST /files` with `purpose=promotion_logo` (5 MiB max),
+`purpose=promotion_card_image` (15 MiB max), or `purpose=promotion_image`
+(15 MiB max), plus the `file` part. All three are staff
 upload purposes accepting PNG, JPEG or WebP. On create/edit, send only
-`logo: {fileId}` and optional `image: {fileId}`; omit signed response fields.
+`logo: {fileId}`, optional `cardImage: {fileId}` and optional `image: {fileId}`; omit signed response fields.
 The Promotions mutation binds these ready uploads atomically. Do not call
 `POST /files/:id/attach`; that route returns `409 promotion_attachment_route_required`.
 Staff can bind their own upload or reuse media already bound to a promotion.
@@ -52,6 +54,22 @@ Clients and staff can use authenticated `GET /files/:fileId` and
 Bound promotion media is protected from retention/early deletion. Replacement
 or removal detaches old media; ordinary unused-file retention then applies.
 Signed links use the existing MinIO TTL (default five minutes); refetch when expired.
+
+Media placement and recommended upload sizes:
+
+| Field | Placement | Recommended size |
+|---|---|---|
+| `logo` | Home and About round frame; contain with padding on a white disc | 512 × 512 square |
+| `cardImage` | Home card background; center crop with a dark bottom scrim | 1200 × 900 (4:3) |
+| `image` | About cover only; show whole at 16:9 without cropping sides | 1600 × 900 (16:9) |
+
+The required `color` is the Home card background when `cardImage` is null and
+while it loads. The cover is never used on the Home card, and the card image
+is never used as the cover. Existing promotions retain `image` as their cover
+and start with `cardImage: null`. Old apps may ignore the new field.
+PATCH preserves omitted media fields; send null to clear `cardImage` or `image`.
+Their signed response shapes and staff permissions are identical. Recommended
+sizes are upload guidance, not server validation requirements.
 
 Write validation:
 
@@ -160,9 +178,14 @@ and invalid colors before SQL. Keep this compatibility trigger while old API
 processes may still write promotions. Deploy this API before the color-picker
 clients: the previous API rejects an unknown `color` request field.
 
+Apply `1794378000000_home_promotion_card_image` before deploying this API.
+It adds nullable `card_image_file_id` with a file foreign key and no backfill;
+old INSERTs omit it and old UPDATEs preserve it. No existing cover is copied.
+Deploy this API before dashboard writes send the new `cardImage` field.
+
 `npm run seed:dev` adds the committed DavaoGo logo to MinIO and its metadata to
 PostgreSQL, then creates an enabled Partner promotion with the fields above,
-yellow style, sheet action and display order 1. It requires the existing
+yellow style, null card image and cover, sheet action and display order 1. It requires the existing
 explicit development/test environment and development Clerk key, available
 storage, and a seeded staff owner. Repeated seeds preserve edits and soft
 removal. Production `npm run seed` never creates a promotion; staff creates the
