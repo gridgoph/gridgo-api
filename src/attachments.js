@@ -105,6 +105,7 @@ export const PURPOSE_POLICIES = Object.freeze({
     contentTypes: ["image/jpeg", "image/png", "image/webp"],
   },
   promotion_logo: { roles: ['ops_admin', 'super_admin'], maxBytes: 5 * 1024 * 1024, contentTypes: ['image/jpeg', 'image/png', 'image/webp'] },
+  promotion_card_image: { roles: ['ops_admin', 'super_admin'], maxBytes: 15 * 1024 * 1024, contentTypes: ['image/jpeg', 'image/png', 'image/webp'] },
   promotion_image: { roles: ['ops_admin', 'super_admin'], maxBytes: 15 * 1024 * 1024, contentTypes: ['image/jpeg', 'image/png', 'image/webp'] },
   announcement_image: {
     roles: ["ops_admin", "super_admin"],
@@ -779,7 +780,7 @@ export function findFile(store, fileId) {
 }
 
 export function resolveFileTarget(store, purpose, body, user = null) {
-  if (['promotion_logo', 'promotion_image'].includes(purpose)) fail(409, 'promotion_attachment_route_required', 'Set logo/image on the Promotions route.');
+  if (['promotion_logo', 'promotion_image', 'promotion_card_image'].includes(purpose)) fail(409, 'promotion_attachment_route_required', 'Set logo/image/cardImage on the Promotions route.');
   if (purpose === CLIENT_SHOP_CHAT_PURPOSE) fail(409, 'client_shop_chat_attachment_not_attachable', 'Send attachmentFileIds with the chat message.');
   if (["refund_qr", "refund_receipt", "refund_evidence"].includes(purpose)) {
     fail(409, "refund_file_not_attachable", "Bind this file through the refund request routes.");
@@ -1365,7 +1366,7 @@ export function authorizeFileRead(user, store, file) {
     fail(404, "file_not_found", "That ready file no longer exists. Refresh the record and try again.");
   }
   if (!user) forbidden();
-  if (['promotion_logo', 'promotion_image'].includes(file.purpose)) {
+  if (['promotion_logo', 'promotion_image', 'promotion_card_image'].includes(file.purpose)) {
     if (['client', 'ops_admin', 'super_admin'].some(role => hasRole(user, role))) return;
     forbidden();
   }
