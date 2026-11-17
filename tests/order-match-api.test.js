@@ -1515,10 +1515,13 @@ test("unpacked readiness offers the job atomically and joint pickup checks still
   assert.deepEqual(packed.payments, before.payments);
   assert.deepEqual(packed.payoutMilestones, before.payoutMilestones);
   const notices = stored.notifications.filter((row) => row.orderId === orderId && row.type === "dispatch_available");
-  assert.deepEqual(notices.map((row) => row.userId).sort(), ["rider_other", "user_rider"]);
-  for (const notice of notices) assert.match(notice.body, /check.*supplier/i);
+  assert.deepEqual(notices.map((row) => row.userId), ['rider_other']);
+  assert.equal(packed.dispatchOffer.riderId, 'rider_other');
   const outbox = await database.query("SELECT device_id FROM notification_push_outbox WHERE notification_id = ANY($1::text[]) ORDER BY device_id", [notices.map((row) => row.id)]);
-  assert.deepEqual(outbox.rows.map((row) => row.device_id), ["device_other", "device_rider"]);
+  assert.deepEqual(outbox.rows.map((row) => row.device_id), ['device_other']);
+  assert.equal((await call('/dispatch/offers', { subject: 'clerk_rider' })).body.offers.some(row => row.id === orderId), false);
+  const declined = await call(`/dispatch/${orderId}/decline`, { method: 'POST', subject: 'clerk_rider_other', body: { offerId: packed.dispatchOffer.id } });
+  assert.equal(declined.status, 200, JSON.stringify(declined.body));
   assert.equal((await call("/dispatch/offers", { subject: "clerk_rider" })).body.offers.some((row) => row.id === orderId), true);
   assert.equal((await call("/dispatch/offers", { subject: "clerk_rider_pending" })).status, 403);
 

@@ -114,7 +114,10 @@ test('HTTP saves weekday hours, revalidates matches/calendar and gates both disp
   assert.equal(assign.status, 409, JSON.stringify(assign.body));
   assert.equal(assign.body.error, 'outside_shop_hours');
   const after = await loadStore(db);
-  const { performanceClock, ...afterOrder } = after.orders.find(row => row.id === 'order');
+  const { performanceClock, dispatchOffer, dispatchOfferAttempts, ...afterOrder } = after.orders.find(row => row.id === 'order');
+  // Live reservation metadata is independent of the immutable shop/money promise.
+  assert.equal(dispatchOffer.status, 'offered');
+  assert.equal(dispatchOffer.riderId, 'rider');
   const { performanceClock: oldPerformanceClock, ...beforeOrder } = before;
   assert.deepEqual(afterOrder, beforeOrder);
   assert.deepEqual(performanceClock, oldPerformanceClock);

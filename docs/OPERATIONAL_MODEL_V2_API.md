@@ -134,7 +134,8 @@ Staff-only `GET /users?role=supplier` rows additionally include `contactName` fr
 | GET | `/escalations[?status=&orderId=]` | ops/super | pickup escalations |
 | POST | `/escalations/:id/resolve` | ops/super | instruction/resolution; rider must recheck |
 | GET | `/audit` | ops/super | platform audit with existing filters |
-| GET | `/dispatch/offers` | approved rider/ops/super | available/assigned dispatches |
+| GET | `/dispatch/offers` | approved rider/ops/super | exclusive timed offer plus assigned dispatches; [map-home contract](RIDER_MAP_HOME_API.md) |
+| POST | `/dispatch/:id/decline` | current offered approved rider | decline by offerId and cascade to next rider |
 | POST | `/dispatch/:id/accept` | approved rider | assign self to ready dispatch |
 | POST | `/dispatch/:id/pickup-checklist` | assigned approved rider | record counts and pass or escalate all six checks |
 | POST | `/dispatch/:id/milestones` | assigned approved rider | [delivery milestones](#delivery-milestones) |
@@ -731,6 +732,11 @@ Returns `200 {"id":"ntf_123","deletedAt":"2026-08-11T02:05:00.000Z"}`. Retrying 
 `GET /audit` returns `{ audit, limit, offset, nextOffset }`, newest first. It supports person/action/order/date filters, search, bounded paging and CSV export; `GET /orders/:id/audit` supplies the order workspace view. The unrestricted audit log is Super Admin only. Entries are immutable in PostgreSQL and retained indefinitely pending the accountant’s retention decision. See [Audit API](AUDIT_API.md) for entry shape, filters, export, coverage and the restricted Operations order view.
 
 Operations may read workspace records only when the request supplies `action` equal to `order.production_override`, `order.transition_refused`, `file.early_delete`, or `file.retention_delete`, **or** `entityType=file` with a nonblank `entityId`. All supplied filters still intersect the results. Unfiltered reads and any other scope return `403 forbidden`; client, supplier and rider memberships are always refused, even with an allowed filter. This preserves production-correction records and file-deletion bylines in Operations workspaces without granting the general audit log.
+
+The Operations-only countdown edit exception, fair exclusive rider offer rotation,
+expiry/decline cascade and digital receipt signature contract are in
+[Rider map home API](RIDER_MAP_HOME_API.md). All other settings writes remain
+Super Admin only. Existing rider share snapshots stay unchanged.
 
 ## Settings and distance fee
 

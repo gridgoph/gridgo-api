@@ -97,22 +97,24 @@ Featured Prints curation emits `featured_prints_updated` durable inbox rows to e
 
 Paper-invoice promises write `physical_invoice_promised` to the owning client's inbox when Operations/Super Admin first sets or changes `promisedDeliveryAt`. The body states the paper invoice delivery date and time in Asia/Manila. Repeating the same promise does not notify again. This uses the ordinary notification/outbox boundary at `save()`; no separate push sender is required.
 
-### Idle rider job alerts
+### Exclusive rider job alerts
 
-`dispatch_available` uses the dispatch list's shared pool rules in
-`src/dispatch-policy.js`: approved active rider membership, an unassigned
-`ready_for_dispatch` order, no refund request/settlement, deadline, or shop recovery work hold, and a journey to deliver
-(including transport to the hub). There is no distance, zone, or vehicle filter.
-Riders assigned an order in `rider_assigned`, `picked_up`, or `out_for_delivery`
-receive no new job alert. Finished and cancelled trips do not block alerts.
+`dispatch_available` follows the exclusive timed offer in
+[Rider map home API](RIDER_MAP_HOME_API.md): approved active rider membership,
+review-data pool separation, an unassigned `ready_for_dispatch` order, no
+independent work hold, and a journey to deliver (including hub transport).
+Only the current unexpired reservation recipient receives the alert. There is
+no distance, zone, vehicle, online or active-trip eligibility filter. The server
+rotates least recently offered first, stable user ID ties, and alerts every
+Operations/Super Admin membership once when the pool is exhausted.
 
-The inbox occurrence is unique per rider and order, including re-offers and
-soft-deleted inbox rows. Existing device registration and role routing determine
-which phones enter `notification_push_outbox`; an absent or pruned token receives
-nothing. Android notification permission remains the phone's preference; there
-is no separate server-side rider notification preference. The worker rechecks
-idle status and job availability before sending or retrying. Push uses fixed
-customer-free copy and the existing `orderId` deep-link field on `gridgo_default`.
+The inbox occurrence is unique per reservation and rider, including soft-deleted
+rows. Existing device registration and role routing determine which phones enter
+`notification_push_outbox`; an absent or pruned token receives nothing. Android
+notification permission remains the phone's preference. The worker rechecks
+membership, current reservation, expiry and job availability before sending or
+retrying. Push uses fixed customer-free copy and the existing `orderId` deep link
+on `gridgo_default`; no offer metadata, money or signature enters push data.
 
 Work holds remove dispatch offers and suppress their existing inbox/replay and queued push alerts. Refund-only changes also invalidate the prior rider pool; a stale accept returns `409 dispatch_paused` with a plain message and makes no assignment. Withdrawing or rejecting a refund restores eligibility only when no other work hold remains.
 

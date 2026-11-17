@@ -394,7 +394,7 @@ test("a rejected payment tells the client to resubmit, once", () => {
   );
 });
 
-test("an unassigned packed job is offered to approved riders", () => {
+test("an unassigned packed job notifies only its exclusive approved rider", () => {
   const store = {
     userRoleMemberships: [{userId:"user_r",role:"rider"},{userId:"user_pending",role:"rider"}],
     users: [
@@ -402,10 +402,13 @@ test("an unassigned packed job is offered to approved riders", () => {
       { id: "user_pending", role: "rider", verificationStatus: "pending" },
     ],
   };
-  const drafts = riderNotificationDrafts(store, {
-    id: "ord_1",
-    state: "ready_for_dispatch",
-  });
+  const order = {
+    id: 'ord_1', state: 'ready_for_dispatch',
+    dispatchOffer: { id: 'offer_current', status: 'offered', riderId: 'user_r', expiresAt: new Date(Date.now() + 30000).toISOString() },
+  };
+  const drafts = riderNotificationDrafts(store, order);
+  assert.equal(riderNotificationDrafts(store, { ...order, dispatchOffer: undefined }).length, 0);
+  assert.equal(riderNotificationDrafts(store, { ...order, dispatchOffer: { ...order.dispatchOffer, status: 'expired' } }).length, 0);
   assert.equal(drafts.length, 1);
   assert.equal(drafts[0].userId, "user_r");
   assert.equal(drafts[0].type, "dispatch_available");

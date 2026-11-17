@@ -30,7 +30,7 @@ import { manilaDate } from './season-windows.js';
 import { synchronizeProductionHours, productionHoursSynchronized } from "./production-days.js";
 import { staffTables, emptyStaffStore, staffRows, loadStaffRows } from './staff-store.js';
 import { refundTableDefinitions, writeRefundRows, readRefundRows } from "./refund-records.js";
-import { availableDispatch, dispatchWorkHeld } from './dispatch-policy.js';
+import { availableDispatch, dispatchWorkHeld, riderOfferVisible } from './dispatch-policy.js';
 import { deliverySplit, isContainedPickup } from "./operational-model.js";
 import { listingPrintLayouts } from "./print-layout.js";
 import { quoteRequestTables, emptyQuoteRequestStore, quoteRequestRows, loadQuoteRequestRows } from './quote-request-store.js';
@@ -1577,7 +1577,8 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
   const candidates = graph.finish();
   const policyStore = reviewOnly ? testOperationsView(candidates, actor) : candidates;
   const visible = new Set(policyStore.orders.filter(order => candidateIds && !pagePolicy ? true : dispatch
-    ? (order.reviewData === (raw.reviewData === true) && availableDispatch(order, policyStore))
+    ? (order.reviewData === (raw.reviewData === true) && availableDispatch(order, policyStore)
+      && (selected !== 'rider' || riderOfferVisible(order, raw.id)))
       || (!isContainedPickup(order) && !dispatchWorkHeld(policyStore, order) && order.state === 'rider_assigned' && order.riderId === raw.id)
     : pathname === '/jobs'
     ? order.supplierId === raw.id && supplierArtworkReleased(order)

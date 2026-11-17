@@ -69,6 +69,7 @@ test("current membership approval and relationship constrain notification visibi
   assert.equal(policy.notificationVisible(s, n, "r2", "rider"), false);
   s.orders[0].riderId = null;
   s.orders[0].state = "ready_for_dispatch";
+  s.orders[0].dispatchOffer = { id: "offer", status: "offered", riderId: "r2", expiresAt: new Date(Date.now() + 30000).toISOString() };
   assert.equal(policy.notificationVisible(s, n, "r2", "rider"), true);
   s.approvalCases[2].status = "suspended";
   assert.equal(policy.notificationVisible(s, n, "r2", "rider"), false);

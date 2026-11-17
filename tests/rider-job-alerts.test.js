@@ -13,7 +13,7 @@ function fixture() {
     userRoleMemberships: ids.map(userId => ({userId, role: 'rider'})),
     approvalCases: ids.map(userId => ({userId, kind:'rider', status: ['pending','suspended'].includes(userId) ? userId : 'approved'})),
     orders: [
-      {id:'job',state:'ready_for_dispatch',fulfillmentMode:'delivery',timeline:[]},
+      {id:'job',state:'ready_for_dispatch',fulfillmentMode:'delivery',timeline:[], dispatchOffer:{id:'current',status:'offered',riderId:'idle',expiresAt:new Date(Date.now()+30000).toISOString()}},
       {id:'trip',state:'rider_assigned',riderId:'busy'},
     ],
     deviceTokens: ids.filter(id => id !== 'no_device').map(userId => ({id:`device_${userId}`,userId,platform:'android',appRole:userId === 'other_app' ? 'client' : 'rider',token:'registered'})),
@@ -24,21 +24,21 @@ let sequence = 0;
 const options = {createId: () => `n${++sequence}`, at:'2026-10-06T00:00:00Z'};
 const offers = s => s.notifications.filter(n => n.type === 'dispatch_available');
 
-test('only approved idle riders with a claimed rider device enter the push outbox', async () => {
+test('only the exclusively offered approved rider with a claimed rider device enters the push outbox', async () => {
   const s = fixture();
   s.deviceTokens.push({id:'anonymous',userId:null,platform:'android'});
   notifyOrderParties(s, s.orders[0], options);
-  assert.deepEqual(offers(s).map(n => n.userId), ['idle','no_device','other_app']);
+  assert.deepEqual(offers(s).map(n => n.userId), ['idle']);
   const queued = [];
   await enqueueNotificationPushes({query:async (sql,args) => {if (sql.startsWith('SELECT')) return {rows:[]}; queued.push(args);return {rowCount:1};}}, s, offers(s));
   assert.deepEqual(queued.map(row => row.slice(1)), [['device_idle','idle']]);
 });
 
-test('every active trip state excludes a rider; finished trips do not', () => {
+test('active trip states do not introduce eligibility or notification filters', () => {
   for (const state of ['rider_assigned','picked_up','out_for_delivery','delivered','awaiting_collection','completed','cancelled']) {
-    const s=fixture();s.orders[1].state=state;
+    const s=fixture();s.orders[1].state=state;s.orders[0].dispatchOffer.riderId='busy';
     notifyOrderParties(s,s.orders[0],options);
-    assert.equal(offers(s).some(n=>n.userId==='busy'), !['rider_assigned','picked_up','out_for_delivery'].includes(state), state);
+    assert.equal(offers(s).some(n=>n.userId==='busy'), true, state);
   }
 });
 
@@ -69,12 +69,15 @@ test('held, assigned, and contained pickup jobs are not offered; release of a ho
   assert.equal(offers(after).filter(n=>n.userId==='idle').length,1);
 });
 
-test('queued alerts are suppressed when a rider becomes busy or the job leaves the pool', () => {
+test('queued alerts follow the exclusive offer and job holds, regardless of active trips', () => {
   const s=fixture();notifyOrderParties(s,s.orders[0],options);
   const n=offers(s)[0], device=s.deviceTokens[0];
   assert.equal(deviceAcceptsNotification(s,device,n),true);
   s.orders[1].riderId='idle';
+  assert.equal(deviceAcceptsNotification(s,device,n),true);
+  s.orders[0].dispatchOffer.id='new-reservation';
   assert.equal(deviceAcceptsNotification(s,device,n),false);
+  s.orders[0].dispatchOffer.id='current';
   s.orders[1].state='completed';
   s.orders[0].riderId='busy';
   assert.equal(deviceAcceptsNotification(s,device,n),false);
