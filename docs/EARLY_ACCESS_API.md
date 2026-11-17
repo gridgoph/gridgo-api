@@ -112,8 +112,9 @@ changes. Granting neither starts nor proves Google's 14-day testing clock.
 ## Persistence, notifications and mail
 
 Migration `1794916800000` creates `early_access_signups` and
-`early_access_email_outbox`. Every signup/grant mutation uses one domain-locked
-transaction. Consent time, sign-up/grant, audit evidence, mail intent and the new
+`early_access_email_outbox`. Migration `1794918600000` adds the shared
+`early_access_team_mail_budget` delivery ledger. Every signup/grant mutation uses
+one domain-locked transaction. Consent time, sign-up/grant, audit evidence, mail intent and the new
 sign-up/grant's durable ops/super inbox notifications commit atomically. Duplicate
 submissions/grants add none. Notifications use `notifyAdmins` and `save()` with a
 staff-only `early-access` refetch; no notification/push copy contains an email.
@@ -133,7 +134,24 @@ error content, email, request body or token is logged. Mail failures never fail
 the HTTP mutation. The single-flight worker runs immediately after new mail
 commits and on the existing lifecycle retry tick. A claim is leased for five
 minutes across API instances; failures retry after five minutes, up to eight
-attempts. Deterministic Message-IDs help deduplication, but SMTP delivery is at
+attempts. Each claim prioritizes a due `access` invite over every due `team`
+alert; an SMTP send already in flight is allowed to finish. Access invites do not
+consume the team budget and remain deliverable when it is exhausted.
+
+Team alerts have a database-backed aggregate budget of **100 SMTP delivery
+attempts per UTC calendar day**, across all source IPs, API instances and
+restarts. The claim and budget debit commit together under the domain advisory
+lock; retries and failed sends consume the allowance too. Missing SMTP/recipient
+configuration does not consume it. Excess team intents remain pending without an
+attempt increment and resume automatically after the next UTC midnight; each
+accepted signup still owns exactly one durable team intent. The budget ledger
+contains only a UTC date and attempt count, never an email. A public signup flood
+can create a team-alert backlog, but cannot spend more than this team allowance
+or put queued alerts ahead of due access invites. Staff can still see every
+accepted signup immediately in the list/inbox. Apply both migrations before
+replacing all API instances; old mail workers cannot enforce the new budget.
+
+Deterministic Message-IDs help deduplication, but SMTP delivery is at
 least once if a process dies after delivery and before recording success.
 
 Missing SMTP configuration leaves all mail pending; a missing team recipient

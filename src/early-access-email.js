@@ -6,14 +6,29 @@ export function createEarlyAccessEmailWorker({ database, mailer, env = process.e
     busy = true;
     try {
       for (let n = 0; n < 20; n++) {
-        const row = await database.transaction(async () => (await database.query(`
-          WITH claimed AS (
-            UPDATE early_access_email_outbox SET attempts=attempts+1,next_at=now()+interval '5 minutes'
-            WHERE id=(SELECT id FROM early_access_email_outbox WHERE status='pending' AND next_at<=now()
-              AND (kind='access' OR $1::boolean) ORDER BY created_at,id LIMIT 1)
-            RETURNING *
-          ) SELECT c.*,s.email,s.opt_in_url FROM claimed c JOIN early_access_signups s ON s.id=c.signup_id`,
-        [Boolean(String(env.EARLY_ACCESS_TEAM_EMAIL || '').trim())])).rows[0]);
+        const row = await database.transaction(async () => {
+          // The domain advisory lock serializes claims and budget debits across
+          // replicas. Read the UTC day after acquiring it, even across midnight.
+          // Failed attempts/retries consume the same allowance to bound SMTP load.
+          const claimed = (await database.query(`
+            WITH budget_clock AS MATERIALIZED (
+              SELECT (clock_timestamp() AT TIME ZONE 'UTC')::date AS budget_day
+            ), claimed AS (
+              UPDATE early_access_email_outbox SET attempts=attempts+1,next_at=clock_timestamp()+interval '5 minutes'
+              WHERE id=(SELECT id FROM early_access_email_outbox WHERE status='pending' AND next_at<=clock_timestamp()
+                AND (kind='access' OR ($1::boolean AND COALESCE(
+                  (SELECT attempts FROM early_access_team_mail_budget
+                    WHERE budget_day=(SELECT budget_day FROM budget_clock)),0) < 100))
+                ORDER BY CASE WHEN kind='access' THEN 0 ELSE 1 END,created_at,id LIMIT 1)
+              RETURNING *
+            ) SELECT c.*,s.email,s.opt_in_url,(SELECT budget_day FROM budget_clock) AS budget_day
+              FROM claimed c JOIN early_access_signups s ON s.id=c.signup_id`,
+          [Boolean(String(env.EARLY_ACCESS_TEAM_EMAIL || '').trim())])).rows[0];
+          if (claimed?.kind === 'team') await database.query(`
+            INSERT INTO early_access_team_mail_budget(budget_day,attempts) VALUES($1,1)
+            ON CONFLICT(budget_day) DO UPDATE SET attempts=early_access_team_mail_budget.attempts+1`, [claimed.budget_day]);
+          return claimed;
+        });
         if (!row) break;
         const team = row.kind === 'team';
         let sent = false;

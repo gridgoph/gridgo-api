@@ -35,7 +35,7 @@ test('early access validates consent, Google account email, Android and bounded 
 test('early access HTTP and PostgreSQL contract with durable notifications and mocked SMTP', { skip: !DB }, async t => {
   const database = createDatabase({ DATABASE_URL: DB });
   t.after(() => database.close());
-  await resetDatabase(database, 'TRUNCATE early_access_signups, users, platform_settings, taxonomy_categories, accepted_file_formats CASCADE');
+  await resetDatabase(database, 'TRUNCATE early_access_team_mail_budget, early_access_signups, users, platform_settings, taxonomy_categories, accepted_file_formats CASCADE');
   const store = emptyStore();
   store.settings = defaultOperationalSettings();
   const at = new Date().toISOString();
@@ -216,6 +216,52 @@ test('early access HTTP and PostgreSQL contract with durable notifications and m
     await createEarlyAccessEmailWorker({ database, mailer: rejected, env: { EARLY_ACCESS_TEAM_EMAIL: 'team@example.test' } })();
     assert.deepEqual((await database.query("SELECT status,attempts FROM early_access_email_outbox WHERE signup_id=$1 AND kind='team'", [row.id])).rows[0],
       { status: 'failed', attempts: 8 });
+  });
+
+  await t.test('access invitations are claimed before older team alerts', async () => {
+    await createEarlyAccessSignup(database, { ...input, email: 'priority@example.test' });
+    const row = (await database.query("SELECT id FROM early_access_signups WHERE email='priority@example.test'")).rows[0];
+    await grantEarlyAccess(database, row.id, { id: 'ops', role: 'ops_admin' });
+    const delivered = [];
+    const mailer = { configured: true, async sendEarlyAccessEmail(mail) { delivered.push(mail); return { sent: true }; } };
+    await createEarlyAccessEmailWorker({ database, mailer, env: { EARLY_ACCESS_TEAM_EMAIL: 'team@example.test' } })();
+    assert.equal(delivered[0].to, 'priority@example.test');
+    assert.equal(delivered[1].to, 'team@example.test');
+  });
+
+  await t.test('many source IPs and two instances share a durable team budget without blocking invitations', async () => {
+    // Each IP remains within its route limit; the aggregate budget must still hold.
+    for (let n = 0; n < 101; n++) checked(await api(null, 'POST', '/early-access', {
+      ...input, email: `budget-${n}@example.test`,
+    }, { headers: { 'CF-Connecting-IP': `198.18.0.${1 + Math.floor(n / 10)}` } }));
+    const delivered = [];
+    const mailer = { configured: true, async sendEarlyAccessEmail(mail) { delivered.push(mail); return { sent: true }; } };
+    const secondDatabase = createDatabase({ DATABASE_URL: DB });
+    t.after(() => secondDatabase.close());
+    const worker = db => createEarlyAccessEmailWorker({ database: db, mailer, env: { EARLY_ACCESS_TEAM_EMAIL: 'team@example.test' } });
+    const first = worker(database), second = worker(secondDatabase);
+    // Earlier tests may have consumed part of today's allowance.
+    for (let round = 0; round < 3; round++) await Promise.all([first(), second()]);
+    assert.ok(delivered.length <= 100, `team budget exceeded: ${delivered.length} deliveries`);
+    assert.equal((await database.query("SELECT attempts FROM early_access_team_mail_budget WHERE budget_day=(now() AT TIME ZONE 'UTC')::date")).rows[0].attempts, 100);
+    const pending = (await database.query("SELECT count(*)::int AS n FROM early_access_email_outbox WHERE kind='team' AND status='pending'")).rows[0].n;
+    assert.ok(pending > 0, 'excess team intents must remain pending');
+    assert.equal((await database.query("SELECT count(*)::int AS n FROM early_access_email_outbox WHERE kind='team' AND status='pending' AND attempts<>0")).rows[0].n, 0);
+    assert.equal((await database.query("SELECT count(*)::int AS n FROM early_access_email_outbox WHERE kind='team'")).rows[0].n,
+      (await database.query('SELECT count(*)::int AS n FROM early_access_signups')).rows[0].n);
+    // A new instance/restart cannot reset the shared budget.
+    const sentBeforeRestart = delivered.length;
+    await worker(secondDatabase)();
+    assert.equal(delivered.length, sentBeforeRestart);
+    const row = (await database.query("SELECT id FROM early_access_signups WHERE email='budget-100@example.test'")).rows[0];
+    await grantEarlyAccess(database, row.id, { id: 'ops', role: 'ops_admin' });
+    await worker(secondDatabase)();
+    assert.equal(delivered.at(-1).to, 'budget-100@example.test');
+    assert.equal(delivered.length, sentBeforeRestart + 1);
+    // Budget returns the next UTC day, preserving the deferred intent identities.
+    await database.transaction(() => database.query('UPDATE early_access_team_mail_budget SET budget_day=budget_day-1'));
+    await worker(database)();
+    assert.equal((await database.query("SELECT count(*)::int AS n FROM early_access_email_outbox WHERE kind='team' AND status='pending'")).rows[0].n, 0);
   });
 });
 
