@@ -68,6 +68,7 @@ MINIO_SECRET_KEY=<bucket secret>
 # EMAIL_USER=<gmail address>
 # EMAIL_PASSWORD=<gmail app password>
 # SUPPORT_DESK_ALLOWED_EMAILS=<comma-separated desk emails>
+# EARLY_ACCESS_TEAM_EMAIL=<team inbox for new tester alerts; docs/EARLY_ACCESS_API.md>
 
 # Optional Super Admin Tracker (docs/TRACKER_API.md). Empty token = the tracker
 # answers 503 tracker_not_configured; nothing else is affected. The GitHub token

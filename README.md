@@ -139,9 +139,11 @@ Staff list pagination is an opt-in, compatible rollout: [parameters, route cover
 
 Home partner cards, staff CRUD, private media and Manila daily reporting: [Home promotions](docs/HOME_PROMOTIONS_API.md).
 
+Public Android tester sign-ups, staff grants and private email delivery: [Early access](docs/EARLY_ACCESS_API.md).
+
 ## Main route groups
 
-All routes except `/health`, `/catalog`, `/season-windows`, `/app-minimum-builds`, public `/legal/documents` and effective `/legal/versions/*` reads, public support-ticket and issue-report submit, and the documented anonymous device registration calls require a verified Clerk bearer. The support desk (ticket list/reply/delete, `/issue-reports` read/mark) additionally requires the Clerk account's verified primary email to be on `SUPPORT_DESK_ALLOWED_EMAILS`. `POST /admin/login` is retired (`404`). The API has no password desk administrator seed or local desk tokens; only the desk email allowlist remains as desk access configuration.
+All routes except `/health`, `/catalog`, `/season-windows`, `/app-minimum-builds`, public `/legal/documents` and effective `/legal/versions/*` reads, public support-ticket and issue-report submit, public early-access submit/token status, and the documented anonymous device registration calls require a verified Clerk bearer. The support desk (ticket list/reply/delete, `/issue-reports` read/mark) additionally requires the Clerk account's verified primary email to be on `SUPPORT_DESK_ALLOWED_EMAILS`. `POST /admin/login` is retired (`404`). The API has no password desk administrator seed or local desk tokens; only the desk email allowlist remains as desk access configuration.
 
 - Identity: `/auth/me`, fixed `/auth/me/*` role projections, fixed enrollment/reapply routes, `/auth/clerk/activate`, `/auth/logout`
 - Reference/platform: `/catalog`, `/taxonomy`, `/settings`, `/zones`, `/users`, `/approval-cases`, `/audit`
