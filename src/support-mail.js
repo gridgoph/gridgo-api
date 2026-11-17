@@ -110,12 +110,22 @@ export function createSupportMailer(env = process.env, { createTransport = nodem
     const transporter = createTransport({
       service: "gmail",
       auth: { user, pass },
+      connectionTimeout: 10000,
+      socketTimeout: 15000,
     });
     sendMail = (mail) => transporter.sendMail(mail);
   }
 
   return {
     configured: Boolean(sendMail),
+    async sendEarlyAccessEmail({ to, subject, text, messageId }) {
+      if (!sendMail) return { sent: false };
+      try {
+        return { sent: interpretSmtpResult(await sendMail({
+          from: `"GRIDGO" <${user}>`, to, subject, text, messageId,
+        })).sent };
+      } catch { return { sent: false }; }
+    },
     async sendReplyEmail(ticket, replyMessage) {
       if (!sendMail) {
         return { sent: false, error: "EMAIL_USER or EMAIL_PASSWORD is not configured." };

@@ -48,6 +48,8 @@ import { reconcilePromotionInvites } from './promotions.js';
 import { testerBootstrapNeedsWrite } from './client-bootstrap.js';
 import { routeVouchers } from './voucher-routes.js';
 import { confirmVoucher, sweepVouchers, cancelVoucherReservations } from './vouchers.js';
+import { isEarlyAccessRoute, isStaffEarlyAccessRoute, routeEarlyAccess } from './early-access.js';
+import { createEarlyAccessEmailWorker } from './early-access-email.js';
 import { createVoucherEmailWorker } from './voucher-email.js';
 import { routeLegal, validateEnrollmentConsent, recordEnrollmentConsent, recordArtworkConsent } from './legal.js';
 import { loadVapid, createWebPushDelivery, routeWebPush, unregisterWebSubscription } from "./web-push.js";
@@ -364,6 +366,10 @@ const artworkPreviews = createArtworkPreviews({ database, storage: objectStorage
 // the gap is loud rather than silent.
 const pushDelivery = routePushDelivery(createPushDeliveryOrDisable(process.env),createApnsDelivery(process.env));
 const supportMailer = createSupportMailer(process.env);
+const drainEarlyAccessEmail = createEarlyAccessEmailWorker({ database, mailer: supportMailer });
+const kickEarlyAccessMail = () => { void drainEarlyAccessEmail().catch(() => {
+  console.warn('early_access_mail_drain_failed');
+}); };
 // Super Admin Tracker over GitHub. Optional: without GITHUB_TRACKER_TOKEN its
 // routes answer 503 tracker_not_configured and nothing else changes.
 const tracker = createTracker({
@@ -2430,6 +2436,12 @@ async function handleAuditedRequest(req, res) {
     })) {
       return;
     }
+    if (isEarlyAccessRoute(pathname) && await routeEarlyAccess({
+      req, res, pathname, url, send, database,
+      verifyClerk: token => verifyClerkClaims(token, AUTH),
+      loadClerkUser: clerkUserId => clerkBackend.users.getUser(clerkUserId),
+      notifyStaff: notifyStaffDesk, kickMail: kickEarlyAccessMail,
+    })) return;
     if (await routeIssueReports({
       req,
       res,
@@ -3199,6 +3211,10 @@ async function handleAuditedRequest(req, res) {
       return send(res, result.status, result.body);
     }
 
+    if (isStaffEarlyAccessRoute(pathname)) {
+      await routeEarlyAccess({ req, res, pathname, url, send, database, user, notifyStaff: notifyStaffDesk, kickMail: kickEarlyAccessMail });
+      return;
+    }
     if (isStaffIssueReportsRoute(pathname)) {
       await routeStaffIssueReports({
         req,
@@ -7888,7 +7904,9 @@ async function handleAuditedRequest(req, res) {
     if (err instanceof AttachmentError || (err && Number.isInteger(err.status) && err.code)) {
       return sendDomainError(res, err, { afterCommit: false });
     }
-    if (/^\/me\/shop-team\/invites(?:\/|$)/.test(pathname)) {
+    if (isEarlyAccessRoute(pathname) || isStaffEarlyAccessRoute(pathname)) {
+      console.error({ event: 'early_access_request_failed', code: /^[0-9A-Z]{5}$/.test(err?.code || '') ? err.code : 'unknown' });
+    } else if (/^\/me\/shop-team\/invites(?:\/|$)/.test(pathname)) {
       // PostgreSQL errors can include entire invite rows in detail/message.
       // Keep hashes and recipient data out of diagnostics, including failed saves.
       console.error({ event: 'shop_invite_request_failed', code: /^[0-9A-Z]{5}$/.test(err?.code || '') ? err.code : 'unknown' });
@@ -7960,9 +7978,9 @@ const server = http.createServer((req, res) => {
     void handleRequest(req, res);
     return;
   }
-  if (mutatesStore && issueReportsPathname(pathname)) {
-    // Public issue reports carry base64 screenshots well past the 1 MiB JSON
-    // cap, so the route reads its own body and commits under its own lock.
+  if (mutatesStore && (issueReportsPathname(pathname) || isEarlyAccessRoute(pathname))) {
+    // These public/desk handlers read bounded bodies and own their transactions.
+    // Issue reports also accept screenshots above the generic JSON cap.
     void handleRequest(req, res);
     return;
   }
@@ -8245,6 +8263,7 @@ async function runLifecycleWork() {
       },
       drainColourAnalyses,
       drainVoucherEmail,
+      drainEarlyAccessEmail,
       sweepOrganizationOfficers,
       sweepDeliveryChats,
       sweepPickupChats,
