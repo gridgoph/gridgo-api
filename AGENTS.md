@@ -26,7 +26,7 @@ Custom backend for all GRIDGO apps. Read `PRD.md` for product intent, `README.md
 
 ## Operational model
 
-Settings writes are Super Admin only. Operations audit reads are limited to workspace correction/deletion scopes; account standing changes cannot target privileged memberships. Contracts: `docs/OPERATIONAL_MODEL_V2_API.md#audit-access` and its account/settings sections.
+Settings writes are Super Admin only, except Operations may edit only `riderOfferTimeoutSeconds` with `expectedVersion` and a reason. Operations audit reads are limited to workspace correction/deletion scopes; account standing changes cannot target privileged memberships. Contracts: `docs/OPERATIONAL_MODEL_V2_API.md#audit-access` and its account/settings sections.
 
 The exact contract is `docs/OPERATIONAL_MODEL_V2_API.md`.
 

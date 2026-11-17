@@ -1,5 +1,5 @@
 import { sameReviewData } from './review-data.js';
-import { availableDispatch } from "./dispatch-policy.js";
+import { availableDispatch, riderOfferVisible } from "./dispatch-policy.js";
 import { supplierArtworkReleased } from "./artwork-gates.js";
 import { paymentSettled } from "./operational-model.js";
 import { isTestOperationsUser, reviewSubject } from "./test-operations.js";
@@ -361,7 +361,7 @@ export function canAccessOrder(store, userId, order, {role, location = false, of
     if (r === 'client') return order.clientId === userId && (!location || order.fulfillmentMode !== 'pickup');
     if (!approvedRole(store,userId,r)) return false;
     if (r === 'supplier') return supplierArtworkReleased(order) && (order.supplierId === userId || (!location && !order.supplierId && (store.orderJobs || []).filter(j=>j.orderId===order.id&&j.state!=='cancelled').length>1 && (store.orderJobs || []).some(j => j.orderId === order.id && j.supplierId === userId && j.state !== 'cancelled')));
-    return r === 'rider' && (order.riderId === userId || (!location && offer && sameReviewData(order, store.users?.find(u => u.id === userId)) && availableDispatch(order, store)));
+    return r === 'rider' && (order.riderId === userId || (!location && offer && sameReviewData(order, store.users?.find(u => u.id === userId)) && availableDispatch(order, store) && riderOfferVisible(order, userId)));
   });
 }
 export function notificationVisible(store, notification, userId, role, { shopId = null } = {}) {
@@ -397,7 +397,9 @@ export function notificationVisible(store, notification, userId, role, { shopId 
   // The requesting shop retains this bounded historical outcome after a replacement.
   if (requiredRole === 'supplier' && notification.type?.startsWith('order_reschedule_')
       && orderFromNotification(store, notification)?.rescheduleRequest?.supplierId === userId) return true;
-  if (notification.type === 'dispatch_available' && !availableDispatch(orderFromNotification(store, notification), store)) return false;
+  if (notification.type === 'dispatch_available' && (!availableDispatch(orderFromNotification(store, notification), store)
+    || !riderOfferVisible(orderFromNotification(store, notification), userId)
+    || notification.offerId && notification.offerId !== orderFromNotification(store, notification)?.dispatchOffer?.id)) return false;
   if (notification.orderId) return canAccessOrder(store,userId,orderFromNotification(store,notification),{role:role || (legacySuperSeesOps ? 'super_admin' : requiredRole),offer:notification.type === 'dispatch_available'});
   return true;
 }

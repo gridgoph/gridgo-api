@@ -1,3 +1,5 @@
+import { activeAcknowledgementHandover } from './acknowledgement-receipts.js';
+import { assignmentTime } from './rider-tracking.js';
 import { assertStaffFile, isShopStaff, actorUserId } from './shop-team.js';
 import { canReadApprovalProof } from './approval-proof.js';
 import { deliveryPackagePhotoId } from './delivery-package-photos.js';
@@ -37,6 +39,7 @@ const KINDS = new Set([
   "delivery_photo",
   "delivery_package_photo",
   "handoff_signature",
+  "acknowledgement_signature",
   "supplier_invoice",
   "service_image",
   "catalog_item_photo",
@@ -53,6 +56,7 @@ const CONTENT_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "applica
 export const VERIFICATION_DOCUMENT_TYPES = Object.freeze(["business_permit", "valid_id", "sample_work"]);
 const VERIFICATION_DOCUMENT_TYPE_SET = new Set(VERIFICATION_DOCUMENT_TYPES);
 export const PURPOSE_POLICIES = Object.freeze({
+  acknowledgement_signature: { roles: ['rider'], maxBytes: 2 * 1024 * 1024, contentTypes: ['image/png'] },
   approval_signature: { roles: ["client"], maxBytes: 2 * 1024 * 1024, contentTypes: ["image/png"] },
   approval_sample_photo: { roles: ["client"], maxBytes: 20 * 1024 * 1024, contentTypes: ["image/jpeg", "image/png", "image/webp"] },
   legal_document: { roles: ["super_admin"], maxBytes: 20 * 1024 * 1024, contentTypes: ["application/pdf"] },
@@ -1132,6 +1136,11 @@ export function authorizeFileAttach(user, file, target, store = null) {
     }
     return;
   }
+  if (file.purpose === 'acknowledgement_signature') {
+    if (target?.type !== 'order' || !hasApprovedWorkRole(user, 'rider') || !activeAcknowledgementHandover(record, user)
+        || record.acknowledgementSignature) forbidden();
+    return;
+  }
   if (file.purpose === "handoff_signature") {
     if (target?.type !== "order" || !hasApprovedWorkRole(user, "rider") || record.riderId !== user.id) forbidden();
     if (riderPackingFlow(record) && !currentInspection(record)) fail(409, 'unpacked_inspection_required', 'Complete the unpacked item checks before the shop signs.');
@@ -1249,6 +1258,7 @@ export function attachFileReference(file, target, store = null) {
     delivery_photo: "deliveryPhotoFileIds",
     delivery_package_photo: "deliveryPackagePhotoFileIds",
     handoff_signature: "handoffSignatureFileIds",
+    acknowledgement_signature: "acknowledgementSignatureFileIds",
     service_image: "imageFileIds",
     verification_document: "verificationDocumentFileIds",
   };
@@ -1275,6 +1285,7 @@ export function attachFileReference(file, target, store = null) {
       id: target.record.id,
       field,
       ...((['packing_photo', 'handoff_signature'].includes(file.purpose) && riderPackingFlow(target.record)) ? { inspectionId: target.record.pickupChecklist.inspectionId } : {}),
+      ...(file.purpose === 'acknowledgement_signature' ? { riderId: file.ownerId, assignedAt: assignmentTime(target.record) } : {}),
       ...(target.milestoneCode ? { milestoneCode: target.milestoneCode } : {}),
       ...(target.documentType ? { documentType: target.documentType } : {}),
     });
@@ -1405,6 +1416,14 @@ export function authorizeFileRead(user, store, file) {
     const sent = (file.references || []).filter((reference) => reference.type === "pickup_chat_message");
     if (!sent.length && file.ownerId === user.id) return;
     if (sent.some((reference) => canReadPickupChatPhoto(user, store, reference))) return;
+    forbidden();
+  }
+  if (file.purpose === 'acknowledgement_signature') {
+    if ((file.references || []).some(ref => ref.type === 'order' && store.orders.some(order => order.id === ref.id
+      && ((['ops_admin', 'super_admin'].includes(user.role) || user.role === 'client' && order.clientId === user.id)
+          && order.acknowledgementSignature?.fileId === file.fileId
+        || hasApprovedWorkRole(user, 'rider') && file.ownerId === user.id && activeAcknowledgementHandover(order, user))))) return;
+    if (!(file.references || []).length && file.ownerId === user.id && hasApprovedWorkRole(user, 'rider')) return;
     forbidden();
   }
   if (file.purpose === 'delivery_package_photo') {

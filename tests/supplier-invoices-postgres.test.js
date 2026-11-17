@@ -145,7 +145,9 @@ test('monthly pagination keeps complete totals and cannot expand a supplier scop
   await ready(api);
   await db.transaction(async () => {
     const store = await loadStore(db);
-    store.orders.push({ ...structuredClone(store.orders[0]), id: 'order2', supplierId: 'replacement' });
+    const { dispatchOffer, dispatchOfferAttempts, ...snapshot } = structuredClone(store.orders[0]);
+    // A copied commercial fixture is a separate delivery, never a copied reservation.
+    store.orders.push({ ...snapshot, id: 'order2', supplierId: 'replacement' });
     store.supplierInvoices.push({ ...structuredClone(store.supplierInvoices[0]), orderId: 'order2', supplierId: 'replacement' });
     await saveStore(db, store);
   });

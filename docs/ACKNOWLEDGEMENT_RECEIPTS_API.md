@@ -4,6 +4,10 @@ Backend contract for [rider issue 152](https://github.com/gridgoph/gridgo-rider/
 and the companion rider/client releases. During the pilot this is an
 **acknowledgement receipt**, never an official receipt or tax invoice.
 
+Digital on-screen recipient signatures are an additive companion contract in
+[Rider map home API](RIDER_MAP_HOME_API.md#digital-acknowledgement-receipt). The
+numbered receipt below remains immutable; signature metadata is separate.
+
 ## Scope and lifecycle
 
 One immutable receipt per client order with `fulfillmentMode: "delivery"` and an
@@ -75,6 +79,9 @@ open access. Before arrival or after the window closes, GET and POST return
 `403 forbidden` without receipt data; client and Operations/Super Admin reads
 continue. Rider apps must discard this view when leaving the handover and on
 completion, cancellation or reassignment, and must not cache it into history.
+
+Responses additionally include separate `signature` (null until digitally signed)
+and `invoiceNote` fields; the `receipt` object below is unchanged.
 
 All successful reads use `Cache-Control: private, no-store, max-age=0`. Downloads
 require an authenticated fetch; there is no public URL or permanent signed link.

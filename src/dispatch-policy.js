@@ -23,3 +23,10 @@ export function riderHasActiveDelivery(store, userId) {
   return (store.orders || []).some(order => order.riderId === userId
     && ["rider_assigned", "picked_up", "out_for_delivery"].includes(order.state));
 }
+
+/** Exclusive reservation visibility; stale handsets cannot read/accept the next rider's offer. */
+export function riderOfferVisible(order, riderId, at = new Date().toISOString()) {
+  const offer = order?.dispatchOffer;
+  return offer?.status === 'offered' && offer.riderId === riderId
+    && Date.parse(offer.expiresAt) > Date.parse(at);
+}

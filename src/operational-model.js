@@ -275,6 +275,7 @@ export function defaultOperationalSettings() {
     serviceFeeRateBps: 1_000,
     organizationDiscountRateBps: 500,
     riderCommissionBps: 8_500,
+    riderOfferTimeoutSeconds: 30,
     clientRiderLocationRevealDistanceMeters: 1_000, // Deprecated; no longer controls visibility.
     riderLocationRefreshIntervalSeconds: 20,
     riderLocationStaleAfterSeconds: 120,
@@ -327,6 +328,10 @@ export function defaultOperationalSettings() {
 }
 
 export function validateOperationalSettings(settings) {
+  if (settings.riderOfferTimeoutSeconds !== undefined && (!Number.isInteger(settings.riderOfferTimeoutSeconds)
+      || settings.riderOfferTimeoutSeconds < 10 || settings.riderOfferTimeoutSeconds > 120)) {
+    fail(400, 'invalid_rider_offer_timeout', 'Set the rider offer countdown to an integer from 10 to 120 seconds.');
+  }
   if (settings?.riderPacksMinimumBuilds !== undefined) validateRiderPacksMinimumBuilds(settings.riderPacksMinimumBuilds, fail);
   if (settings?.clientShopChatContactThreshold !== undefined && (!Number.isSafeInteger(settings.clientShopChatContactThreshold) || settings.clientShopChatContactThreshold < 1 || settings.clientShopChatContactThreshold > 20)) {
     fail(400, 'invalid_chat_contact_threshold', 'Choose an integer between 1 and 20.');
@@ -1418,6 +1423,15 @@ export function publicOrderFor(order, user, store = null) {
   if (dropoffConfirmation) publicRecord.dropoffConfirmation = dropoffConfirmation;
   if (order.fulfillmentMode === "delivery") publicRecord.dropoff = structuredClone(deliveryDestination(order));
   const ops = user && ["ops_admin", "super_admin"].includes(user.role);
+  delete publicRecord.dispatchOfferAttempts;
+  delete publicRecord.dispatchOffer;
+  if (order.dispatchOffer && (ops || user?.role === 'rider' && order.dispatchOffer.riderId === user.id)) {
+    // Keep fresh reservations byte-identical to JSONB reloads; never expose future internal metadata.
+    publicRecord.dispatchOffer = Object.fromEntries(['id', 'status', 'riderId', 'offeredAt', 'timeoutSeconds', 'expiresAt', 'respondedAt', 'at']
+      .filter(key => Object.hasOwn(order.dispatchOffer, key)).map(key => [key, order.dispatchOffer[key]]));
+  }
+  delete publicRecord.acknowledgementSignatureFileIds;
+  if (!ops && !(user?.role === 'client' && order.clientId === user.id)) delete publicRecord.acknowledgementSignature;
   delete publicRecord.shopRecoveryHistory;
   delete publicRecord.shopFailureEvents;
   delete publicRecord.declinedBy;

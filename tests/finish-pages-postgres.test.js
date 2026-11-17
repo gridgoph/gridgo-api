@@ -92,7 +92,7 @@ async function fixture(db) {
   await db.transaction(() => saveStore(db, store));
 }
 test(
-  'finish lists retain actual-dev unpaged HTTP bytes across roles and review scopes',
+  'finish lists retain actual-dev unpaged HTTP bytes except exclusive rider-offer visibility',
   { skip },
   async (t) => {
     const db = createDatabase(process.env);
@@ -125,10 +125,18 @@ test(
         const a = await old(who, 'GET', path, null, { raw: true }),
           b = await current(who, 'GET', path, null, { raw: true });
         assert.equal(b.status, a.status, `${who} ${path}`);
-        assert.equal(b.body, a.body, `${who} ${path}`);
+        if (who === 'rider' && new URL(path, 'http://test').pathname === '/orders' && a.status === 200) {
+          // This historical source predates exclusive reservations. With timers
+          // frozen, unassigned shared-pool rows are intentionally no longer visible.
+          // Keep every assigned/history byte strict; reservation visibility itself
+          // is covered by rider-map-home-postgres.test.js.
+          const previous = JSON.parse(a.body);
+          previous.orders = previous.orders.filter(order => order.state !== 'ready_for_dispatch' || order.riderId);
+          assert.equal(b.body, JSON.stringify(previous), `${who} ${path}`);
+        } else assert.equal(b.body, a.body, `${who} ${path}`);
         comparisons++;
       }
-    t.diagnostic(`${comparisons} exact legacy HTTP comparisons`);
+    t.diagnostic(`${comparisons} legacy HTTP comparisons (exclusive rider-offer visibility accounted for)`);
   }
 );
 test(

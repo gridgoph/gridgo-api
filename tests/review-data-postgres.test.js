@@ -12,7 +12,13 @@ const DATABASE_URL = process.env.DATABASE_URL;
 test('PostgreSQL review marking, immutable snapshots, assignment, queues and money refusals', { skip: !DATABASE_URL }, async t => {
   const db = createDatabase({ DATABASE_URL }); t.after(() => db.close());
   await resetDatabase(db, 'TRUNCATE users, platform_settings, taxonomy_categories, accepted_file_formats, funnel_events RESTART IDENTITY CASCADE');
-  await db.transaction(() => saveStore(db, fixture()));
+  await db.transaction(async () => {
+    const store = fixture();
+    store.users.push({ ...store.users.find(u => u.id === 'rider'), id: 'review_rider', reviewData: true,
+      email: 'review_rider@example.invalid', clerkUserId: 'clerk_review_rider' });
+    store.userRoleMemberships.push({ userId: 'review_rider', role: 'rider', createdAt: AT });
+    await saveStore(db, store);
+  });
   const api = await apiForTest(t);
   const mark = (who, on, version = 1, actor = 'admin') => api(actor, 'PATCH', `/users/${who}/review-data`, {
     reviewData: on, expectedVersion: version, reason: 'Isolated review fixture',
@@ -63,8 +69,12 @@ test('PostgreSQL review marking, immutable snapshots, assignment, queues and mon
   assert.equal((await api('client', 'GET', '/orders')).body.orders.length, 2);
   response = await api('rider', 'GET', '/dispatch/offers');
   assert.deepEqual(response.body.offers.map(o => o.id), ['order']);
-  assert.equal((await api('rider', 'POST', '/dispatch/review_order/accept', {})).body.error, 'review_data_assignment_mismatch');
+  assert.equal((await api('rider', 'POST', '/dispatch/review_order/accept', {})).body.error, 'not_offerable');
   assert.equal((await mark('rider', true)).status, 200);
+  // This pool already has a reservation; the newly marked rider joins the next
+  // rotation rather than restarting an exhausted empty pool automatically.
+  const currentReview = (await api('review_rider', 'GET', '/dispatch/offers')).body.offers[0];
+  assert.equal((await api('review_rider', 'POST', '/dispatch/review_order/decline', { offerId: currentReview.dispatchOffer.id })).status, 200);
   response = await api('rider', 'GET', '/dispatch/offers');
   assert.deepEqual(response.body.offers.map(o => o.id), ['review_order']);
   const assertDisplaySplit = order => {
@@ -74,7 +84,7 @@ test('PostgreSQL review marking, immutable snapshots, assignment, queues and mon
     assert.equal(order.platformDeliveryShareMinor, 150);
   };
   assertDisplaySplit(response.body.offers[0]);
-  assert.equal((await api('rider', 'POST', '/dispatch/order/accept', {})).body.error, 'review_data_assignment_mismatch');
+  assert.equal((await api('rider', 'POST', '/dispatch/order/accept', {})).body.error, 'not_offerable');
   assert.equal((await api('rider', 'POST', '/dispatch/review_order/accept', {})).status, 200);
   assertDisplaySplit((await api('rider', 'GET', '/orders/review_order')).body.order);
   assertDisplaySplit((await api('rider', 'GET', '/orders')).body.orders.find(o => o.id === 'review_order'));

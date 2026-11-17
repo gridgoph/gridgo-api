@@ -150,6 +150,7 @@ test('pricing month-end totals exclude review orders even with explicit opt-in',
 
 test('rider offer notifications and replacement matching respect the order snapshot', () => {
   const store = fixture(), order = store.orders[0]; order.state = 'ready_for_dispatch'; order.reviewData = true;
+  order.dispatchOffer = { id: 'review-offer', status: 'offered', riderId: 'rider', expiresAt: new Date(Date.now() + 30000).toISOString() };
   assert.equal(canAccessOrder(store, 'rider', order, { role: 'rider', offer: true }), false);
   store.users.find(u => u.id === 'rider').reviewData = true;
   assert.equal(canAccessOrder(store, 'rider', order, { role: 'rider', offer: true }), true);

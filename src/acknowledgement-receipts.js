@@ -117,7 +117,7 @@ const pesos = amount => {
   const absolute = value < 0n ? -value : value;
   return `PHP ${value < 0n ? '-' : ''}${absolute / 100n}.${String(absolute % 100n).padStart(2, '0')}`;
 };
-export function acknowledgementPdf(receipt) {
+export function acknowledgementPdf(receipt, signature = null) {
   const lines = ['GRIDGO ACKNOWLEDGEMENT RECEIPT', '', `AR number: ${receipt.arNumber}`,
     `Order number: ${receipt.orderNumber}`, `Date issued: ${receipt.issuedAt}`, `Issued to: ${receipt.issuedTo}`, '',
     'Item description / quantity / unit price / subtotal'];
@@ -138,9 +138,11 @@ export function acknowledgementPdf(receipt) {
     if (payment.type === 'cash') lines.push(`  Amount received: ${payment.amountReceivedMinor == null ? 'not recorded' : pesos(payment.amountReceivedMinor)}`,
       `  Change: ${payment.changeMinor == null ? 'not recorded' : pesos(payment.changeMinor)}`);
   }
-  lines.push('', 'Collected by (paper signature): __________________________',
+  if (signature) lines.push('', `Received by: ${signature.signerName}`, `Signed at: ${signature.signedAt}`,
+    `Digital signature evidence: ${signature.fileId}`);
+  lines.push('', GRIDGO_INVOICE_NOTE, '', 'Collected by (paper signature): __________________________',
     'Received by (paper signature): __________________________', '',
-    'Signatures remain on the paper copy; this download does not certify a signature.', '', receipt.note);
+    signature ? 'The digital signature image is available privately from the order.' : 'Signatures remain on the paper copy; this download does not certify a signature.', '', receipt.note);
   return textDocumentPdf(lines, 'GRIDGO Acknowledgement Receipt', { winAnsi: true });
 }
 
@@ -157,12 +159,38 @@ export async function routeAcknowledgement(args) {
   if (req.method === 'POST' && !match[2]) {
     if (!rider && !staff(user)) fail('forbidden', 403);
     const { receipt, created } = await issueAcknowledgement({ ...args, order });
-    return { status: created ? 201 : 200, body: { receipt }, mutated: created };
+    return { status: created ? 201 : 200, body: { receipt, signature: order.acknowledgementSignature ?? null, invoiceNote: GRIDGO_INVOICE_NOTE }, mutated: created };
   }
   if (req.method !== 'GET') fail('not_found', 404);
   if (match[2] && !owner && !staff(user)) fail('forbidden', 403);
   const receipt = await readAcknowledgement(database, order.id);
   if (!receipt) fail('acknowledgement_receipt_not_found', 404);
-  if (match[2]) return { status: 200, pdf: acknowledgementPdf(receipt), filename: `${receipt.arNumber}.pdf` };
-  return { status: 200, body: { receipt } };
+  if (match[2]) return { status: 200, pdf: acknowledgementPdf(receipt, order.acknowledgementSignature), filename: `${receipt.arNumber}.pdf` };
+  return { status: 200, body: { receipt, signature: order.acknowledgementSignature ?? null, invoiceNote: GRIDGO_INVOICE_NOTE } };
+}
+
+export const GRIDGO_INVOICE_NOTE = 'The official invoice comes from GRIDGO.';
+/** Signature is separate immutable handover evidence; the numbered receipt snapshot never changes. */
+export function recordAcknowledgementSignature({ store, order, user, receipt, signature, at, id, audit, digitalRequired = false }) {
+  if (signature === undefined && !digitalRequired) return;
+  if (!signature || typeof signature !== 'object' || Array.isArray(signature)) fail('acknowledgement_signature_required', 400);
+  const signerName = typeof signature.signerName === 'string' ? signature.signerName.trim() : '';
+  if (signerName.length < 2 || signerName.length > 120) fail('acknowledgement_signer_name_required', 400);
+  if (signature.arNumber !== receipt.arNumber) fail('acknowledgement_receipt_mismatch', 400);
+  const file = store.files.find(f => f.fileId === signature.fileId && f.ownerId === user.id
+    && f.purpose === 'acknowledgement_signature' && f.state === 'ready' && f.detectedContentType === 'image/png'
+    && (f.references || []).some(ref => ref.type === 'order' && ref.id === order.id
+      && ref.riderId === user.id && ref.assignedAt === assignmentTime(order)));
+  if (!file) fail('invalid_acknowledgement_signature', 400);
+  if (order.acknowledgementSignature) fail('acknowledgement_signature_immutable');
+  order.acknowledgementSignature = { fileId: file.fileId, signerName, signedAt: at,
+    riderId: user.id, arNumber: receipt.arNumber };
+  audit(store, { actor: user, action: 'acknowledgement_receipt.signed', entityType: 'order', entityId: order.id,
+    orderId: order.id, detail: order.acknowledgementSignature });
+  for (const recipient of [{ userId: order.clientId, role: 'client' }, ...privilegedAdminMemberships(store)]) {
+    store.notifications.push({ id: id('ntf'), userId: recipient.userId, appRole: recipient.role, orderId: order.id,
+      type: 'acknowledgement_receipt_signed', title: 'Signed acknowledgement receipt ready',
+      body: 'The signed delivery acknowledgement is available on the order. The official invoice comes from GRIDGO.', at, read: false });
+  }
+  queueOrderInvalidate(store, order, ['orders', 'notifications']);
 }

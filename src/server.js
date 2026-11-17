@@ -1,3 +1,4 @@
+import { reconcileDispatchOffers, declineDispatchOffer, requireDispatchOffer, offerTimeoutSeconds } from './dispatch-offers.js';
 import { recordOrderActions } from './shop-order-actions.js';
 import { shopMembershipsFor, selectedShop, assertActiveShop, shopSummary, staffRouteAllowed, identityShopRoute,
   supplierShopActor, notifyShopStaff, routeShopTeam, claimShopInvite, discoverShopInvites, isShopStaff, actorUserId, assertStaffFile } from './shop-team.js';
@@ -16,7 +17,7 @@ import { syncSupplierPerformance, routeSupplierPerformance } from './supplier-pe
 import { gatherIssueEvidence, problemPhotos, publicIssue } from './issue-evidence.js';
 import { routeIssueDecisions } from './issue-decisions.js';
 import { approvalPolicy, recordApprovalProof, assertApprovalBeforeProceeding, approveSample, routeApprovalProof } from './approval-proof.js';
-import { routeAcknowledgement, issueAcknowledgement } from './acknowledgement-receipts.js';
+import { routeAcknowledgement, issueAcknowledgement, recordAcknowledgementSignature } from './acknowledgement-receipts.js';
 import { colourSettings } from './colour-pricing.js';
 import { sourceColourRequest, queueColourRequest, colourPriceChecks } from './colour-analysis.js';
 import { createColourWorker } from './colour-worker.js';
@@ -102,7 +103,7 @@ import { assertStoredSupplementUnique, assertStoredOrderPaymentGuards } from './
 import { saveUpkeepNeeded, pruneMatchSelections } from './save-upkeep.js';
 import { TEST_OPERATIONS_FORBIDDEN, isTestOperationsUser, mergeTestOperationsView, reviewSubject, testOperationsRouteAllowed, testOperationsView } from "./test-operations.js";
 import { hasRole, hasSupplierAppAccess, approvedRole, canAccessOrder, notificationVisible, EVENT_ROLES, invalidateFrameVisible } from "./notifications.js";
-import { availableDispatch, dispatchWorkHeld } from "./dispatch-policy.js";
+import { availableDispatch, dispatchWorkHeld, riderOfferVisible } from "./dispatch-policy.js";
 import { requireShopDispatchHours } from './shop-dispatch-hours.js';
 import http from "node:http";
 import crypto from "node:crypto";
@@ -558,6 +559,7 @@ async function save(view, { notificationsOnly = false } = {}) {
       if (order) queueOrderInvalidate(store, order, ['orders']);
     }
   }
+  if (!scope) reconcileDispatchOffers(store, { at: now(), id, audit });
   deriveMissingAudit(store, originalDomainStore(store));
   recordOrderActions(store, originalDomainStore(store));
   deriveDomainEvents(store, originalDomainStore(store), {createId:id,at:now()});
@@ -942,6 +944,7 @@ function publicOperationalSettings(settings, store = null, user = null) {
     colourDetection: colourSettings(settings),
     operatingHours: operatingHours(settings),
     riderCommissionBps: rest.riderCommissionBps ?? 8_500,
+    riderOfferTimeoutSeconds: offerTimeoutSeconds(rest),
     clientRiderLocationRevealDistanceMeters: rest.clientRiderLocationRevealDistanceMeters ?? 1_000,
     riderLocationRefreshIntervalSeconds: trackingSettings(rest).refreshIntervalSeconds,
     riderLocationStaleAfterSeconds: trackingSettings(rest).staleAfterSeconds,
@@ -1241,6 +1244,7 @@ function publicUser(u) {
   // Sign-in time is for the Roles directory (`GET /users`) only.
   // Catalogue, matching, and every other publicUser payload omit it.
   delete rest.lastAuthenticatedAt;
+  delete rest.lastDispatchOfferAt;
   // Clients always expose an authoritative accountType (never undefined for consumers).
   // Non-client roles omit the field — same pattern as orgName / shop / verificationStatus.
   if (u.role === "client") {
@@ -2964,6 +2968,31 @@ async function handleAuditedRequest(req, res) {
       }
     }
 
+    if (user && ['rider', 'ops_admin', 'super_admin'].includes(user.role)
+      && (pathname === '/dispatch/offers' || req.method === 'POST' && /^\/dispatch\/[^/]+\/(accept|decline)$/.test(pathname))) {
+      if (database.inWriteTransaction()) {
+        if (reconcileDispatchOffers(store, { at: now(), id, audit })) await save(store);
+      } else if (await dispatchOffersDue(true)) {
+        store = await enqueueMutation(async () => {
+          const latest = await load();
+          if (reconcileDispatchOffers(latest, { at: now(), id, audit })) await save(latest);
+          return latest;
+        });
+      } else if (req.method === 'GET' && user.role === 'rider') {
+        // The timer may have issued a reservation after the scoped read but
+        // before the due probe. Refresh only when that snapshot missed it.
+        const current = await database.query(`SELECT id, data#>>'{dispatchOffer,id}' AS offer_id FROM orders
+          WHERE ${activeOrderSql('orders.id')} AND state = 'ready_for_dispatch' AND rider_id IS NULL
+            AND data#>>'{dispatchOffer,status}' = 'offered' AND data#>>'{dispatchOffer,riderId}' = $1
+            AND data#>>'{dispatchOffer,expiresAt}' > $2`, [user.id, now()]);
+        if (current.rows.some(row => !store.orders.some(order => order.id === row.id && order.dispatchOffer?.id === row.offer_id))) {
+          store = await loadHotReadStore(database, user.clerkUserId, pathname, {
+            at: now(), role: 'rider', searchParams: url.searchParams,
+          });
+        }
+      }
+    }
+
     // Shop members use the complete graph for current access decisions. Once
     // those gates pass, reuse the existing SQL page selector for their selected
     // identity; handlers still enforce their own role and field projections.
@@ -4326,8 +4355,10 @@ async function handleAuditedRequest(req, res) {
     }
 
     if (req.method === "PATCH" && pathname === "/settings") {
-      if (!isSuper(user)) return send(res, 403, { error: "forbidden" });
       const body = await readBody(req);
+      const countdownOnly = user.role === 'ops_admin' && Object.hasOwn(body, 'riderOfferTimeoutSeconds')
+        && Object.keys(body).every(key => ['expectedVersion', 'reason', 'riderOfferTimeoutSeconds'].includes(key));
+      if (!isSuper(user) && !countdownOnly) return send(res, 403, { error: 'forbidden' });
       if (!Number.isInteger(body.expectedVersion) || body.expectedVersion !== store.version) {
         return send(res, 409, { error: "settings_version_conflict", version: store.version });
       }
@@ -4339,6 +4370,7 @@ async function handleAuditedRequest(req, res) {
       }
       const next = {
         ...store.settings,
+        riderOfferTimeoutSeconds: Object.hasOwn(body, 'riderOfferTimeoutSeconds') ? body.riderOfferTimeoutSeconds : offerTimeoutSeconds(store.settings),
         riderPacksMinimumBuilds: Object.hasOwn(body, 'riderPacksMinimumBuilds')
           ? body.riderPacksMinimumBuilds : riderPacksMinimumBuilds(store.settings),
         testerMonthlyBudgetMinor: Object.hasOwn(body, 'testerMonthlyBudgetMinor') ? body.testerMonthlyBudgetMinor : (store.settings.testerMonthlyBudgetMinor ?? null),
@@ -6795,6 +6827,10 @@ async function handleAuditedRequest(req, res) {
           message: "Collecting from the shop counter is not available yet. Operations can switch this order to delivery.",
         });
       }
+      if (next === 'rider_assigned' && user.role === 'rider') {
+        if (reconcileDispatchOffers(store, { at: now(), id, audit })) await save(store);
+        requireDispatchOffer(store, order, user.id, body.offerId, now());
+      }
       if (next === "rider_assigned") {
         const riderId = user.role === "rider" ? user.id : body.riderId;
         const rider = store.users.find((candidate) => candidate.id === riderId && hasRole(store,candidate.id,"rider"));
@@ -7303,10 +7339,26 @@ async function handleAuditedRequest(req, res) {
       // destination and not a different job. Only the unfinished
       // counter-collection shape has no journey to offer.
       const offers = store.orders.filter(
-        (o) => (sameReviewData(o, user) && availableDispatch(o, store)) || (!isContainedPickup(o) && !dispatchWorkHeld(store, o)
+        (o) => (sameReviewData(o, user) && availableDispatch(o, store) && (user.role !== 'rider' || riderOfferVisible(o, user.id))) || (!isContainedPickup(o) && !dispatchWorkHeld(store, o)
           && o.state === "rider_assigned" && o.riderId === user.id),
       );
-      return send(res, 200, { offers: await Promise.all(offers.map((order) => publicOrder(order, user, store))) });
+      res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+      return send(res, 200, { serverTime: now(), offers: await Promise.all(offers.map(async order => {
+        const projected = await publicOrder(order, user, store);
+        const lines = (store.orderLineItems || []).filter(line => line.orderId === order.id)
+          .map(line => ({ lineItemId: line.id, description: line.itemNameSnapshot, quantity: line.quantity }));
+        if (!lines.length && order.quantity) lines.push({ lineItemId: order.id, description: order.title || null, quantity: order.quantity });
+        return { ...projected, cargoSummary: { lines, totalQuantity: lines.reduce((sum, line) => sum + line.quantity, 0) },
+          travelEstimate: { distanceMeters: projected.deliveryDistanceMeters ?? null, durationSeconds: null, source: 'order_snapshot' } };
+      })) });
+    }
+
+    if (req.method === 'POST' && /^\/dispatch\/[^/]+\/decline$/.test(pathname)) {
+      if (user.role !== 'rider' || !approvedRole(store, user.id, 'rider')) return send(res, 403, { error: 'forbidden' });
+      const order = store.orders.find(o => o.id === pathname.split('/')[2]);
+      const body = await readBody(req);
+      if (declineDispatchOffer(store, order, user.id, body.offerId, { at: now(), id, audit })) await save(store);
+      return send(res, 200, { ok: true });
     }
 
     if (req.method === "POST" && /^\/dispatch\/[^/]+\/accept$/.test(pathname)) {
@@ -7328,6 +7380,7 @@ async function handleAuditedRequest(req, res) {
       }
       if (order.operatingClock) requireOperatingHours(store.settings, now(), "Dispatch");
       requireShopDispatchHours(order, store.settings, now());
+      requireDispatchOffer(store, order, user.id, (await readBody(req)).offerId, now());
       order.riderId = user.id;
       order.riderAssignedAt = now();
       delete order.riderProgress;
@@ -7813,7 +7866,9 @@ async function handleAuditedRequest(req, res) {
         return send(res, 200, { order: await publicOrder(order, user, store) });
       }
       // Older rider builds have no preparation call; still issue atomically before handover.
-      await issueAcknowledgement({ database, store, order, user, now: () => deliveredAt, id, audit });
+      const { receipt } = await issueAcknowledgement({ database, store, order, user, now: () => deliveredAt, id, audit });
+      recordAcknowledgementSignature({ store, order, user, receipt, signature: body.acknowledgementSignature,
+        at: deliveredAt, id, audit, digitalRequired: body.receiptMode === 'digital' });
       completeHandover(store, order, { actor: user, at: deliveredAt, id,
         note: body.evidenceType === 'photo' ? 'Delivery completed with photo evidence' : 'Delivery completed with signature evidence', fileId: evidenceFileId,
         mark: outsideHoursMark(order, store.settings, deliveredAt) });
@@ -8157,6 +8212,26 @@ async function sweepCalls() {
   } catch { console.warn("call lifecycle sweep failed"); }
   finally { callsBusy = false; }
 }
+let dispatchOffersBusy = false;
+async function dispatchOffersDue(includeWaiting = false) {
+  return (await database.query(`SELECT 1 FROM orders WHERE ${activeOrderSql('orders.id')}
+    AND state = 'ready_for_dispatch' AND rider_id IS NULL AND (
+      ($2::boolean AND (data->'dispatchOffer' IS NULL OR data#>>'{dispatchOffer,status}' IN ('waiting','withdrawn')))
+      OR (data#>>'{dispatchOffer,status}' = 'offered' AND data#>>'{dispatchOffer,expiresAt}' <= $1)) LIMIT 1`,
+  [now(), includeWaiting])).rowCount > 0;
+}
+async function sweepDispatchOffers(includeWaiting = false) {
+  if (dispatchOffersBusy) return;
+  dispatchOffersBusy = true;
+  try {
+    if (!await dispatchOffersDue(includeWaiting)) return;
+    await enqueueMutation(async () => {
+      const store = await load();
+      if (reconcileDispatchOffers(store, { at: now(), id, audit })) await save(store);
+    });
+  } catch (error) { console.warn(`dispatch offer sweep failed: ${error?.code || 'unavailable'}`); }
+  finally { dispatchOffersBusy = false; }
+}
 let lifecycleBusy = false;
 async function runLifecycleWork() {
   if (lifecycleBusy) return;
@@ -8165,6 +8240,7 @@ async function runLifecycleWork() {
     await continueAfterStepFailure([
       () => runPlayOptinReminders({ database, broadcast: broadcastPlayOptin, now }),
       sweepRescheduleRequests,
+      () => sweepDispatchOffers(true),
       async () => {
         const candidate = await database.query(`SELECT 1 FROM orders
           WHERE ${activeOrderSql('orders.id')} AND state = 'supplier_assigned' AND supplier_id IS NOT NULL AND (
@@ -8285,6 +8361,8 @@ drainPushOutbox = createOutboxWorker({database,loadStore:loadPushDeliveryStore,d
 await realtimeTransport.start();
 
 server.listen(PORT, HOST, () => {
+  const dispatchOfferTimer = setInterval(sweepDispatchOffers, 1000);
+  dispatchOfferTimer.unref();
   const lifecycleTimer = setInterval(runLifecycleWork, Math.max(1000,Number(process.env.GRIDGO_LIFECYCLE_INTERVAL_MS)||30000));
   lifecycleTimer.unref();
   const callsTimer = setInterval(sweepCalls, 1000);
