@@ -3729,7 +3729,7 @@ async function handleAuditedRequest(req, res) {
             body: fs.createReadStream(file.tempPath),
             contentType: detectedContentType,
             size: file.size,
-            privateFinancial: ["refund_qr", "refund_receipt", "refund_evidence", "supplier_invoice"].includes(purpose),
+            privateFinancial: ["refund_qr", "refund_receipt", "refund_evidence", "supplier_invoice", "acknowledgement_signature"].includes(purpose),
           });
         } catch (error) {
           await compensatePendingFile(fileId, objectKey);
@@ -3806,7 +3806,7 @@ async function handleAuditedRequest(req, res) {
     if (req.method === "GET" && /^\/files\/[^/]+$/.test(pathname)) {
       const file = findFile(store, pathname.split("/")[2]);
       authorizeFileRead(user, store, file);
-      if (file.purpose.startsWith("refund_") || ["supplier_invoice", "approval_signature", "approval_sample_photo"].includes(file.purpose)) res.setHeader("Cache-Control", "private, no-store, max-age=0");
+      if (file.purpose.startsWith("refund_") || ["supplier_invoice", "approval_signature", "approval_sample_photo", "acknowledgement_signature"].includes(file.purpose)) res.setHeader("Cache-Control", "private, no-store, max-age=0");
       return send(res, 200, { file: publicFile(file, user) });
     }
 
@@ -3847,7 +3847,7 @@ async function handleAuditedRequest(req, res) {
         stream.pipe(res);
         return;
       }
-      const privateFinancial = file.purpose.startsWith("refund_") || ["supplier_invoice", "approval_signature", "approval_sample_photo"].includes(file.purpose);
+      const privateFinancial = file.purpose.startsWith("refund_") || ["supplier_invoice", "approval_signature", "approval_sample_photo", "acknowledgement_signature"].includes(file.purpose);
       if (privateFinancial) res.setHeader("Cache-Control", "private, no-store, max-age=0");
       const signed = await objectStorage.presignGet(file.objectKey, { privateFinancial });
       if (['artwork', 'mockup'].includes(file.purpose)) {
