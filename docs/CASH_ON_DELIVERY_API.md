@@ -70,6 +70,14 @@ Approval credits the **actual net shop advance** to the original rider wallet, r
 
 The owning client submits `POST /orders/:id/cash/repayment` with `expectedVersion`, exact `amountMinor` equal to the original sale total, `reference`, and `proofFileId` (`cash_repayment_proof`). Operations uses `/ops/cash/orders/:id/confirm-repayment` or `/reject-repayment` (reason required on rejection). Confirmation records bank receipt, clears the receivable, credits the original rider's fare and recognizes GRIDGO/voucher shares. Original cash sale amounts and payment method remain unchanged; `confirmationSource` distinguishes the online debt repayment.
 
+For the owning client, `GET /orders/:id/cash` and the repayment POST response include this minimized `cash.repayment` object:
+
+```json
+{"status":"none","submittedAt":null,"rejectedAt":null,"rejectionReason":null}
+```
+
+`status` is `confirmed` when `repaymentConfirmedAt` is set, `pending` when a proof submission awaits an Operations decision, `rejected` when the latest submission was rejected and the client may submit again, or `none` otherwise. `submittedAt` is the current submission's ISO timestamp (the rejected submission's timestamp for `rejected`), or `null`. Only `rejected` includes its ISO `rejectedAt` and `rejectionReason`; those fields are `null` in every other state. Rejection retains the archived proof, submission time, decision time and normalized reason; only the times and reason reach this client projection. Resubmission returns `pending` and clears the projected rejection fields. GET reconstructs the same state from persisted progress after reload or on another device. No transfer reference, proof file ID, Operations identity, wallet, shop advance or fee split is included in `cash.repayment`. Rider and Operations projections are unchanged; online orders have no repayment projection. This addition does not enable cash.
+
 For paid redelivery:
 
 1. Client `POST /orders/:id/cash/redelivery-quote` with `expectedVersion` quotes GRIDGO Office to the original destination using shared current zone pricing and the current online rider split. Quote expires in 15 minutes.
