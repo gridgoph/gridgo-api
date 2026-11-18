@@ -3388,7 +3388,7 @@ async function handleAuditedRequest(req, res) {
     if (pathname.startsWith("/issues") || /\/(issues|cancellation-quote)$/.test(pathname) || pathname.startsWith("/refund-requests") || /\/refund-requests$/.test(pathname)) {
       res.setHeader("Cache-Control", "private, no-store, max-age=0");
     }
-    const cashResponse = await routeCash({req,url,db:database,store,user,readBody,now,id,audit});
+    const cashResponse = await routeCash({req,url,db:database,store,user,readBody,now,id,audit,storage:objectStorage});
     if (cashResponse) {
       res.setHeader('Cache-Control','private, no-store, max-age=0');
       if (cashResponse.mutated) await save(store);

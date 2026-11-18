@@ -1,3 +1,4 @@
+import { listCashEvidence } from './cash-evidence.js';
 import { randomUUID } from 'node:crypto';
 import { cashAmounts, cashSettings, cashFail as fail } from './cash-policy.js';
 import { cashFingerprint, cashWallet, postCash, reconcileCash, releaseCash } from './cash-ledger.js';
@@ -87,28 +88,30 @@ export async function settleCashRedelivery({db,store,order,user,at,id,audit}) {
   notify(store,order,user,'redelivery_settled',{at,id,audit});
 }
 
-export async function routeCash({req,url,db,store,user,readBody,id,now,audit}) {
+export async function routeCash({req,url,db,store,user,readBody,id,now,audit,storage}) {
   const walletPath = url.pathname === '/me/rider-wallet';
   const topupPath = url.pathname === '/me/rider-wallet/topups';
   const decision = /^\/ops\/cash\/topups\/([^/]+)\/(confirm|reject)$/.exec(url.pathname);
   const riderAction = /^\/dispatch\/([^/]+)\/cash\/(shop-payment|collect|no-show-start|no-show-report)$/.exec(url.pathname);
   const opsAction = /^\/ops\/cash\/orders\/([^/]+)\/(approve-no-show|reject-no-show|confirm-repayment|reject-repayment|confirm-redelivery|reject-redelivery|remedy-reserve|remedy-reconcile|remedy-pay|incident-open|incident-return|cancel-unpaid)$/.exec(url.pathname);
   const clientAction = /^\/orders\/([^/]+)\/cash\/(repayment|redelivery-quote|redelivery-payment|remedy-destination)$/.exec(url.pathname);
+  const evidence = /^\/ops\/cash\/orders\/([^/]+)\/evidence$/.exec(url.pathname);
   const detail = /^\/orders\/([^/]+)\/cash$/.exec(url.pathname);
   const topupList = url.pathname === '/ops/cash/topups';
   const recon = url.pathname === '/ops/cash/reconciliation';
   const incidentList = url.pathname === '/ops/cash/incidents';
-  if (!walletPath && !topupPath && !decision && !riderAction && !opsAction && !clientAction && !detail && !topupList && !recon && !incidentList) return null;
+  if (!walletPath && !topupPath && !decision && !riderAction && !opsAction && !clientAction && !detail && !topupList && !recon && !incidentList && !evidence) return null;
   if (!user) fail('unauthorized',401);
-  if ((decision || opsAction || topupList || recon || incidentList) && !staff(user)) fail('forbidden',403);
+  if ((decision || opsAction || topupList || recon || incidentList || evidence) && !staff(user)) fail('forbidden',403);
   if ((walletPath || topupPath) && (user.role !== 'rider' || !approvedRole(store,user.id,'rider'))) fail('forbidden',403);
-  const targetId = (riderAction || opsAction || clientAction || detail)?.[1];
+  const targetId = (riderAction || opsAction || clientAction || detail || evidence)?.[1];
   const order = targetId && store.orders.find(o => o.id===targetId && o.cash);
   if (targetId && !order) fail('order_not_found',404);
   if (riderAction) checkRider(store,user,order);
   if (clientAction && (user.role!=='client' || order.clientId!==user.id)) fail('forbidden',403);
   if (detail && !staff(user) && !(user.role==='client' && order.clientId===user.id) && !(user.role==='rider' && order.riderId===user.id)) fail('forbidden',403);
   if (req.method==='GET') {
+    if (evidence) return {status:200,body:await listCashEvidence({store,order,storage})};
     if (incidentList) {
       const status=url.searchParams.get('status');
       if (status && !['outstanding','resolved'].includes(status)) fail('cash_incident_status_invalid',400);
@@ -129,14 +132,15 @@ export async function routeCash({req,url,db,store,user,readBody,id,now,audit}) {
       return {status:200,body:{cash:{version:progress.version||1,status:order.paymentStatus,
         amountDueMinor:order.state==='cancelled' || order.payments.initial.status==='confirmed'?0:order.totalMinor,shopPaidAt:progress.shopPaidAt ?? null,collectedAt:progress.collectedAt ?? null,
         noShowApprovedAt:progress.noShowApprovedAt ?? null,repaymentConfirmedAt:progress.repaymentConfirmedAt ?? null,
-        ...(staff(user)?{progress}:{}),...((staff(user)||user.role==='rider')?{amounts:cashAmounts(order)}:{}),
+        ...(staff(user)?{progress}:{}),...((staff(user)||user.role==='rider')?{amounts:cashAmounts(order),
+          noShowStartedAt:progress.noShowStartedAt ?? null,noShowReportedAt:progress.noShowReportedAt ?? null}:{}),
         ...(progress.redelivery?{redelivery:{id:progress.redelivery.id,feeMinor:progress.redelivery.feeMinor,paidAt:progress.redelivery.paidAt??null,deliveredAt:progress.redelivery.deliveredAt??null,invoice:progress.redelivery.invoice??null}}:{}),
         ...(user.role==='client'?{remedy:progress.remedy?{type:'cash_funded_advance',remedyType:progress.remedy.remedyType,status:progress.remedy.status,
           ...(['partial_refund','full_refund'].includes(progress.remedy.remedyType)?{amountMinor:progress.remedy.amountMinor}:{}),paidAt:progress.remedy.paidAt??null}:null}:{})}}};
     }
     fail('not_found',404);
   }
-  if (req.method!=='POST') fail('not_found',404);
+  if (req.method!=='POST' || evidence) fail('not_found',404);
   if (topupPath) assertReviewMoneyAllowed(user);
   if (order) assertReviewMoneyAllowed(order);
   const body = await readBody(req);
