@@ -10,7 +10,7 @@ GRIDGO is a centralized Davao printing platform connecting clients, accredited p
 
 - PostgreSQL 17 is the only domain persistence system. MinIO stores private file bytes; PostgreSQL stores metadata only.
 - Clerk is the only identity/session provider, including Google sign-in. GRIDGO roles remain authoritative in PostgreSQL.
-- Money uses integer PHP minor units. A client service fee is added to the supplier subtotal and collected in the initial online installment; later online/direct-at-store amounts follow the accepted payment plan. COD is unavailable.
+- Money uses integer PHP minor units. A client service fee is added to the supplier subtotal and collected in the initial online installment; later online/direct-at-store amounts follow the accepted payment plan. Cash delivery is off by default; its wallet, custody and remedy contract is `docs/CASH_ON_DELIVERY_API.md`.
 - Fresh seed creates catalog, taxonomy, zones, and settings only. It creates no accounts or operational data.
 
 ## Roles and onboarding
@@ -59,7 +59,7 @@ Notifications are durable, caller-scoped PostgreSQL inbox rows. Event coverage, 
 
 ## Non-goals
 
-- live PayMongo/card collection, provider sub-accounts, or cash custody;
+- live PayMongo/card collection, provider sub-accounts, or automated wallet top-ups;
 - automatic supplier assignment;
 - runtime geocoding;
 - PostGIS before spatial database queries exist;

@@ -2,6 +2,8 @@
 
 Implements the narrowed 18 October 2026 decision for [tracker 221](https://github.com/gridgoph/gridgo-api/issues/221). This release adds an exact cancellation quote, automatic evidence gathering on existing issues, and an audited human fault/remedy record. All money is safe-integer PHP minor units (100 centavos = ₱1). All routes require Clerk authentication and current database membership.
 
+The separately gated [cash-delivery API](CASH_ON_DELIVERY_API.md) consumes these evidence/approval decisions for cash-funded remedies. Online cancellation quotes and refund calculations below retain their existing behavior.
+
 The existing [manual refunds](REFUNDS_API.md), [issue window and claims](OPERATIONAL_MODEL_V2_API.md), and [net payout adjustments](PRODUCTION_PENALTIES_API.md) remain authoritative. This release adds no automatic fault attribution, payout freeze, recovery ledger, cross-order deduction, or payment execution. Existing issue-created claims and refund holds continue unchanged. There is no schema migration: evidence and decisions use `issues.data`; accepted quotes use append-only `refund_events.data`.
 
 ## Client cancellation flow

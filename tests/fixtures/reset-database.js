@@ -12,9 +12,11 @@ export async function resetDatabase(database, sql) {
   }
   if (/\busers\b/.test(sql) && !/\baudit_log\b/.test(sql)) sql = sql.replace(/TRUNCATE\s+/i, 'TRUNCATE audit_log, ');
   await database.transaction(async () => {
+    for (const table of ['cash_journals','cash_entries','cash_accounts','cash_requests','cash_reservations','cash_incidents','cash_incident_resolutions']) await database.query(`ALTER TABLE ${table} DISABLE TRIGGER cash_no_truncate`);
     await database.query('ALTER TABLE audit_log DISABLE TRIGGER audit_log_no_truncate');
     await database.query('ALTER TABLE acknowledgement_receipts DISABLE TRIGGER acknowledgement_receipts_no_truncate');
     await database.query(sql);
+    for (const table of ['cash_journals','cash_entries','cash_accounts','cash_requests','cash_reservations','cash_incidents','cash_incident_resolutions']) await database.query(`ALTER TABLE ${table} ENABLE ALWAYS TRIGGER cash_no_truncate`);
     await database.query('ALTER TABLE acknowledgement_receipts ENABLE ALWAYS TRIGGER acknowledgement_receipts_no_truncate');
     await database.query('ALTER TABLE audit_log ENABLE ALWAYS TRIGGER audit_log_no_truncate');
   });

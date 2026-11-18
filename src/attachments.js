@@ -56,6 +56,16 @@ const CONTENT_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "applica
 export const VERIFICATION_DOCUMENT_TYPES = Object.freeze(["business_permit", "valid_id", "sample_work"]);
 const VERIFICATION_DOCUMENT_TYPE_SET = new Set(VERIFICATION_DOCUMENT_TYPES);
 export const PURPOSE_POLICIES = Object.freeze({
+  cash_topup_proof: { roles: ['rider'], maxBytes: 15*1024*1024, contentTypes: ['image/jpeg','image/png','image/webp'] },
+  cash_shop_receipt: { roles: ['rider'], maxBytes: 15*1024*1024, contentTypes: ['image/jpeg','image/png','image/webp'] },
+  cash_no_show_photo: { roles: ['rider'], maxBytes: 15*1024*1024, contentTypes: ['image/jpeg','image/png','image/webp'] },
+  cash_return_photo: { roles: ['ops_admin','super_admin'], maxBytes: 15*1024*1024, contentTypes: ['image/jpeg','image/png','image/webp'] },
+  cash_remedy_receipt: { roles: ['ops_admin','super_admin'], maxBytes: 15*1024*1024, contentTypes: ['image/jpeg','image/png','image/webp'] },
+  cash_reprint_receipt: { roles: ['ops_admin','super_admin'], maxBytes: 15*1024*1024, contentTypes: ['image/jpeg','image/png','image/webp'] },
+  cash_remedy_qr: { roles: ['client'], maxBytes: 5*1024*1024, contentTypes: ['image/jpeg','image/png','image/webp'] },
+  cash_repayment_proof: { roles: ['client'], maxBytes: 15*1024*1024, contentTypes: ['image/jpeg','image/png','image/webp'] },
+  cash_incident_photo: { roles: ['rider','ops_admin','super_admin'], maxBytes: 15*1024*1024, contentTypes: ['image/jpeg','image/png','image/webp'] },
+  cash_shop_return: { roles: ['rider'], maxBytes: 15*1024*1024, contentTypes: ['image/jpeg','image/png','image/webp'] },
   acknowledgement_signature: { roles: ['rider'], maxBytes: 2 * 1024 * 1024, contentTypes: ['image/png'] },
   approval_signature: { roles: ["client"], maxBytes: 2 * 1024 * 1024, contentTypes: ["image/png"] },
   approval_sample_photo: { roles: ["client"], maxBytes: 20 * 1024 * 1024, contentTypes: ["image/jpeg", "image/png", "image/webp"] },
@@ -784,6 +794,7 @@ export function findFile(store, fileId) {
 }
 
 export function resolveFileTarget(store, purpose, body, user = null) {
+  if (purpose.startsWith('cash_')) fail(409, 'cash_attachment_route_required', 'Bind this evidence through its cash route.');
   if (['promotion_logo', 'promotion_image', 'promotion_card_image'].includes(purpose)) fail(409, 'promotion_attachment_route_required', 'Set logo/image/cardImage on the Promotions route.');
   if (purpose === CLIENT_SHOP_CHAT_PURPOSE) fail(409, 'client_shop_chat_attachment_not_attachable', 'Send attachmentFileIds with the chat message.');
   if (["refund_qr", "refund_receipt", "refund_evidence"].includes(purpose)) {
@@ -1377,6 +1388,12 @@ export function authorizeFileRead(user, store, file) {
     fail(404, "file_not_found", "That ready file no longer exists. Refresh the record and try again.");
   }
   if (!user) forbidden();
+  if (file.purpose.startsWith('cash_')) {
+    if (['ops_admin','super_admin'].includes(user.role) || file.ownerId===user.id) return;
+    if (file.purpose==='cash_remedy_receipt' && user.role==='client' && (file.references||[]).some(r=>r.type==='cash' && r.clientId===user.id)) return;
+    if (['cash_reprint_receipt','cash_shop_receipt','cash_shop_return'].includes(file.purpose) && hasApprovedWorkRole(user,'supplier') && (file.references||[]).some(r=>r.type==='cash' && r.supplierId===user.id)) return;
+    forbidden();
+  }
   if (['promotion_logo', 'promotion_image', 'promotion_card_image'].includes(file.purpose)) {
     if (['client', 'ops_admin', 'super_admin'].some(role => hasRole(user, role))) return;
     forbidden();

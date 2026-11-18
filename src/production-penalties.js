@@ -172,6 +172,9 @@ export function assessProductionLapses(store, { at, createId, orderId = null }) 
       continue; // A warning must commit before this tier can deduct.
     }
     if (warningsOnly || pilotWarning || order.productionTimeCorrection?.penaltyExempt || !lapse.policy.deductionsEnabled || !productionPenaltySettings(store.settings).deductionsEnabled) continue;
+    // The accepted cash offer and its wallet hold are one monetary commitment.
+    // Keep warning history, but never reshape money the rider already committed.
+    if (order.cash && order.cashProgress?.acceptedCashAmounts) continue;
     if (timing.pendingReview || (!timing.finishedAt && lapse.tier !== 'severe')) continue;
     if (Date.parse(at) <= Date.parse(lapse.warnings.at(-1).at)) continue;
     if (refundHold(store, order) || rescheduleHold(order) || order.payoutHold || (store.claims || []).some((claim) => claim.orderId === order.id

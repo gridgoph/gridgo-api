@@ -10,6 +10,8 @@ Immutable checkout/sample approvals, private signature evidence and PDF download
 
 Map-home exclusive offers, Operations countdown and digital receipt signatures: [Rider map home API](docs/RIDER_MAP_HOME_API.md).
 
+Cash checkout, rider wallets, manual top-ups, custody reconciliation and evidenced remedies: [Cash on delivery API](docs/CASH_ON_DELIVERY_API.md). Cash ships off by default; companion app screens are separate releases.
+
 Pilot door-delivery acknowledgement receipts, automatic AR numbering, rider reads and client PDF downloads are documented in [Acknowledgement receipts](docs/ACKNOWLEDGEMENT_RECEIPTS_API.md).
 
 Order share-card state, tap telemetry and weekly rider handoff reminders are documented in [Sharing and reminders](docs/SHARING_AND_REMINDERS_API.md).

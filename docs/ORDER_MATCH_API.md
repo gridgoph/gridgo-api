@@ -2,6 +2,8 @@
 
 Progressive fee schedules, locked cart groups, scheduled settings/preview, and staff working: [Service fee API](SERVICE_FEE_API.md). Flat-rate examples below describe retained legacy snapshots unless stated otherwise.
 
+Cash checkout is a separate, disabled-by-default payment choice for eligible individual delivery clients: [Cash on delivery API](CASH_ON_DELIVERY_API.md). Existing QR checkout below is unchanged.
+
 This is the authoritative first-drop contract for client matching and cart checkout. Existing public listing reads remain `GET /catalog/shops` and `GET /catalog/items/:itemId`; this API does not create a second catalog.
 
 All routes require a Clerk bearer mapped to a PostgreSQL `client` membership, except Operations/Super Admin may also read an invoice. Money is integer PHP minor units.

@@ -9,7 +9,9 @@ import { snapshotShopClock } from './shop-hours.js';
 import { feeSchedule, feeSettings } from './service-fee.js';
 import { voucherMoney, applyVoucherMoney, splitVoucherMinor } from './voucher-money.js';
 import { clientVoucher } from './voucher-projection.js';
-import { selectVoucher, settleVoucherInitial, reserveVoucher, releaseVoucherReservations, availableVouchers, addVoucherCode, publicVoucher } from './vouchers.js';
+import { selectVoucher, settleVoucherInitial, reserveVoucher, releaseVoucherReservations, availableVouchers, addVoucherCode, publicVoucher, confirmVoucher } from './vouchers.js';
+import { cashSettings, requireCashCheckout, cashFail } from './cash-policy.js';
+import { createPayoutMilestones as cashPayoutStages } from './operational-model.js';
 import { operatingClockSnapshot, reviewTiming, orderReviewTiming } from './operating-hours.js';
 import { listingAcceptsArtwork } from "./file-formats.js";
 import { DOCX_CONTENT_TYPE } from "./docx.js";
@@ -1169,7 +1171,8 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   const orderId = createId("ord");
   // Snapshotted here, like the rider delivery split: the setting moving later
   // never changes what this client owes.
-  const downpaymentPercent = basketId ? 100 : downpaymentPercentSetting(store.settings);
+  const cash = body.payment?.method === 'cash';
+  const downpaymentPercent = cash || basketId ? 100 : downpaymentPercentSetting(store.settings);
   const order = {
     id: orderId,
     shopClockVersion: 1,
@@ -1338,7 +1341,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
       fulfillmentMode: cart.fulfillmentMode, pickup: { ...profile.shop },
       ...(jobDropoff ? { dropoff: jobDropoff } : {}),
       supplierSubtotalMinor, deliveryDistanceMeters: distance, deliveryFeeMinor,
-      ...deliverySplit(deliveryFeeMinor, order.hubPickup ? 0 : (store.settings.riderCommissionBps ?? 8_500)),
+      ...deliverySplit(deliveryFeeMinor, order.hubPickup ? 0 : cash ? 8000 : (store.settings.riderCommissionBps ?? 8_500)),
       estimatedProductionMinutes: Math.round(estimatedHours * 60),
       estimatedHours, ...(cart.scheduledFor ? { scheduledFor: cart.scheduledFor } : {}),
       createdAt: at, updatedAt: at,
@@ -1401,7 +1404,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
     subtotalMinor: itemSubtotalMinor,
     serviceFeeMinor,
     deliveryFeeMinor: deliveryTotalMinor,
-    ...deliverySplit(deliveryTotalMinor, order.hubPickup ? 0 : (store.settings.riderCommissionBps ?? 8_500)),
+    ...deliverySplit(deliveryTotalMinor, order.hubPickup ? 0 : cash ? 8000 : (store.settings.riderCommissionBps ?? 8_500)),
     totalMinor,
     onlineDueMinor: totalMinor,
     supplierPlatformPayoutMinor: itemSubtotalMinor,
@@ -1453,7 +1456,19 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
 
   if (voucher && voucherAllocation) applyVoucherMoney(order, voucherAllocation, voucher);
   let proof = null;
-  if (zeroCashBoundary) {
+  if (cash) {
+    if (order.totalMinor <= 0) cashFail('cash_payment_not_required');
+    order.cash = { version: 1, limitMinor: cashSettings(store.settings).limitMinor,
+      noShowWaitSeconds: cashSettings(store.settings).noShowWaitSeconds };
+    order.paymentPlan = 'cash_delivery';
+    order.onlineDueMinor = 0;
+    order.payoutPlanVersion = 3;
+    order.payoutMilestones = cashPayoutStages(order, { version: 3 });
+    order.payments.initial = { ...order.payments.initial, method: 'cash', status: 'not_submitted' };
+    order.state = 'needs_qa';
+    order.paymentStatus = 'cash_due';
+    order.timeline = [{ at, state: 'needs_qa', by: user.id, note: 'Cash order placed; collection remains due at delivery' }];
+  } else if (zeroCashBoundary) {
     if (!voucher || order.payments.initial.amountMinor !== 0) fail(409, 'voucher_zero_cash_boundary_required', 'Refresh the checkout payment amount.');
   } else {
     const payment = record(body.payment, 'payment');
@@ -1518,7 +1533,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
       voucherServiceFeeMinor: order.voucherServiceFeeMinor, voucherDeliveryMinor: order.voucherDeliveryMinor,
       ...(order.coversOrderTotal ? { voucherSupplierMinor: order.voucherSupplierMinor, gridgoSupplierTopupMinor: order.gridgoSupplierTopupMinor, gridgoRiderTopupMinor: order.gridgoRiderTopupMinor } : {}),
       clientServiceFeeMinor: order.clientServiceFeeMinor, clientDeliveryFeeMinor: order.clientDeliveryFeeMinor } : {}),
-    paymentPlan: { method: "qr_manual", downpaymentPercent, downpaymentMinor: order.payments.initial.amountMinor, balanceMinor: order.payments.final_online.amountMinor },
+    paymentPlan: { method: cash ? 'cash' : "qr_manual", downpaymentPercent, downpaymentMinor: order.payments.initial.amountMinor, balanceMinor: order.payments.final_online.amountMinor },
   };
   if (!basketId) store.orderInvoices.push({ orderId, invoiceNumber: order.invoiceNumber, issuedAt: at, snapshot: invoice });
   if (!basketId) {
@@ -1538,7 +1553,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   for (const { item } of [...grouped.values()].flat()) if (isQuoteListing(item)) markQuoteOrdered(store, item, order, { user, at, createId });
   if (!zeroCashBoundary) notifyOpsJobNeedsQa(store, order, { createId, at });
   if (!basketId) {
-    if (!zeroCashBoundary) notifyOpsPaymentSubmitted(store, order, { createId, at });
+    if (!zeroCashBoundary && !cash) notifyOpsPaymentSubmitted(store, order, { createId, at });
     notifyClientReceiptReady(store, order, { createId, at });
   }
   queueOrderInvalidate(store, order, ["orders"]);
@@ -1663,6 +1678,13 @@ function linkSampleFirstOrder(store, user, order, cartLines, { at, createId }) {
 }
 
 function checkoutBasket(store, user, cart, body, createId, at, req) {
+  const cash = body.payment?.method === 'cash';
+  if (cash) {
+    requireCashCheckout(store.settings, user, 0);
+    if (isReviewData(user)) cashFail('review_data_money_forbidden');
+    if (cart.fulfillmentMode !== 'delivery') cashFail('cash_delivery_required');
+    if (store.orders.some(o => o.clientId === user.id && o.cashProgress?.noShowApprovedAt && !o.cashProgress.repaymentConfirmedAt)) cashFail('cash_client_barred');
+  }
   if (cart.fulfillmentMode === "pickup" && store.settings.hubPickupEnabled !== true) {
     fail(409, "hub_pickup_disabled", "Hub pickup is currently unavailable. Choose delivery for a new order.");
   }
@@ -1675,11 +1697,13 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
   const honouredOffers = groups.map(group => offeredGroupProjection(store, cart, group.lines, at));
   const plan = cartVoucherPlan(store, cart, lines, at);
   const voucher = plan?.voucher;
-  const zeroCashBoundary = Boolean(voucher?.data?.coversOrderTotal && clientCartQuote(store, cart, lines, at).downpaymentMinor === 0);
+  const zeroCashBoundary = !cash && Boolean(voucher?.data?.coversOrderTotal && clientCartQuote(store, cart, lines, at).downpaymentMinor === 0);
   if (groups.length < 2) {
     const result = checkout(store, user, cart, body, createId, at, req, { voucher, voucherAllocation: plan?.groups[0], offeredProjection: honouredOffers[0], zeroCashBoundary });
+    if (cash) { const order = store.orders.find(o => o.id === result.order.id); requireCashCheckout(store.settings, user, order.supplierSubtotalMinor + order.serviceFeeMinor); }
     if (voucher) reserveVoucher(store, voucher, cart, { id: createId, at, orderIds: [result.order.id], amountMinor: plan.voucherDiscountMinor });
     else releaseVoucherReservations(store, { id: createId, at }, r => r.cartId === cart.id);
+    if (cash && voucher) confirmVoucher(store,[store.orders.find(o=>o.id===result.order.id)],{id:createId,at,actorId:user.id});
     if (zeroCashBoundary) {
       const order = store.orders.find(o => o.id === result.order.id);
       settleVoucherInitial(store, [order], { id: createId, at, actorId: user.id });
@@ -1705,8 +1729,10 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
     });
   }
   const orders = results.map((result) => store.orders.find((order) => order.id === result.order.id));
+  if (cash) requireCashCheckout(store.settings, user, addMinor(orders.map(o => o.supplierSubtotalMinor + o.serviceFeeMinor), 'cash.cartSubtotal'));
   if (voucher) reserveVoucher(store, voucher, cart, { id: createId, at, orderIds: orders.map(o => o.id), amountMinor: plan.voucherDiscountMinor });
   else releaseVoucherReservations(store, { id: createId, at }, r => r.cartId === cart.id);
+  if (cash && voucher) confirmVoucher(store,orders,{id:createId,at,actorId:user.id});
   if (zeroCashBoundary) {
     settleVoucherInitial(store, orders, { id: createId, at, actorId: user.id });
     for (const order of orders) {
@@ -1751,7 +1777,7 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
       voucherSupplierMinor: addMinor(orders.map(o => o.voucherSupplierMinor || 0), 'voucher.supplier'),
       gridgoSupplierTopupMinor: addMinor(orders.map(o => o.gridgoSupplierTopupMinor || 0), 'voucher.supplierTopup'),
       gridgoRiderTopupMinor: addMinor(orders.map(o => o.gridgoRiderTopupMinor || 0), 'voucher.riderTopup') } : {}),
-    paymentPlan: { method: "qr_manual", downpaymentPercent: 100, downpaymentMinor: basket.totalMinor, balanceMinor: 0 },
+    paymentPlan: { method: cash ? 'cash' : "qr_manual", downpaymentPercent: 100, downpaymentMinor: basket.totalMinor, balanceMinor: 0 },
   };
   for (const order of orders) order.invoiceNumber = first.invoiceNumber;
   store.orderInvoices.push({ orderId: first.id, invoiceNumber: first.invoiceNumber, issuedAt: at, snapshot: invoice });
@@ -1772,7 +1798,7 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
         label: order.groupLabel, deliveryNumber: group.deliveryNumber, shopDeliveryCount: group.shopDeliveryCount,
         deadline: group.deadline, lineIds: group.lines.map(line => line.id), deliveryFeeMinor: order.deliveryFeeMinor })) } });
   }
-  if (!zeroCashBoundary) notifyOpsPaymentSubmitted(store, first, { createId, at });
+  if (!zeroCashBoundary && !cash) notifyOpsPaymentSubmitted(store, first, { createId, at });
   notifyClientReceiptReady(store, first, { createId, at });
   return { order: results[0].order, basket: publicBasket(store, basket, user), invoice };
 }

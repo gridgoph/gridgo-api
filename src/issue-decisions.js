@@ -16,6 +16,7 @@ export async function routeIssueDecisions({ req, url, store, user, readBody, now
   if (!['ops_admin', 'super_admin'].includes(user.role)) fail(403, 'forbidden', 'Operations or Super Admin is required.');
   const issue = (store.issues || []).find(row => row.id === match[1]);
   if (!issue) fail(404, 'issue_not_found', 'Issue not found.');
+  if (['reserved','unknown'].includes(store.orders.find(o=>o.id===issue.orderId)?.cashProgress?.remedy?.status)) fail(409,'cash_remedy_decision_locked','Resolve the reserved manual cash remedy before revising its decision.');
   if (['resolved', 'dismissed'].includes(issue.status)) fail(409, 'issue_closed', 'This issue is closed.');
   const body = await readBody(req);
   if (body?.expectedVersion !== (issue.version || 1)) fail(409, 'issue_stale', 'Reload the issue before changing it.', { currentVersion: issue.version || 1 });

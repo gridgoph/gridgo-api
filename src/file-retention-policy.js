@@ -35,6 +35,7 @@ export function fileRelationships(store, file) {
   let unresolved = false;
   for (const ref of file.references || []) {
     if (ref.type === 'order') orderIds.add(ref.id);
+    if (ref.type === 'cash') { if (ref.orderId) orderIds.add(ref.orderId); else if (!ref.closedAt) unresolved = true; }
     if (['pickup_chat_message', 'client_shop_chat_message'].includes(ref.type)) {
       if (ref.orderId) orderIds.add(ref.orderId); else unresolved = true;
     }
@@ -59,6 +60,9 @@ export function fileRelationships(store, file) {
   const activeCart = (store.cartLines || []).some((line) => contains(line, file.fileId)
     && (store.carts || []).some((cart) => cart.id === line.cartId && !['checked_out', 'cancelled', 'expired'].includes(cart.state)));
   const held = unresolved || orders.some((order) => order?.payoutHold || order?.disputeStatus === 'open')
+    || orders.some(order=>order?.cashProgress?.incident?.status==='outstanding')
+    || orders.some(order => order?.cashProgress && (['reserved','unknown'].includes(order.cashProgress.remedy?.status)
+      || order.cashProgress.noShowReportedAt && !order.cashProgress.repaymentConfirmedAt))
     || Object.entries(CASE_TERMINALS).some(([collection, terminal]) => (store[collection] || []).some((row) =>
       !terminal.includes(row.status) && (orderIds.has(row.orderId) || contains(row, file.fileId))));
   // Verification evidence may be material to a case on any of its owner's orders.
@@ -95,11 +99,13 @@ export function retentionDecision(store, file, at) {
   let due;
   let reason;
   if (links.orders.length) {
-    if (!ARTWORK.has(file.purpose) && !MONEY.has(file.purpose) && !PHOTOS.has(file.purpose)) return keep('unclassified_order_file');
+    if (!ARTWORK.has(file.purpose) && !MONEY.has(file.purpose) && !file.purpose.startsWith('cash_') && !PHOTOS.has(file.purpose)) return keep('unclassified_order_file');
     const closures = links.orders.map((order) => closedAt(order, ARTWORK.has(file.purpose)));
     if (closures.some((value) => !value || !Number.isFinite(Date.parse(value)))) return keep('order_not_closed');
-    due = deadline(latest(closures), MONEY.has(file.purpose) ? 5 : PHOTOS.has(file.purpose) ? 1 : 0, ARTWORK.has(file.purpose) ? 30 : 0);
+    due = deadline(latest(closures), MONEY.has(file.purpose) || file.purpose.startsWith('cash_') ? 5 : PHOTOS.has(file.purpose) ? 1 : 0, ARTWORK.has(file.purpose) ? 30 : 0);
     reason = 'retention_expired';
+  } else if (file.purpose==='cash_topup_proof' && file.references?.length && file.references.every(r=>r.type==='cash' && r.closedAt)) {
+    due=deadline(latest(file.references.map(r=>r.closedAt)),5);reason='retention_expired';
   } else if (verification(file) && ((file.references || []).length || file.verificationDocumentType
     || (store.riderDocuments || []).some((row) => row.fileId === file.fileId)
     || (store.approvalCases || []).some((row) => contains(row, file.fileId)))) {
