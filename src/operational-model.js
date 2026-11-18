@@ -1,3 +1,4 @@
+import { validateCashSettings, cashAmounts } from './cash-policy.js';
 import { staffOrderProjection } from './shop-staff-order.js';
 import { orderRemovalBlock } from './order-removal.js';
 import { riderPacksMinimumBuilds, validateRiderPacksMinimumBuilds } from './app-builds.js';
@@ -276,6 +277,7 @@ export function defaultOperationalSettings() {
     organizationDiscountRateBps: 500,
     riderCommissionBps: 8_500,
     riderOfferTimeoutSeconds: 30,
+    cash: { enabled: false, limitMinor: 150000, noShowWaitSeconds: 600 },
     clientRiderLocationRevealDistanceMeters: 1_000, // Deprecated; no longer controls visibility.
     riderLocationRefreshIntervalSeconds: 20,
     riderLocationStaleAfterSeconds: 120,
@@ -328,6 +330,7 @@ export function defaultOperationalSettings() {
 }
 
 export function validateOperationalSettings(settings) {
+  validateCashSettings(settings);
   if (settings.riderOfferTimeoutSeconds !== undefined && (!Number.isInteger(settings.riderOfferTimeoutSeconds)
       || settings.riderOfferTimeoutSeconds < 10 || settings.riderOfferTimeoutSeconds > 120)) {
     fail(400, 'invalid_rider_offer_timeout', 'Set the rider offer countdown to an integer from 10 to 120 seconds.');
@@ -1450,6 +1453,35 @@ export function publicOrderFor(order, user, store = null) {
   const assignedSupplier = user?.role === "supplier" && order.supplierId === user.id;
   const owningClient = user?.role === "client" && order.clientId === user.id;
   const rider = user?.role === "rider";
+  delete publicRecord.cashProgress;
+  delete publicRecord.cashAmounts;
+  delete publicRecord.cashRedelivery;
+  delete publicRecord.activeTrip;
+  delete publicRecord.cashIncident;
+  delete publicRecord.cashRemedyPayouts;
+  delete publicRecord.cashSettlement;
+  if (order.cash) {
+    publicRecord.cash = { method: 'cash', version:order.cashProgress?.version||1, status: order.state==='cancelled'?'cancelled':order.cashProgress?.incident?.status==='outstanding'?'work_stopped':order.cashProgress?.repaymentConfirmedAt ? 'no_show_repaid' : order.cashProgress?.noShowApprovedAt ? 'online_repayment_required'
+      : order.payments?.initial?.status === 'confirmed' ? 'collected' : 'due', noShowWaitSeconds: order.cash.noShowWaitSeconds };
+    const cashRider=rider && (order.riderId===user.id || order.dispatchOffer?.status==='offered' && order.dispatchOffer.riderId===user.id);
+    if (ops || cashRider) publicRecord.cashAmounts = cashAmounts(order);
+    if (ops || assignedSupplier) {
+      const grossPaidMinor=order.cashProgress?.shopPaidAt?cashAmounts(order).shopMinor:0;
+      const returnedMinor=order.cashProgress?.incident?.resolvedMinor||0;
+      publicRecord.cashSettlement={grossPaidMinor,returnedMinor,netPaidMinor:grossPaidMinor-returnedMinor,
+        currentObligationMinor:order.state==='cancelled'?0:cashAmounts(order).shopMinor};
+    }
+    if (ops) publicRecord.cashProgress = clone(order.cashProgress || {});
+    const incident=order.cashProgress?.incident;
+    if (incident && (ops || cashRider || assignedSupplier)) publicRecord.cashIncident=clone(incident);
+    if (incident && owningClient) publicRecord.cashIncident={status:incident.status,clientCashBarred:false};
+    if (ops || assignedSupplier) publicRecord.cashRemedyPayouts=[...new Map([...(order.cashProgress?.remedyAttempts||[]),order.cashProgress?.remedy].filter(r=>r?.status==='paid' && ['reprint','replacement'].includes(r.remedyType)).map(r=>[r.id,r])).values()]
+      .map(r=>({id:r.id,amountMinor:r.amountMinor,receiptFileId:r.receiptFileId,reference:r.reference,paidAt:r.paidAt}));
+    const leg=order.cashProgress?.redelivery;
+    if (leg && (ops || owningClient)) publicRecord.cashRedelivery={id:leg.id,feeMinor:leg.feeMinor,paidAt:leg.paidAt??null,deliveredAt:leg.deliveredAt??null,invoice:clone(leg.invoice??null)};
+    if (leg?.paidAt && (ops || cashRider)) publicRecord.activeTrip={kind:'redelivery',id:leg.id,pickup:clone(leg.pickup),dropoff:clone(leg.dropoff),
+      deliveryFeeMinor:leg.feeMinor,riderPayoutMinor:leg.riderPayoutMinor,riderCommissionBps:leg.riderCommissionBps};
+  }
   if (!ops && !owningClient) {
     for (const field of ['voucher', 'voucherDiscountMinor', 'voucherServiceFeeMinor', 'voucherDeliveryMinor', 'clientServiceFeeMinor', 'clientDeliveryFeeMinor', 'voucherSupplierMinor', 'clientSupplierSubtotalMinor', 'gridgoSupplierTopupMinor', 'gridgoRiderTopupMinor', 'coversOrderTotal']) delete publicRecord[field];
   }

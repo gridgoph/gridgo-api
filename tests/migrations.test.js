@@ -1226,8 +1226,9 @@ for (const fees of [[3100, 6200, 9300], [8900, 14900, 22900]]) test(`delivery zo
     await runner(migrationOptions(schema, "up", undefined, client));
     const migrated = (await client.query('SELECT version, settings FROM platform_settings')).rows[0];
     // Zone pricing, operating hours, rider tracking, bracket activation, artwork guidance,
-    // colour thresholds, the published rider-packs minimum and offer countdown advance the handshake.
-    assert.equal(migrated.version, 21);
+    // colour thresholds, the published rider-packs minimum, offer countdown and disabled cash defaults advance the handshake.
+    assert.equal(migrated.version, 22);
+    assert.deepEqual(migrated.settings.cash, { enabled:false,limitMinor:150000,noShowWaitSeconds:600 });
     assert.equal(migrated.settings.riderOfferTimeoutSeconds, 30);
     assert.deepEqual(migrated.settings.riderPacksMinimumBuilds, { client: 0, supplier: 0, rider: 161 });
     assert.equal(migrated.settings.colourDetection.a3MonochromeMaxBps, 1000);

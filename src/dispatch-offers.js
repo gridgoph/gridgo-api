@@ -2,6 +2,7 @@ import { availableDispatch, riderOfferVisible } from './dispatch-policy.js';
 import { eligibleRiderIds, queueInvalidate, queueOrderInvalidate } from './notifications.js';
 import { notifyAdmins } from './domain-events.js';
 import { sameReviewData } from './review-data.js';
+import { cashCovered, cashAmounts, cashAmountKey } from './cash-policy.js';
 
 export const DEFAULT_OFFER_TIMEOUT_SECONDS = 30;
 export const offerTimeoutSeconds = settings => settings?.riderOfferTimeoutSeconds ?? DEFAULT_OFFER_TIMEOUT_SECONDS;
@@ -26,7 +27,8 @@ export function reconcileDispatchOffers(store, ctx) {
   // Close obsolete reservations before allocating, so a hold/assignment releases its slot immediately.
   for (const order of store.orders || []) {
     if (order.dispatchOffer?.status !== 'offered') continue;
-    const recipient = riders.find(r => r.id === order.dispatchOffer.riderId && sameReviewData(order, r));
+    const recipient = riders.find(r => r.id === order.dispatchOffer.riderId && sameReviewData(order, r) && cashCovered(store,order,r.id)
+      && (!order.cash || order.cashProgress?.redelivery?.paidAt || cashAmountKey(order.dispatchOffer.cashAmounts)===cashAmountKey(cashAmounts(order))));
     const status = order.riderId ? (order.riderId === order.dispatchOffer.riderId ? 'accepted' : 'withdrawn')
       : !availableDispatch(order, store, ctx.at) || !recipient ? 'withdrawn'
       : Date.parse(order.dispatchOffer.expiresAt) <= Date.parse(ctx.at) ? 'expired' : null;
@@ -35,9 +37,9 @@ export function reconcileDispatchOffers(store, ctx) {
   const busy = new Set(store.orders.filter(o => o.dispatchOffer?.status === 'offered').map(o => o.dispatchOffer.riderId));
   const orders = [...store.orders].sort((a, b) => stableId(a.readyAt || a.createdAt || '', b.readyAt || b.createdAt || '') || stableId(a.id, b.id));
   for (const order of orders) {
-    if (!availableDispatch(order, store, ctx.at) || ['offered', 'exhausted'].includes(order.dispatchOffer?.status)) continue;
+    if (!availableDispatch(order, store, ctx.at) || order.dispatchOffer?.status==='offered' || !order.cash && order.dispatchOffer?.status==='exhausted') continue;
     const attempted = new Set((order.dispatchOfferAttempts || []).filter(a => ['declined', 'expired'].includes(a.status)).map(a => a.riderId));
-    const remaining = riders.filter(r => sameReviewData(order, r) && !attempted.has(r.id));
+    const remaining = riders.filter(r => sameReviewData(order, r) && !attempted.has(r.id) && cashCovered(store,order,r.id));
     const next = remaining.filter(r => !busy.has(r.id)).sort((a, b) => stableId(a.lastDispatchOfferAt || '', b.lastDispatchOfferAt || '') || stableId(a.id, b.id))[0];
     if (!next) {
       const status = remaining.length ? 'waiting' : 'exhausted';
@@ -53,7 +55,8 @@ export function reconcileDispatchOffers(store, ctx) {
     }
     const timeoutSeconds = offerTimeoutSeconds(store.settings);
     const offer = { id: ctx.id('offer'), status: 'offered', riderId: next.id, offeredAt: ctx.at,
-      timeoutSeconds, expiresAt: new Date(Date.parse(ctx.at) + timeoutSeconds * 1000).toISOString() };
+      timeoutSeconds, expiresAt: new Date(Date.parse(ctx.at) + timeoutSeconds * 1000).toISOString(),
+      ...(order.cash?{cashAmounts:cashAmounts(order)}:{}) };
     order.dispatchOffer = offer;
     next.lastDispatchOfferAt = ctx.at;
     busy.add(next.id);

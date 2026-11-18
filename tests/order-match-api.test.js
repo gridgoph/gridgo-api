@@ -503,8 +503,8 @@ test("client order-match routes persist a single-shop QR checkout and invoice", 
     method: "POST", subject: "clerk_client",
     body: { payment: { method: "cash", proofFileId: "file_qr", reference: "QR-123" } },
   });
-  assert.equal(rejected.status, 400);
-  assert.equal(rejected.body.error, "payment_method_not_allowed");
+  assert.equal(rejected.status, 409);
+  assert.equal(rejected.body.error, "cash_disabled");
   const checkout = await request(instance.api, `/me/carts/${cartId}/checkout`, {
     method: "POST", subject: "clerk_client",
     body: { payment: { method: "qr_manual", proofFileId: "file_qr", reference: "QR-123" } },

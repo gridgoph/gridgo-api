@@ -1,4 +1,7 @@
 import { reconcileDispatchOffers, declineDispatchOffer, requireDispatchOffer, offerTimeoutSeconds } from './dispatch-offers.js';
+import { routeCash, collectCash, cashRequest, settleCashRedelivery } from './cash-routes.js';
+import { hydrateCashWallets, reserveCash } from './cash-ledger.js';
+import { cashAmounts, cashCovered, cashFail, cashSettings } from './cash-policy.js';
 import { recordOrderActions } from './shop-order-actions.js';
 import { shopMembershipsFor, selectedShop, assertActiveShop, shopSummary, staffRouteAllowed, identityShopRoute,
   supplierShopActor, notifyShopStaff, routeShopTeam, claimShopInvite, discoverShopInvites, isShopStaff, actorUserId, assertStaffFile } from './shop-team.js';
@@ -48,7 +51,7 @@ import { routePromotions } from './promotion-routes.js';
 import { reconcilePromotionInvites } from './promotions.js';
 import { testerBootstrapNeedsWrite } from './client-bootstrap.js';
 import { routeVouchers } from './voucher-routes.js';
-import { confirmVoucher, sweepVouchers, cancelVoucherReservations } from './vouchers.js';
+import { confirmVoucher, sweepVouchers, cancelVoucherReservations, restoreVoucherForRefund } from './vouchers.js';
 import { isEarlyAccessRoute, isStaffEarlyAccessRoute, routeEarlyAccess } from './early-access.js';
 import { createEarlyAccessEmailWorker } from './early-access-email.js';
 import { createVoucherEmailWorker } from './voucher-email.js';
@@ -559,7 +562,7 @@ async function save(view, { notificationsOnly = false } = {}) {
       if (order) queueOrderInvalidate(store, order, ['orders']);
     }
   }
-  if (!scope) reconcileDispatchOffers(store, { at: now(), id, audit });
+  if (!scope) { await hydrateCashWallets(database,store); reconcileDispatchOffers(store, { at: now(), id, audit }); }
   deriveMissingAudit(store, originalDomainStore(store));
   recordOrderActions(store, originalDomainStore(store));
   deriveDomainEvents(store, originalDomainStore(store), {createId:id,at:now()});
@@ -1886,7 +1889,7 @@ function audit(store, entry) {
  */
 
 async function load() {
-  return loadStore(database);
+  return hydrateCashWallets(database,await loadStore(database));
 }
 
 async function expireElapsedIssueWindows() {
@@ -2644,6 +2647,7 @@ async function handleAuditedRequest(req, res) {
         sessionHash: notificationClaims?.claims?.sid ? crypto.createHash('sha256').update(notificationClaims.claims.sid).digest('hex') : null,
       }) : scopedClientStore || await load();
 
+    await hydrateCashWallets(database,store);
     if (clientSaveScope(store)) {
       const maintenance = saveMaintenanceView(store);
       const pending = new Set(maintenance.orders.filter(order => order.state === 'issue_window_open').map(order => order.id));
@@ -3384,6 +3388,28 @@ async function handleAuditedRequest(req, res) {
     if (pathname.startsWith("/issues") || /\/(issues|cancellation-quote)$/.test(pathname) || pathname.startsWith("/refund-requests") || /\/refund-requests$/.test(pathname)) {
       res.setHeader("Cache-Control", "private, no-store, max-age=0");
     }
+    const cashResponse = await routeCash({req,url,db:database,store,user,readBody,now,id,audit});
+    if (cashResponse) {
+      res.setHeader('Cache-Control','private, no-store, max-age=0');
+      if (cashResponse.mutated) await save(store);
+      return send(res,cashResponse.status,cashResponse.body);
+    }
+    const cashTarget = /^\/(?:orders|dispatch)\/([^/]+)/.exec(pathname);
+    const cashOrder = cashTarget && store.orders.find(o=>o.id===cashTarget[1] && o.cash);
+    if (cashOrder && !user) return send(res,401,{error:'unauthorized'});
+    if (cashOrder && (req.method!=='GET' || pathname.endsWith('/cancellation-quote')) && !isOps(user)
+      && !(user.role==='client' && cashOrder.clientId===user.id) && !(user.role==='supplier' && cashOrder.supplierId===user.id)
+      && !(user.role==='rider' && (cashOrder.riderId===user.id || cashOrder.dispatchOffer?.status==='offered' && cashOrder.dispatchOffer.riderId===user.id))) return send(res,403,{error:'forbidden'});
+    if (cashOrder && req.method!=='GET') {
+      if (/^\/orders\/[^/]+\/(payments|milestones|refund-requests|delivery-pin|changes|shop-recovery|reschedule-request|assign-supplier|assign-rider)(\/|$)/.test(pathname)) cashFail('cash_route_required');
+      const progress=cashOrder.cashProgress;
+      if (progress?.incident?.status==='outstanding') cashFail('cash_incident_hold');
+      if (progress?.noShowReportedAt && !progress.noShowApprovedAt || progress?.noShowApprovedAt && !progress.redelivery?.paidAt) cashFail('cash_no_show_hold');
+      // Only these shortcuts bypass a cash reservation, actual return or signed
+      // settlement. QA, transport and bookkeeping use the shared state machine.
+      if (pathname.endsWith('/transition') && ['rider_assigned','cancelled','delivered'].includes((await readBody(req)).state)) cashFail('cash_governed_handover_required');
+    }
+    if (cashOrder && pathname.endsWith('/cancellation-quote')) cashFail('cash_change_of_mind_refund_unavailable');
     const changeResponse = await routeOrderChanges({ req, url, store, user, readBody, now, id, audit });
     if (changeResponse) {
       res.setHeader('Cache-Control', 'private, no-store');
@@ -3729,7 +3755,7 @@ async function handleAuditedRequest(req, res) {
             body: fs.createReadStream(file.tempPath),
             contentType: detectedContentType,
             size: file.size,
-            privateFinancial: ["refund_qr", "refund_receipt", "refund_evidence", "supplier_invoice", "acknowledgement_signature"].includes(purpose),
+            privateFinancial: purpose.startsWith("cash_") || ["refund_qr", "refund_receipt", "refund_evidence", "supplier_invoice", "acknowledgement_signature"].includes(purpose),
           });
         } catch (error) {
           await compensatePendingFile(fileId, objectKey);
@@ -3806,7 +3832,7 @@ async function handleAuditedRequest(req, res) {
     if (req.method === "GET" && /^\/files\/[^/]+$/.test(pathname)) {
       const file = findFile(store, pathname.split("/")[2]);
       authorizeFileRead(user, store, file);
-      if (file.purpose.startsWith("refund_") || ["supplier_invoice", "approval_signature", "approval_sample_photo", "acknowledgement_signature"].includes(file.purpose)) res.setHeader("Cache-Control", "private, no-store, max-age=0");
+      if ((file.purpose.startsWith("refund_") || file.purpose.startsWith("cash_")) || ["supplier_invoice", "approval_signature", "approval_sample_photo", "acknowledgement_signature"].includes(file.purpose)) res.setHeader("Cache-Control", "private, no-store, max-age=0");
       return send(res, 200, { file: publicFile(file, user) });
     }
 
@@ -3847,7 +3873,7 @@ async function handleAuditedRequest(req, res) {
         stream.pipe(res);
         return;
       }
-      const privateFinancial = file.purpose.startsWith("refund_") || ["supplier_invoice", "approval_signature", "approval_sample_photo", "acknowledgement_signature"].includes(file.purpose);
+      const privateFinancial = (file.purpose.startsWith("refund_") || file.purpose.startsWith("cash_")) || ["supplier_invoice", "approval_signature", "approval_sample_photo", "acknowledgement_signature"].includes(file.purpose);
       if (privateFinancial) res.setHeader("Cache-Control", "private, no-store, max-age=0");
       const signed = await objectStorage.presignGet(file.objectKey, { privateFinancial });
       if (['artwork', 'mockup'].includes(file.purpose)) {
@@ -4370,6 +4396,8 @@ async function handleAuditedRequest(req, res) {
       }
       const next = {
         ...store.settings,
+        cash: Object.hasOwn(body,'cash') ? (body.cash && typeof body.cash==='object' && !Array.isArray(body.cash)
+          ? {...cashSettings(store.settings),...body.cash}:body.cash) : cashSettings(store.settings),
         riderOfferTimeoutSeconds: Object.hasOwn(body, 'riderOfferTimeoutSeconds') ? body.riderOfferTimeoutSeconds : offerTimeoutSeconds(store.settings),
         riderPacksMinimumBuilds: Object.hasOwn(body, 'riderPacksMinimumBuilds')
           ? body.riderPacksMinimumBuilds : riderPacksMinimumBuilds(store.settings),
@@ -5923,6 +5951,9 @@ async function handleAuditedRequest(req, res) {
       issue.updatedAt = ts;
       const order = store.orders.find((o) => o.id === issue.orderId);
       if (order) {
+        if (order.cash && issue.status==='resolved' && issue.faultDecision?.fault!=='client'
+          && ['reprint','replacement'].includes(issue.faultDecision?.remedy)) restoreVoucherForRefund(store,order,
+          {id,at:ts,actorId:user.id,clientCaused:false,reason:issue.resolution});
         order.timeline.push({
           at: ts,
           state: order.state,
@@ -7371,6 +7402,10 @@ async function handleAuditedRequest(req, res) {
       }
       const orderId = pathname.split("/")[2];
       const order = store.orders.find((o) => o.id === orderId);
+      const acceptBody = await readBody(req);
+      if (order?.cash && order.riderId!==user.id && !(order.dispatchOffer?.status==='offered' && order.dispatchOffer.riderId===user.id)) return send(res,403,{error:'forbidden'});
+      const cashAccept = order?.cash ? await cashRequest(database,req,user,acceptBody) : null;
+      if (cashAccept?.cached) return send(res,cashAccept.cached.status,cashAccept.cached.body);
       if (!order || order.state !== "ready_for_dispatch" || order.riderId) return send(res, 409, { error: "not_offerable", message: "This job is no longer available. Refresh Offers to choose another job." });
       // A collected order needs a rider too — it is carried to GRIDGO Office
       // rather than to the client's door. Only the unfinished counter-pickup
@@ -7380,7 +7415,19 @@ async function handleAuditedRequest(req, res) {
       }
       if (order.operatingClock) requireOperatingHours(store.settings, now(), "Dispatch");
       requireShopDispatchHours(order, store.settings, now());
-      requireDispatchOffer(store, order, user.id, (await readBody(req)).offerId, now());
+      requireDispatchOffer(store, order, user.id, acceptBody.offerId, now());
+      if (order.cash) {
+        if (!acceptBody.offerId) cashFail('cash_offer_id_required',400);
+        if (order.cashProgress?.redelivery?.paidAt) {
+          Object.assign(order.cashProgress.redelivery,{riderId:user.id,assignedAt:now()});
+        } else {
+          if (acceptBody.shopCashConfirmed!==true) cashFail('cash_shop_funds_confirmation_required',400);
+          if (!cashCovered(store,order,user.id)) cashFail('cash_wallet_insufficient');
+          (order.cashProgress||={version:1}).acceptedCashAmounts=cashAmounts(order);
+          const share=cashAmounts(order).gridgoMinor;
+          if (share) await reserveCash(database,order.id,user.id,share);
+        }
+      }
       order.riderId = user.id;
       order.riderAssignedAt = now();
       delete order.riderProgress;
@@ -7391,6 +7438,10 @@ async function handleAuditedRequest(req, res) {
       notifyOrderParties(store, order, { createId: id, at: order.updatedAt });
       queueOrderInvalidate(store, order, ["dispatch", "orders", "jobs"]);
       await save(store);
+      if (cashAccept) {
+        const response = await cashAccept.finish({status:200,body:{order:await publicOrder(order,user,store)}});
+        return send(res,response.status,response.body);
+      }
       return send(res, 200, { order: await publicOrder(order, user, store) });
     }
 
@@ -7405,6 +7456,7 @@ async function handleAuditedRequest(req, res) {
       const orderId = pathname.split("/")[2];
       const order = store.orders.find((candidate) => candidate.id === orderId && candidate.riderId === user.id);
       if (!order) return send(res, 404, { error: "order_not_found" });
+      if (order.cash && !order.cashProgress?.shopPaidAt) cashFail('cash_shop_receipt_required');
       // The rider is already assigned and at the shop: hours gate new dispatch only, never this handover.
       if (order.state !== "rider_assigned") {
         return send(res, 409, {
@@ -7774,6 +7826,9 @@ async function handleAuditedRequest(req, res) {
       const orderId = pathname.split("/")[2];
       const order = store.orders.find((candidate) => candidate.id === orderId && candidate.riderId === user.id);
       if (!order) return send(res, 404, { error: "order_not_found" });
+      const cashDeliveryBody = order.cash ? await readBody(req) : null;
+      const cashDelivery = order.cash ? await cashRequest(database,req,user,cashDeliveryBody) : null;
+      if (cashDelivery?.cached) return send(res,cashDelivery.cached.status,cashDelivery.cached.body);
       if (!["picked_up", "out_for_delivery"].includes(order.state)) {
         return send(res, 409, {
           error: "delivery_not_available",
@@ -7866,6 +7921,11 @@ async function handleAuditedRequest(req, res) {
         return send(res, 200, { order: await publicOrder(order, user, store) });
       }
       // Older rider builds have no preparation call; still issue atomically before handover.
+      if (order.cash) {
+        if (body.receiptMode!=='digital' || !body.acknowledgementSignature?.fileId) cashFail('cash_client_signature_required',400);
+        if (order.cashProgress?.redelivery?.paidAt) await settleCashRedelivery({db:database,store,order,user,at:deliveredAt,id,audit});
+        else if (!order.cashProgress?.collectedAt) await collectCash({db:database,store,order,user,body,at:deliveredAt,id,audit});
+      }
       const { receipt } = await issueAcknowledgement({ database, store, order, user, now: () => deliveredAt, id, audit });
       recordAcknowledgementSignature({ store, order, user, receipt, signature: body.acknowledgementSignature,
         at: deliveredAt, id, audit, digitalRequired: body.receiptMode === 'digital' });
@@ -7873,6 +7933,10 @@ async function handleAuditedRequest(req, res) {
         note: body.evidenceType === 'photo' ? 'Delivery completed with photo evidence' : 'Delivery completed with signature evidence', fileId: evidenceFileId,
         mark: outsideHoursMark(order, store.settings, deliveredAt) });
       await save(store);
+      if (cashDelivery) {
+        const response = await cashDelivery.finish({status:200,body:{order:await publicOrder(order,user,store)}});
+        return send(res,response.status,response.body);
+      }
       return send(res, 200, { order: await publicOrder(order, user, store) });
     }
 

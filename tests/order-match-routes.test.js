@@ -318,7 +318,7 @@ test("preferences, addresses, matching, cart checkout, invoice, and mockup use t
     call("POST", `/me/carts/${cartId}/checkout`, {
       payment: { method: "cash", proofFileId: "file_qr", reference: "QR-123" },
     }),
-    (error) => error.code === "payment_method_not_allowed",
+    (error) => error.code === "cash_disabled",
   );
   const checkedOut = await call("POST", `/me/carts/${cartId}/checkout`, {
     payment: { method: "qr_manual", proofFileId: "file_qr", reference: "QR-123" },

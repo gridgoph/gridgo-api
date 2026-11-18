@@ -997,7 +997,7 @@ Operations revenue cards expose `billedMinor`, `collectedMinor`, `recognizedMino
 
 ## Digital payment plans and allocations
 
-Canonical installment codes are `initial` and optional `final_online`. The legacy route aliases `downpayment` and `balance` map to those codes. COD is not an enum and is rejected with `400 payment_method_not_allowed`.
+Canonical installment codes are `initial` and optional `final_online`. The legacy route aliases `downpayment` and `balance` map to those codes. These online installment routes reject cash with `cash_route_required`; cash checkout and settlement use the separate, disabled-by-default [cash delivery contract](CASH_ON_DELIVERY_API.md).
 
 Order payment shape:
 

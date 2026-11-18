@@ -23,6 +23,18 @@ function fixture(enabled = true, version = 2) {
 }
 const assess = (store, hours) => assessProductionLapses(store, { at: atHours(hours), createId });
 
+test('accepted cash custody freezes its net shop amount; warnings continue and unaccepted cash still uses the existing deduction policy',()=>{
+  for (const accepted of [false,true]) {
+    const store=fixture(true,3),order=store.orders[0];
+    order.cash={version:1};order.state='ready_for_dispatch';order.readyAt=atHours(2);
+    order.payoutMilestones[0].status='pending_pof';
+    if (accepted) order.cashProgress={acceptedCashAmounts:{shopMinor:100000}};
+    assess(store,2);assess(store,2.01);
+    assert.equal(order.payoutMilestones[0].amountMinor,accepted?100000:95000);
+    assert.equal(store.productionLapses[0].warnings.length,1);
+  }
+});
+
 test('tier boundaries are exact and no communication escalates only a missed deadline', () => {
   for (const [hours, tier] of [[0, null], [0.001, 'minor'], [6, 'minor'], [6.001, 'moderate'], [24, 'moderate'], [24.001, 'severe']]) {
     assert.equal(latenessTier(DEADLINE, atHours(hours)), tier);

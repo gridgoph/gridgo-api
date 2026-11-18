@@ -58,24 +58,28 @@ export function acknowledgementSnapshot(store, order, at) {
     return { id: line.id, description: line.itemName, quantity: line.quantity,
       unitPriceMinor: money(line.clientUnitPriceMinor), subtotalMinor: money(line.clientAmountMinor) };
   });
-  const deliveryFeeMinor = money(order.deliveryFeeMinor);
+  const redelivery=order.cashProgress?.redelivery?.paidAt ? order.cashProgress.redelivery : null;
+  const deliveryFeeMinor = sum([order.deliveryFeeMinor,redelivery?.feeMinor||0]);
   const organizationDiscountMinor = money(order.organizationDiscountMinor ?? 0);
   const voucherDiscountMinor = money(order.voucherDiscountMinor ?? 0);
-  const grandTotalMinor = money(order.totalMinor);
+  const grandTotalMinor = sum([order.totalMinor,redelivery?.feeMinor||0]);
   const roundingAdjustmentMinor = sum([grandTotalMinor, -deliveryFeeMinor, organizationDiscountMinor, voucherDiscountMinor,
     ...lines.map(line => -line.subtotalMinor)]);
   if (Math.abs(roundingAdjustmentMinor) > lines.length) fail('acknowledgement_amount_mismatch');
   const issuedTo = store.users.find(user => user.id === order.clientId)?.name;
   if (!issuedTo) fail('acknowledgement_customer_unavailable');
   const payments = Object.entries(order.payments || {}).filter(([, p]) => p.amountMinor > 0).map(([code, recorded]) => {
-    const payment = basket && code === 'initial' ? { ...recorded, ...basket.payment, amountMinor: recorded.amountMinor } : recorded;
+    const payment = basket && basket.payment.method!=='cash' && code === 'initial' ? { ...recorded, ...basket.payment, amountMinor: recorded.amountMinor } : recorded;
     if (!paymentSettled(payment)) fail('acknowledgement_payment_pending');
-    const method = payment.method ?? null;
+    const repaid=order.cashProgress?.repaymentConfirmedAt && code==='initial';
+    const method = repaid ? 'qr_manual' : payment.method ?? null;
     const type = method === 'cash' ? 'cash' : digitalMethods.has(method) ? 'digital' : 'unknown';
-    return { code, type, method, reference: payment.reference ?? null, amountMinor: money(payment.amountMinor),
+    return { code, type, method, reference: repaid ? order.cashProgress.repayment.reference : payment.reference ?? null, amountMinor: money(payment.amountMinor),
       amountReceivedMinor: type === 'cash' && payment.amountReceivedMinor != null ? money(payment.amountReceivedMinor) : null,
       changeMinor: type === 'cash' && payment.changeMinor != null ? money(payment.changeMinor) : null };
   });
+  if (redelivery?.feeMinor) payments.push({code:'redelivery',type:'digital',method:'qr_manual',reference:redelivery.payment.reference,
+    amountMinor:redelivery.feeMinor,amountReceivedMinor:null,changeMinor:null});
   if (sum(payments.map(p => p.amountMinor)) !== grandTotalMinor) fail('acknowledgement_amount_mismatch');
   return { version: 1, orderId: order.id, orderNumber: order.id, issuedAt: at, issuedTo, currency: 'PHP',
     lines, deliveryFeeMinor, organizationDiscountMinor, voucherDiscountMinor, roundingAdjustmentMinor,

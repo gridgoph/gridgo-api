@@ -888,6 +888,7 @@ test('invalid upload purpose hints list only the caller memberships, including s
     return failure.details.allowedPurposes;
   }
   assert.deepEqual(allowed(client), [
+    'cash_remedy_qr', 'cash_repayment_proof',
     'approval_signature', 'approval_sample_photo', 'artwork', 'mockup', 'payment_proof',
     'refund_qr', 'refund_evidence', 'client_verification_document', 'client_shop_chat_attachment',
     'support_chat_image', 'delivery_chat_image',
