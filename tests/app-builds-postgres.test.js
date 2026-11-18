@@ -258,7 +258,17 @@ test('old builds keep legacy flow responses and non-custody routes; authenticati
     ['POST', '/dispatch/order/milestones', { milestone: 'invalid' }], ['POST', '/dispatch/order/location', {}],
     ['POST', '/orders/order/transition', { state: 'production' }],
     ['POST', '/files/finished/attach', { orderId: 'order' }],
-  ]) assert.deepEqual(await current.call(method, path, body, 'rider/1.0.1+1'), await current.call(method, path, body), path);
+  ]) {
+    const oldBuild = await current.call(method, path, body, 'rider/1.0.1+1');
+    const noHeader = await current.call(method, path, body);
+    if (path === '/dispatch/offers') {
+      for (const result of [oldBuild, noHeader]) {
+        assert.ok(Number.isFinite(Date.parse(result.body.serverTime)));
+        delete result.body.serverTime;
+      }
+    }
+    assert.deepEqual(oldBuild, noHeader, path);
+  }
   assert.equal((await current.call('POST', '/dispatch/order/pickup-confirm', {}, 'rider/1.0.1+1', null)).status, 401);
 });
 

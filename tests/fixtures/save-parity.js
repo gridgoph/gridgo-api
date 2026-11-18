@@ -1,3 +1,5 @@
+import { reconcileDispatchOffers } from '../../src/dispatch-offers.js';
+import { appendAudit } from '../../src/audit.js';
 import { apiForTest } from './reschedule-http.js';
 import { setupOrders } from './order-reads.js';
 import { loadStore, saveStore } from '../../src/postgres-store.js';
@@ -27,6 +29,10 @@ export async function setupSaveParity(db) {
     store.cartLines.push({ id: 'save_line', cartId: 'save_cart', supplierId: 'supplier', catalogItemId: 'item_supplier', optionIds: [], quantity: 10, sortOrder: 0, structuredSpec: {}, createdAt: AT, updatedAt: AT });
     let sequence = 0;
     syncSupplierPerformance(store, { at: new Date(SAVE_AT).toISOString(), id: prefix => `${prefix}_setup_${++sequence}` });
+    // The write-parity baseline starts after independent offer initialization;
+    // client edits must not race a timer or compare pre/post-launch domain shapes.
+    const context = { at: new Date(SAVE_AT).toISOString(), id: prefix => `${prefix}_setup_${++sequence}` };
+    reconcileDispatchOffers(store, { ...context, audit: (target, entry) => appendAudit(target, entry, context) });
     await saveStore(db, store);
   });
 }
@@ -52,7 +58,7 @@ export async function saveParityApi(t, full, { failSql = null, upkeep = false, t
         source=source.replace('function kickPushDrain() {','function kickPushDrain() { return;');
         ${full ? `source=source.replace('const clientSave = database.inWriteTransaction() && isClientSavePath(req.method, pathname);', 'const clientSave = false;');` : ''}
         source=source.replaceAll('void runLifecycleWork();','').replaceAll('void runFileRetention();','').replaceAll('await fileRetention.reconcile();','void 0;').replaceAll('void fileRetention.reconcile()', 'void Promise.resolve()');
-        source=source.replace(/setInterval\\((runLifecycleWork|sweepCalls|sweepSaveUpkeep|runFileRetention),/g,'setInterval(() => {},');
+        source=source.replace(/setInterval\\((runLifecycleWork|sweepCalls|sweepSaveUpkeep|runFileRetention|sweepDispatchOffers),/g,'setInterval(() => {},');
         ${upkeep ? `source=source.replace('const lifecycleTimer =', 'setTimeout(() => sweepSaveUpkeep(), 100).unref(); const lifecycleTimer =');` : ''}
       }
       ${disableColour ? `if(url.endsWith('/src/colour-worker.js')) source=source.replace('return async function drain() {','return async function drain() { return;');` : ''}

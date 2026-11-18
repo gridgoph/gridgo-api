@@ -84,7 +84,8 @@ test('notification reads keep inbox and stream visibility without loading unrela
     }
     store.notifications.push({ id: 'multi_notice', userId: 'supplier', appRole: 'supplier', type: 'general', orderId: 'multi', at: AT });
     for (const id of ['offer_open', 'offer_held']) {
-      store.orders.push({ ...structuredClone(original), id, state: 'ready_for_dispatch', riderId: null, fulfillmentMode: 'delivery' });
+      store.orders.push({ ...structuredClone(original), id, state: 'ready_for_dispatch', riderId: null, fulfillmentMode: 'delivery',
+        dispatchOffer: { id: `${id}_offer`, status: id === 'offer_open' ? 'offered' : 'withdrawn', riderId: 'rider', expiresAt: new Date(Date.now() + 60000).toISOString() } });
       store.notifications.push({ id: `${id}_notice`, userId: 'rider', appRole: 'rider', type: 'dispatch_available', orderId: id, at: AT });
     }
     store.refundRequests.push({ id: 'request', orderId: 'offer_held', clientId: 'client', policyVersion: 'available_funds_v1', status: 'requested', version: 1, kind: 'cancellation', reason: 'Refund', beforeProduction: false, late: false, orderStateAtFiling: 'ready_for_dispatch', evidenceFileIds: [], createdAt: AT, updatedAt: AT });

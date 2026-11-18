@@ -289,6 +289,8 @@ test('logical removals exclude hidden notifications from scoped append ordinals'
   const { setupSaveParity }=await import('./fixtures/save-parity.js');
   const db=createDatabase(process.env);t.after(()=>db.close());
   await setupSaveParity(db);
+  // Isolate append ordinals from the fixture's initialized dispatch inbox.
+  await db.query('TRUNCATE notifications CASCADE');
   await db.query(`INSERT INTO notifications(id,user_id,type,order_id,created_at,position,data) VALUES
     ('removed_notice','other','fixture','unrelated',$1,0,'{}'),
     ('visible_notice','other','fixture',NULL,$1,1,'{}')`,[AT]);

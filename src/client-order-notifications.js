@@ -2,7 +2,7 @@ import { sameReviewData } from './review-data.js';
 import { riderPackingFlow } from './shop-handover.js';
 import { supplierArtworkReleased } from "./artwork-gates.js";
 import { paymentSettled } from "./operational-model.js";
-import { availableDispatch, riderHasActiveDelivery } from "./dispatch-policy.js";
+import { availableDispatch, riderOfferVisible } from "./dispatch-policy.js";
 import { privilegedAdminMemberships, eligibleRiderIds, finalPaymentAction } from "./notifications.js";
 
 /**
@@ -311,7 +311,7 @@ function sameLiveNotification(store, draft) {
       notification.userId === draft.userId
       && notification.type === draft.type
       && (notification.appRole ?? null) === (draft.appRole ?? null)
-      && (draft.type === "dispatch_available" || (notification.occurrenceKey ?? null) === (draft.occurrenceKey ?? null))
+      && (draft.type === "dispatch_available" ? (notification.offerId ?? null) === (draft.offerId ?? null) : (notification.occurrenceKey ?? null) === (draft.occurrenceKey ?? null))
       && (notification.orderId ?? null) === (draft.orderId ?? null)
       && (notification.approvalCaseId ?? null) === (draft.approvalCaseId ?? null),
   );
@@ -365,12 +365,13 @@ export function riderNotificationDrafts(store, order) {
   }
   if (availableDispatch(order, store)) {
     for (const riderId of eligibleRiderIds(store)) {
-      if (!sameReviewData(order, store.users?.find(u => u.id === riderId)) || riderHasActiveDelivery(store, riderId)) continue;
+      if (!sameReviewData(order, store.users?.find(u => u.id === riderId)) || !riderOfferVisible(order, riderId)) continue;
       drafts.push({
         userId: riderId,
         appRole: "rider",
         type: "dispatch_available",
-        occurrenceKey: `dispatch:${order.id}`,
+        occurrenceKey: `dispatch:${order.dispatchOffer.id}`,
+        offerId: order.dispatchOffer.id,
         orderId: order.id,
         title: "New delivery job",
         body: "Accept in Offers, then check the job with the supplier at pickup before taking the package.",

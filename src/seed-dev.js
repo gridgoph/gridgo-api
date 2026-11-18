@@ -1,3 +1,5 @@
+import { reconcileDispatchOffers } from './dispatch-offers.js';
+import { appendAudit } from './audit.js';
 import { seedDevelopmentPromotion } from './seed-home-promotions.js';
 import { organizationFeeMoney } from './organization-money.js';
 import { synchronizeProductionHours } from "./production-days.js";
@@ -1741,6 +1743,10 @@ async function seedDevelopmentQueue(database, clientId, now) {
         at,
       });
     }
+    let dispatchSequence = 0;
+    const dispatchContext = { at, id: prefix => `${prefix}_dev_dispatch_${Date.parse(at)}_${dispatchSequence++}` };
+    reconcileDispatchOffers(store, { ...dispatchContext,
+      audit: (target, entry) => appendAudit(target, entry, dispatchContext) });
     synchronizeProductionHours(store, { convertLegacy: true });
     await saveStore(database, store);
   });

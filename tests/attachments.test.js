@@ -912,3 +912,29 @@ test('invalid upload purpose hints list only the caller memberships, including s
   assert.ok(!allowed(clientActor).includes('promotion_logo'));
   assert.ok(allowed(opsActor).includes('promotion_logo'));
 });
+
+test('customer acknowledgement signatures are small rider PNGs bound to an arrived current assignment', () => {
+  const purpose = 'acknowledgement_signature';
+  const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  assert.doesNotThrow(() => authorizeFileUpload(rider, purpose));
+  for (const user of [client, supplier, ops, superAdmin]) expectError(() => authorizeFileUpload(user, purpose), 403, 'forbidden');
+  assert.equal(validateUpload({ originalFilename: 'sign.png', declaredContentType: 'image/png', sniffBytes: PNG, size: 2 * 1024 * 1024 }, purpose), 'image/png');
+  expectError(() => validateUpload({ originalFilename: 'sign.png', declaredContentType: 'image/png', sniffBytes: PNG, size: 2 * 1024 * 1024 + 1 }, purpose), 413, 'file_too_large');
+  const at = new Date().toISOString();
+  const current = order({ state: 'out_for_delivery', fulfillmentMode: 'delivery', riderAssignedAt: at,
+    riderProgress: { riderId: rider.id, assignedAt: at, events: { arrived: at } } });
+  const store = { orders: [current] };
+  const file = readyFile(purpose, { ownerId: rider.id, originalFilename: 'sign.png', detectedContentType: 'image/png' });
+  const target = resolveFileTarget(store, purpose, { orderId: current.id }, rider);
+  assert.doesNotThrow(() => authorizeFileAttach(rider, file, target, store));
+  attachFileReference(file, target, store);
+  assert.equal(file.references[0].assignedAt, at);
+  assert.equal(file.references[0].riderId, rider.id);
+  delete current.riderProgress.events.arrived;
+  expectError(() => authorizeFileAttach(rider, { ...file, references: [] }, target, store), 403, 'forbidden');
+  current.riderProgress.events.arrived = at;
+  current.acknowledgementSignature = { fileId: file.fileId };
+  current.deliveryEvidence = { recordedAt: at };
+  for (const user of [client, ops, superAdmin]) assert.doesNotThrow(() => authorizeFileRead(user, store, file));
+  for (const user of [rider, supplier, otherClient]) expectError(() => authorizeFileRead(user, store, file), 403, 'forbidden');
+});

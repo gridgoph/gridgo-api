@@ -8,6 +8,8 @@ Super Admin test-order cleanup, exact-email confirmation, retained history and f
 
 Immutable checkout/sample approvals, private signature evidence and PDF downloads are documented in [Approval proof](docs/APPROVAL_PROOF_API.md). Enforcement defaults off until the companion apps ship.
 
+Map-home exclusive offers, Operations countdown and digital receipt signatures: [Rider map home API](docs/RIDER_MAP_HOME_API.md).
+
 Pilot door-delivery acknowledgement receipts, automatic AR numbering, rider reads and client PDF downloads are documented in [Acknowledgement receipts](docs/ACKNOWLEDGEMENT_RECEIPTS_API.md).
 
 Order share-card state, tap telemetry and weekly rider handoff reminders are documented in [Sharing and reminders](docs/SHARING_AND_REMINDERS_API.md).
