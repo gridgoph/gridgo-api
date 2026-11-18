@@ -134,6 +134,83 @@ test('an evidenced unproducible order with no cash advanced cancels once and rel
   } finally {await db.close();}
 });
 
+test('staff cash evidence API signs order receipts and unused rider candidates with private role boundaries', {skip:!process.env.DATABASE_URL},async t=>{
+  const db=createDatabase(process.env);
+  try {
+    await setup(db);await fund(db);await payShop(db);
+    await db.transaction(async()=>{
+      const store=await loadStore(db);
+      store.files.find(file=>file.fileId==='incident-photo').ownerId='rider';
+      await saveStore(db,store);
+    });
+    const api=await apiForTest(t);
+    for (const actor of ['ops','admin']) {
+      const response=await api(actor,'GET','/ops/cash/orders/order/evidence');
+      assert.equal(response.status,200,JSON.stringify(response.body));
+      assert.match(response.headers.get('cache-control'),/private, no-store/);
+      assert.deepEqual(response.body.files.map(file=>file.fileId).sort(),['counter-return-1','counter-return-2','incident-photo','shop-receipt']);
+      for (const entry of response.body.files) {
+        assert.equal(entry.ownerRole,'rider');assert.equal(entry.uploadedAt,AT);
+        assert.equal(entry.used,entry.fileId==='shop-receipt');
+        const preview=new URL(entry.previewUrl);
+        assert.ok(preview.searchParams.has('X-Amz-Signature'));
+        assert.equal(preview.searchParams.get('response-cache-control'),'private, no-store, max-age=0');
+        assert.ok(Date.parse(entry.expiresAt)>Date.now());
+        assert.ok(Date.parse(entry.expiresAt)<=Date.now()+900000);
+        assert.equal(Object.hasOwn(entry,'objectKey'),false);
+      }
+      assert.equal((await api(actor,'GET','/ops/cash/orders/unknown/evidence')).status,404);
+    }
+    for (const actor of ['client','other','supplier','rider']) {
+      assert.equal((await api(actor,'GET','/ops/cash/orders/order/evidence')).status,403);
+      assert.equal((await api(actor,'GET','/ops/cash/orders/unknown/evidence')).status,403);
+    }
+    await db.transaction(async()=>{
+      const store=await loadStore(db);
+      store.orders[0].riderId='replacement';
+      Object.assign(store.files.find(file=>file.fileId==='shop-receipt'),{state:'deleted',objectKey:null});
+      await saveStore(db,store);
+    });
+    const empty=await api('ops','GET','/ops/cash/orders/order/evidence');
+    assert.equal(empty.status,200,JSON.stringify(empty.body));assert.deepEqual(empty.body,{files:[]});
+  } finally {await db.close();}
+});
+
+test('cash detail reflects no-show wait and report resets for rider and staff without exposing them to clients', {skip:!process.env.DATABASE_URL},async t=>{
+  const db=createDatabase(process.env);
+  try {
+    await setup(db);await fund(db);await payShop(db);await pickedUp(db);
+    const api=await apiForTest(t);
+    async function assertDetail(startedAt,reportedAt) {
+      for (const actor of ['rider','ops','admin']) {
+        const detail=await api(actor,'GET','/orders/order/cash');
+        assert.equal(detail.status,200,JSON.stringify(detail.body));
+        assert.equal(detail.body.cash.noShowStartedAt,startedAt,actor);
+        assert.equal(detail.body.cash.noShowReportedAt,reportedAt,actor);
+      }
+      const client=await api('client','GET','/orders/order/cash');
+      assert.equal(client.status,200,JSON.stringify(client.body));
+      assert.equal(Object.hasOwn(client.body.cash,'noShowStartedAt'),false);
+      assert.equal(Object.hasOwn(client.body.cash,'noShowReportedAt'),false);
+      assert.equal(Object.hasOwn(client.body.cash,'progress'),false);
+    }
+    await assertDetail(null,null);
+    await call(db,'rider','/dispatch/order/cash/no-show-start',{expectedVersion:2,contactMethod:'call'});
+    await assertDetail(AT,null);
+    const reportedAt='2026-10-05T00:10:00.000Z';
+    await call(db,'rider','/dispatch/order/cash/no-show-report',{expectedVersion:3,reason:'No answer',photoFileId:'noshow'},id('key'),reportedAt);
+    await assertDetail(AT,reportedAt);
+    await call(db,'ops','/ops/cash/orders/order/reject-no-show',{expectedVersion:4,reason:'Client is available'},id('key'),reportedAt);
+    await assertDetail(null,null);
+    const restartedAt='2026-10-05T00:11:00.000Z';
+    await call(db,'rider','/dispatch/order/cash/no-show-start',{expectedVersion:5,contactMethod:'message'},id('key'),restartedAt);
+    await assertDetail(restartedAt,null);
+    for (const actor of ['other','supplier']) {
+      assert.equal((await api(actor,'GET','/orders/order/cash')).status,403);
+    }
+  } finally {await db.close();}
+});
+
 test('no-show enforces contact and server wait, returns exact shop principal once, and reconciles online debt repayment', {skip:!process.env.DATABASE_URL},async t=>{
   const db=createDatabase(process.env);
   try {
