@@ -3401,11 +3401,13 @@ async function handleAuditedRequest(req, res) {
       && !(user.role==='client' && cashOrder.clientId===user.id) && !(user.role==='supplier' && cashOrder.supplierId===user.id)
       && !(user.role==='rider' && (cashOrder.riderId===user.id || cashOrder.dispatchOffer?.status==='offered' && cashOrder.dispatchOffer.riderId===user.id))) return send(res,403,{error:'forbidden'});
     if (cashOrder && req.method!=='GET') {
-      if (/\/(payments|milestones|refund-requests|delivery-pin|changes|shop-recovery|reschedule-request|assign-supplier|assign-rider)(\/|$)/.test(pathname)) cashFail('cash_route_required');
+      if (/^\/orders\/[^/]+\/(payments|milestones|refund-requests|delivery-pin|changes|shop-recovery|reschedule-request|assign-supplier|assign-rider)(\/|$)/.test(pathname)) cashFail('cash_route_required');
       const progress=cashOrder.cashProgress;
       if (progress?.incident?.status==='outstanding') cashFail('cash_incident_hold');
       if (progress?.noShowReportedAt && !progress.noShowApprovedAt || progress?.noShowApprovedAt && !progress.redelivery?.paidAt) cashFail('cash_no_show_hold');
-      if (pathname.endsWith('/transition') && !['supplier_accepted','payment_authorized','production','supplier_self_qc','ready_for_dispatch','needs_qa','approved_for_matching','supplier_assigned'].includes((await readBody(req)).state)) cashFail('cash_governed_handover_required');
+      // Only these shortcuts bypass a cash reservation, actual return or signed
+      // settlement. QA, transport and bookkeeping use the shared state machine.
+      if (pathname.endsWith('/transition') && ['rider_assigned','cancelled','delivered'].includes((await readBody(req)).state)) cashFail('cash_governed_handover_required');
     }
     if (cashOrder && pathname.endsWith('/cancellation-quote')) cashFail('cash_change_of_mind_refund_unavailable');
     const changeResponse = await routeOrderChanges({ req, url, store, user, readBody, now, id, audit });

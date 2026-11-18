@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { cashAmounts, cashFail as fail } from './cash-policy.js';
+import { cashAmounts, cashSettings, cashFail as fail } from './cash-policy.js';
 import { cashFingerprint, cashWallet, postCash, reconcileCash, releaseCash } from './cash-ledger.js';
 import { privilegedAdminMemberships, approvedRole, queueOrderInvalidate } from './notifications.js';
 import { basketForOrder } from './baskets.js';
@@ -146,6 +146,7 @@ export async function routeCash({req,url,db,store,user,readBody,id,now,audit}) {
   const at=now(), ctx={at,id,audit};
   let response;
   if (topupPath) {
+    if (cashSettings(store.settings).enabled!==true) fail('cash_disabled');
     if (![20000,50000,100000].includes(body.amountMinor)) fail('cash_topup_amount_invalid',400);
     const reference=text(body.reference), eventKey=`topup:${randomUUID()}`;
     const screenshotFileId=body.screenshotFileId?owned(store,user,body.screenshotFileId,'cash_topup_proof',{id:eventKey}):null;

@@ -15,9 +15,10 @@ import { authorizeFileRead } from '../src/attachments.js';
 import { assessProductionLapses } from '../src/production-penalties.js';
 import { routeIssueDecisions } from '../src/issue-decisions.js';
 
-async function setup(db,{shopMinor=10000,feeMinor=1000,fareMinor=1000,deductionMinor=0}={}) {
+async function setup(db,{shopMinor=10000,feeMinor=1000,fareMinor=1000,deductionMinor=0,cashEnabled=true}={}) {
   await resetDatabase(db,'TRUNCATE users, platform_settings RESTART IDENTITY CASCADE');
   const store=fixture(), order=store.orders[0];
+  store.settings.cash.enabled=cashEnabled;
   Object.assign(order,{cash:{version:1,limitMinor:150000,noShowWaitSeconds:600},paymentPlan:'cash_delivery',riderCommissionBps:8000,
     payoutPlanVersion:3,onlineDueMinor:0,state:'rider_assigned',riderId:'rider',riderAssignedAt:AT,paymentStatus:'cash_due',shopHandoverVersion:2});
   order.payments.initial.method='cash'; order.payments.initial.status='not_submitted';
@@ -419,7 +420,7 @@ test('cash fair rotation excludes insufficient wallets and concurrent HTTP accep
 });
 
 test('cash rollout settings require Super Admin, audit and current version; partial changes preserve edited limits', {skip:!process.env.DATABASE_URL},async t=>{
-  const db=createDatabase(process.env);t.after(()=>db.close());await setup(db);const api=await apiForTest(t);
+  const db=createDatabase(process.env);t.after(()=>db.close());await setup(db,{cashEnabled:false});const api=await apiForTest(t);
   const initial=await api('admin','GET','/settings');assert.equal(initial.body.settings.cash.enabled,false);
   assert.equal((await api('ops','PATCH','/settings',{expectedVersion:initial.body.version,cash:{enabled:true},reason:'Not allowed'})).status,403);
   assert.equal((await api('admin','PATCH','/settings',{expectedVersion:initial.body.version-1,cash:{enabled:true},reason:'Stale'})).status,409);

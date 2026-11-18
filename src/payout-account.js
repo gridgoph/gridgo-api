@@ -237,6 +237,12 @@ export async function routePayoutAccount({ req, url, store, user, readBody, now,
     return { status: 200, body: { payoutAccount: payoutAccountProjection(store, current) } };
   }
 
+  if ((store.orders || []).some(order => order.cash && order.supplierId === user.id
+    && ['reprint', 'replacement'].includes(order.cashProgress?.remedy?.remedyType)
+    && ['reserved', 'unknown'].includes(order.cashProgress.remedy.status))) {
+    fail(409, 'cash_remedy_destination_locked', 'Operations must reconcile the reserved cash remedy before this receiving account can change.');
+  }
+
   if (req.method === "DELETE") {
     if (!current) return { status: 200, body: { payoutAccount: null } };
     assertExpectedVersion(req, {}, "payout_account_stale", current.version || 1, url);
