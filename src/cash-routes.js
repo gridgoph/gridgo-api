@@ -47,6 +47,16 @@ function notify(store,order,user,type,{id,at,audit},detail={}) {
   if (order) queueOrderInvalidate(store,order,['orders','jobs','dispatch']);
 }
 export function cashProgress(order) { return order.cashProgress ||= { version:1 }; }
+function clientRepayment(progress) {
+  const rejected = progress.rejectedRepayments?.at(-1);
+  const status = progress.repaymentConfirmedAt ? 'confirmed' : progress.repayment ? 'pending' : rejected ? 'rejected' : 'none';
+  return {
+    status,
+    submittedAt: (status === 'rejected' ? rejected.submittedAt : progress.repayment?.submittedAt) ?? null,
+    rejectedAt: status === 'rejected' ? rejected.at ?? null : null,
+    rejectionReason: status === 'rejected' ? rejected.reason ?? null : null,
+  };
+}
 function version(progress,body) { if (body.expectedVersion !== (progress.version || 1)) fail('cash_stale'); }
 function checkRider(store,user,order) {
   if (user.role !== 'rider' || !approvedRole(store,user.id,'rider') || order.riderId !== user.id) fail('forbidden',403);
@@ -132,6 +142,7 @@ export async function routeCash({req,url,db,store,user,readBody,id,now,audit,sto
       return {status:200,body:{cash:{version:progress.version||1,status:order.paymentStatus,
         amountDueMinor:order.state==='cancelled' || order.payments.initial.status==='confirmed'?0:order.totalMinor,shopPaidAt:progress.shopPaidAt ?? null,collectedAt:progress.collectedAt ?? null,
         noShowApprovedAt:progress.noShowApprovedAt ?? null,repaymentConfirmedAt:progress.repaymentConfirmedAt ?? null,
+        ...(user.role==='client'?{repayment:clientRepayment(progress)}:{}),
         ...(staff(user)?{progress}:{}),...((staff(user)||user.role==='rider')?{amounts:cashAmounts(order),
           noShowStartedAt:progress.noShowStartedAt ?? null,noShowReportedAt:progress.noShowReportedAt ?? null}:{}),
         ...(progress.redelivery?{redelivery:{id:progress.redelivery.id,feeMinor:progress.redelivery.feeMinor,paidAt:progress.redelivery.paidAt??null,deliveredAt:progress.redelivery.deliveredAt??null,invoice:progress.redelivery.invoice??null}}:{}),
@@ -331,6 +342,7 @@ export async function routeCash({req,url,db,store,user,readBody,id,now,audit,sto
     order.updatedAt=at;
     if (action!=='collect') notify(store,order,user,action.replaceAll('-','_'),ctx,{version:p.version});
     response={status:200,body:{cash:{version:p.version,status:order.paymentStatus,
+      ...(user.role==='client' && action==='repayment'?{repayment:clientRepayment(p)}:{}),
       ...(staff(user)?{progress:p}:{})},...(receipt?{receipt}:{}),...(incident?{incident}:{}),...(action==='redelivery-quote'?{redelivery:p.redelivery}:{})}};
   } else fail('not_found',404);
   return {...await replay.finish(response),mutated:true};

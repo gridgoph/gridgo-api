@@ -211,6 +211,93 @@ test('cash detail reflects no-show wait and report resets for rider and staff wi
   } finally {await db.close();}
 });
 
+test('client cash repayment survives reads through none, pending, rejected, resubmitted and confirmed', {skip:!process.env.DATABASE_URL},async t=>{
+  const db=createDatabase(process.env);
+  try {
+    await setup(db);await fund(db);await payShop(db);await pickedUp(db);
+    const api=await apiForTest(t);
+    const empty={status:'none',submittedAt:null,rejectedAt:null,rejectionReason:null};
+    async function detail(expected) {
+      const response=await api('client','GET','/orders/order/cash');
+      assert.equal(response.status,200,JSON.stringify(response.body));
+      assert.deepEqual(response.body.cash.repayment,expected);
+      assert.deepEqual(Object.keys(response.body.cash).sort(),[
+        'amountDueMinor','collectedAt','noShowApprovedAt','remedy','repayment','repaymentConfirmedAt','shopPaidAt','status','version',
+      ]);
+      return response.body.cash;
+    }
+    await detail(empty);
+    await call(db,'rider','/dispatch/order/cash/no-show-start',{expectedVersion:2,contactMethod:'call'});
+    const later='2026-10-05T00:10:00.000Z';
+    await call(db,'rider','/dispatch/order/cash/no-show-report',{expectedVersion:3,reason:'No answer',photoFileId:'noshow'},id('key'),later);
+    await call(db,'ops','/ops/cash/orders/order/approve-no-show',{expectedVersion:4,reason:'Returned to GRIDGO',returnPhotoFileId:'returned'},id('key'),later);
+    await db.transaction(async()=>{const store=await loadStore(db);store.settings.cash.enabled=false;await saveStore(db,store);});
+    let current=await detail(empty);
+    async function submit(proofFileId,reference,key) {
+      const body={expectedVersion:current.version,amountMinor:12000,reference,proofFileId};
+      const response=await api('client','POST','/orders/order/cash/repayment',body,{key});
+      assert.equal(response.status,200,JSON.stringify(response.body));
+      assert.deepEqual(Object.keys(response.body.cash).sort(),['repayment','status','version']);
+      const pending=response.body.cash.repayment;
+      assert.deepEqual(pending,{status:'pending',submittedAt:pending.submittedAt,rejectedAt:null,rejectionReason:null});
+      assert.equal(new Date(pending.submittedAt).toISOString(),pending.submittedAt);
+      assert.deepEqual((await api('client','POST','/orders/order/cash/repayment',body,{key})).body,response.body);
+      current=await detail(pending);
+      return pending.submittedAt;
+    }
+    const submittedAt=await submit('repayment','CLIENT-DEBT-1','client-repayment-first');
+    const rejected=await api('ops','POST','/ops/cash/orders/order/reject-repayment',{expectedVersion:current.version,reason:'Transfer not found'});
+    assert.equal(rejected.status,200,JSON.stringify(rejected.body));
+    const archived=rejected.body.cash.progress.rejectedRepayments.at(-1);
+    assert.deepEqual(archived,{submittedAt,reference:'CLIENT-DEBT-1',proofFileId:'repayment',reason:'TRANSFER NOT FOUND',at:archived.at});
+    assert.equal(Object.hasOwn(rejected.body.cash.progress,'repayment'),false);
+    current=await detail({status:'rejected',submittedAt,rejectedAt:archived.at,rejectionReason:'TRANSFER NOT FOUND'});
+    const resubmittedAt=await submit('redelivery-payment','CLIENT-DEBT-2','client-repayment-second');
+    const confirmed=await api('ops','POST','/ops/cash/orders/order/confirm-repayment',{expectedVersion:current.version});
+    assert.equal(confirmed.status,200,JSON.stringify(confirmed.body));
+    await detail({status:'confirmed',submittedAt:resubmittedAt,rejectedAt:null,rejectionReason:null});
+    const saved=(await loadStore(db)).orders[0];
+    assert.equal(saved.cashProgress.rejectedRepayments.length,1);
+    assert.equal(saved.payments.initial.confirmationSource,'no_show_online_repayment');
+    assert.equal((await reconcileCash(db)).ok,true);
+  } finally {await db.close();}
+});
+
+test('client repayment projection is owner scoped and leaves rider, staff and online order projections unchanged', {skip:!process.env.DATABASE_URL},async t=>{
+  const db=createDatabase(process.env);
+  try {
+    await setup(db,{cashEnabled:false});
+    const api=await apiForTest(t);
+    for (const actor of ['other','supplier']) {
+      assert.equal((await api(actor,'GET','/orders/order/cash')).status,403);
+    }
+    for (const actor of ['other','supplier','rider','ops','admin']) {
+      assert.equal((await api(actor,'POST','/orders/order/cash/repayment',{})).status,403);
+    }
+    assert.equal((await api(null,'GET','/orders/order/cash')).status,401);
+    for (const actor of ['rider','ops','admin']) {
+      const response=await api(actor,'GET','/orders/order/cash');
+      assert.equal(response.status,200,JSON.stringify(response.body));
+      assert.equal(Object.hasOwn(response.body.cash,'repayment'),false);
+      assert.equal(Object.hasOwn(response.body.cash,'progress'),actor!=='rider');
+    }
+    await resetDatabase(db,'TRUNCATE users, platform_settings RESTART IDENTITY CASCADE');
+    await db.transaction(()=>saveStore(db,fixture()));
+    const before=await api('client','GET','/orders/order');
+    assert.equal(before.status,200,JSON.stringify(before.body));
+    assert.equal(Object.hasOwn(before.body.order,'cash'),false);
+    for (const method of ['GET','POST']) {
+      const path=method==='GET'?'/orders/order/cash':'/orders/order/cash/repayment';
+      const response=await api('client',method,path,method==='POST'?{}:undefined);
+      assert.equal(response.status,404);
+      assert.equal(response.body.error,'order_not_found');
+    }
+    const after=await api('client','GET','/orders/order');
+    assert.deepEqual(after.body,before.body);
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM cash_journals')).rows[0].n,0);
+  } finally {await db.close();}
+});
+
 test('no-show enforces contact and server wait, returns exact shop principal once, and reconciles online debt repayment', {skip:!process.env.DATABASE_URL},async t=>{
   const db=createDatabase(process.env);
   try {
