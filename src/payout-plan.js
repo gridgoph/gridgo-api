@@ -45,6 +45,11 @@ const DELIVERY_REFUSAL = Object.freeze({
    anywhere else.
 */
 export const PAYOUT_PLANS = Object.freeze({
+  3: Object.freeze({ version: 3, stages: Object.freeze([Object.freeze({
+    code: 'cash_shop', label: 'Cash paid at shop', shareBps: 10000, proofBy: 'rider', requiresProof: true,
+    releaseRequires: 'cash_shop_receipt', states: EVERY_STATE_FROM_PRODUCTION,
+    refusal: Object.freeze({ code: 'cash_shop_receipt_required', message: 'The assigned rider records the exact shop payment and receipt.' }),
+  })]) }),
   /*
    The four stages orders were placed under before 25 Sep 2026: printing and
    packing on the shop's photographs, delivered on the rider's, and retention

@@ -150,5 +150,8 @@ test('cart graph query count and rows ignore other clients and unrelated operati
     SELECT 'growth_'||i,'other','draft',1,'standard','delivery',$1,$1 FROM generate_series(1,1000) i`,[AT]);
   await database.query(`INSERT INTO orders(id,client_id,state,created_at,updated_at,position)
     SELECT 'growth_'||i,'other','draft',$1,$1,1000+i FROM generate_series(1,1000) i`,[AT]);
-  assert.deepEqual(await sample(), before);
+  // ANY membership parameters are sets. PostgreSQL may change parent row
+  // order after growth; keep exact SQL, query/row counts and ID membership.
+  const membershipTrace=queries=>queries.map(query=>({...query,values:query.values.map(value=>Array.isArray(value)?[...value].sort():value)}));
+  assert.deepEqual(membershipTrace(await sample()), membershipTrace(before));
 });

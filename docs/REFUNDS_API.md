@@ -4,6 +4,8 @@ This is the contract for the pilot policy decided on 28 September 2026 in [#74](
 
 All money is **integer PHP centavos**, bounded by the JavaScript safe-integer range. Approval reserves funds; **it never sends money**. Operations transfers manually in a wallet app. Pilot Credits cannot be refunded as cash. No PayMongo or automatic recovery is involved.
 
+Cash-delivery orders use the separate [cash custody and funded-remedy contract](CASH_ON_DELIVERY_API.md), off by default. They do not use these online available-funds routes or change-of-mind refunds. The rules below remain unchanged for online orders.
+
 The `/refund-requests` list supports optional [`limit`/`cursor` pagination](STAFF_LIST_PAGINATION_API.md)
 within the caller's existing scope. Omitting both keeps the complete response. Order-specific reads retain their contract.
 

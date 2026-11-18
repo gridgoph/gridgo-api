@@ -34,9 +34,12 @@ export function publicBasket(store, basket, user) {
   const orders = basket.orderIds.map((id) => store.orders.find((order) => order.id === id));
   return {
     id: basket.id, receiptOrderId: basket.receiptOrderId, totalMinor: basket.totalMinor,
-    ...groupSummary(orders), upfrontReason: "multiple_fulfillment_groups",
+    ...groupSummary(orders), upfrontReason: basket.payment.method==='cash'?null:"multiple_fulfillment_groups",
     deadline: basket.deadline, fulfillmentMode: basket.fulfillmentMode, createdAt: basket.createdAt,
     payment: { ...basket.payment, amountMinor: basket.totalMinor },
+    ...(basket.payment.method==='cash'?{cashSummary:{collectedMinor:orders.filter(o=>o.payments.initial.status==='confirmed').reduce((sum,o)=>sum+o.totalMinor,0),
+      cancelledMinor:orders.filter(o=>o.state==='cancelled').reduce((sum,o)=>sum+o.totalMinor,0),
+      dueMinor:orders.filter(o=>o.state!=='cancelled' && o.payments.initial.status!=='confirmed').reduce((sum,o)=>sum+o.totalMinor,0)}}:{}),
     ...(basket.pickupFeeMinor != null ? { pickupFeeMinor: basket.pickupFeeMinor,
       hubPickup: { ...structuredClone(orders[0].hubPickup), feeMinor: basket.pickupFeeMinor } } : {}),
     groups: orders.map((order, index) => ({
@@ -71,6 +74,7 @@ export async function routeBaskets({ req, url, store, user, readBody, id, now })
   }
   if (req.method !== 'POST' || !match[3]) fail(404, 'not_found', 'Route not found.');
   const action = match[3];
+  if (basket.payment.method==='cash') fail(409,'cash_route_required','Collect each delivery through its governed cash handover.');
   if (action === 'submit' ? basket.clientId !== user.id : !privileged) fail(403, 'forbidden', 'This payment action is not available to this account.');
   const body = await readBody(req);
   if (!body || typeof body !== 'object' || Array.isArray(body)) fail(400, 'invalid_request', 'Send a JSON object.');

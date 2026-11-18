@@ -1,6 +1,6 @@
 /** Versioned shop-to-rider evidence; independent of every published payout plan. */
 export const FORCED_STEP_REASONS = Object.freeze(['technical_issue', 'evidence_verified_offline', 'operational_correction', 'other']);
-export const riderPackingFlow = order => order?.payoutPlanVersion === 2 && order?.shopHandoverVersion === 2;
+export const riderPackingFlow = order => [2, 3].includes(order?.payoutPlanVersion) && order?.shopHandoverVersion === 2;
 export const claimBlocksHandover = (store, order) => Boolean(order.payoutHold || (store.claims || [])
   .some(row => row.orderId === order.id && ['open', 'payout_held'].includes(row.status)));
 export function finishedProductPhotos(store, order) {

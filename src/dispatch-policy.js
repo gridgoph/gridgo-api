@@ -8,7 +8,7 @@ import { rescheduleHold } from "./order-reschedule-policy.js";
 import { recoveryHeld } from "./shop-recovery.js";
 
 export function dispatchWorkHeld(store, order) {
-  return Boolean(deliveryPinPaymentPending(order) || refundHold(store, order) || refundSettlementFor(store, order)
+  return Boolean(order.cashProgress?.incident?.status==='outstanding' || deliveryPinPaymentPending(order) || refundHold(store, order) || refundSettlementFor(store, order)
     || recoveryHeld(order) || rescheduleHold(order));
 }
 
