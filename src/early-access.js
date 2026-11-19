@@ -22,12 +22,13 @@ const staffRow = row => ({ id: row.id, email: row.email, source: row.source, pla
 export function validateEarlyAccess(body) {
   if (body?.consent !== true) fail(400, 'consent_required');
   const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
-  // Non-Gmail Google accounts are supported; the visitor supplies their Play account.
+  // Accept custom-domain Play accounts and Apple ID email addresses alike.
   if (!validGoogleEmail(email, true)) fail(400, 'invalid_email');
-  if (body.platform !== 'android') fail(400, 'invalid_platform');
+  const platform = body.platform === undefined ? 'android' : body.platform;
+  if (!['android', 'iphone'].includes(platform)) fail(400, 'invalid_platform');
   const source = body.source == null || body.source === '' ? null : body.source;
   if (source !== null && (typeof source !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(source))) fail(400, 'invalid_source');
-  return { email, source, platform: 'android' };
+  return { email, source, platform };
 }
 
 async function queueMail(database, signupId, kind) {
@@ -50,11 +51,11 @@ export async function createEarlyAccessSignup(database, body, { notifyStaff, kic
       [randomUUID(), input.email, randomBytes(32).toString('hex'), at, input.source, input.platform])).rows[0];
       await audit(database, { role: 'system' }, 'early_access.signed_up', row, at);
       await queueMail(database, row.id, 'team');
-      await notifyStaff?.({ type: 'ops_early_access_signup', title: 'A new Android tester requested early access',
+      await notifyStaff?.({ type: 'ops_early_access_signup', title: `A new ${row.platform === 'iphone' ? 'iPhone' : 'Android'} tester requested early access`,
         occurrenceKey: row.id, resource: 'early-access', id: row.id });
       database.afterCommit(kickMail);
     }
-    return { token: row.token, status: row.status, createdAt: iso(row.created_at), grantedAt: iso(row.granted_at), duplicate };
+    return { token: row.token, platform: row.platform, status: row.status, createdAt: iso(row.created_at), grantedAt: iso(row.granted_at), duplicate };
   });
 }
 
@@ -64,15 +65,15 @@ export async function grantEarlyAccess(database, signupId, actor, { notifyStaff,
     let row = (await database.query('SELECT * FROM early_access_signups WHERE id=$1 FOR UPDATE', [signupId])).rows[0];
     if (!row) fail(404, 'not_found');
     if (row.status !== 'granted') {
-      const config = await playConfig(database, 'client');
+      const optInUrl = row.platform === 'android' ? (await playConfig(database, 'client')).opt_in_url : null;
       const at = new Date().toISOString();
       row = (await database.query(`UPDATE early_access_signups SET status='granted',granted_at=$2,granted_by=$3,opt_in_url=$4
-        WHERE id=$1 RETURNING *`, [signupId, at, actor.id, config.opt_in_url])).rows[0];
+        WHERE id=$1 RETURNING *`, [signupId, at, actor.id, optInUrl])).rows[0];
       await audit(database, actor, 'early_access.granted', row, at);
-      await queueMail(database, row.id, 'access');
-      await notifyStaff?.({ type: 'ops_early_access_granted', title: 'Android tester early access was granted',
+      if (row.platform === 'android') await queueMail(database, row.id, 'access');
+      await notifyStaff?.({ type: 'ops_early_access_granted', title: `${row.platform === 'iphone' ? 'iPhone' : 'Android'} tester early access was granted`,
         occurrenceKey: row.id, resource: 'early-access', id: row.id });
-      database.afterCommit(kickMail);
+      if (row.platform === 'android') database.afterCommit(kickMail);
     }
     return staffRow(row);
   });
@@ -129,9 +130,9 @@ export async function routeEarlyAccess({ req, res, pathname, url, send, database
       if (tooManyRequests(`early-access:status:${requestClientKey(req)}`, 120, 60 * 1000)) fail(429, 'rate_limited');
       const token = url.searchParams.get('token') || '';
       if (!/^[a-f0-9]{64}$/.test(token)) fail(404, 'not_found');
-      const row = (await database.query('SELECT status,granted_at,opt_in_url FROM early_access_signups WHERE token=$1', [token])).rows[0];
+      const row = (await database.query('SELECT platform,status,granted_at,opt_in_url FROM early_access_signups WHERE token=$1', [token])).rows[0];
       if (!row) fail(404, 'not_found');
-      send(res, 200, { status: row.status, grantedAt: iso(row.granted_at), optInUrl: row.status === 'granted' ? row.opt_in_url : null });
+      send(res, 200, { platform: row.platform, status: row.status, grantedAt: iso(row.granted_at), optInUrl: row.status === 'granted' ? row.opt_in_url : null });
     } else if (actor) {
       const base = staff ? '/ops/early-access' : '/early-access/desk';
       if (req.method === 'GET' && path === base) send(res, 200, await listEarlyAccess(database, url.searchParams));
