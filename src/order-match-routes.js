@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import { expressRates, expressLinePrice, expressPoint, expressShopList, expressGuide, updateExpressGuide, createExpressSnapshot, publicExpress, expressClientProjection, expressCatalogOptions } from './express-orders.js';
 import { isReviewData, markReviewPayment, reviewCatalogView, REVIEW_CATALOG_TABLES } from './review-data.js';
 import { approvalPolicy, recordApprovalProof } from './approval-proof.js';
@@ -1693,7 +1694,7 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
     if(!shop || lines.some(line=>!line.expressPrint || !shop.catalogItemIds.includes(line.catalogItemId) || line.supplierId!==shop.supplierId)) fail(409,'express_shop_unavailable','Choose an open Express shop.');
     for(const line of lines) {
       const item=store.catalogItems.find(row=>row.id===line.catalogItemId);
-      if(JSON.stringify(documentPagesFor(store,item,line,undefined,{required:true}))!==JSON.stringify(line.documentPages)) fail(409,'express_preview_required','The detected pages changed. Review a new draft.');
+      if(!isDeepStrictEqual(documentPagesFor(store,item,line,undefined,{required:true}),line.documentPages)) fail(409,'express_preview_required','The detected pages changed. Review a new draft.');
     }
     if(body.looksRight!==true || body.expressConfirmation!==expressConfirmation(cart,lines)) fail(409,'express_preview_required','Review the current print settings and accept the preview.');
   }
@@ -2651,8 +2652,12 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
 }
 
 function expressConfirmation(cart,lines) {
- return createHash('sha256').update(JSON.stringify({cartId:cart.id,fulfillmentMode:cart.fulfillmentMode,dropoff:cart.defaultDropoff,
-   lines:lines.map(l=>({id:l.id,catalogItemId:l.catalogItemId,optionIds:l.optionIds,dropoff:l.dropoff,supplierId:l.supplierId,fileId:l.artworkFileId,quantity:l.quantity,documentPages:l.documentPages,print:l.expressPrint,layout:l.printLayout,note:l.specialInstructions}))})).digest('hex');
+ return createHash('sha256').update(JSON.stringify({cartId:cart.id,fulfillmentMode:cart.fulfillmentMode,dropoff:cart.defaultDropoff ?? null,
+   lines:lines.map(l=>({id:l.id,catalogItemId:l.catalogItemId,optionIds:l.optionIds,dropoff:l.dropoff ?? null,supplierId:l.supplierId,fileId:l.artworkFileId,quantity:l.quantity,documentPages:l.documentPages,print:l.expressPrint,layout:l.printLayout,note:l.specialInstructions || ''}))},
+   // JSONB sorts object keys; omitted nullable fields also return as absent.
+   // Bind the preview to its values, independent of a PostgreSQL round trip.
+   (_key,value)=>value && !Array.isArray(value) && typeof value==='object'
+     ? Object.fromEntries(Object.keys(value).sort().map(key=>[key,value[key]])) : value)).digest('hex');
 }
 function createExpressDraft(store,user,body,id,at) {
  const location=expressPoint(body.location);

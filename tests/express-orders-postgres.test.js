@@ -82,3 +82,56 @@ test('Express HTTP settings handshake, per-user flags and shop acceptance are au
  assert.ok(loaded.auditLog.some(a=>a.action==='express.accepted'));
  for(const userId of ['ops','admin'])assert.ok(loaded.notifications.some(n=>n.userId===userId&&n.type==='express_order'));
 });
+
+for (const kind of ['declined', 'timed_out']) {
+ test(`Express terminal ${kind} commits and later shop acceptance sweeps keep working`, {skip:!process.env.DATABASE_URL}, async t=>{
+  const {expireShopAcceptances}=await import('../src/shop-recovery.js');
+  const db=createDatabase({DATABASE_URL:process.env.DATABASE_URL});t.after(()=>db.close());
+  await resetDatabase(db,'TRUNCATE voucher_campaigns, users, platform_settings, taxonomy_categories, accepted_file_formats RESTART IDENTITY CASCADE');
+  const store=fixture();store.taxonomy=defaultTaxonomy();
+  for(const service of store.supplierServices)service.categoryCode='document_publication';
+  for(const item of store.catalogItems)Object.assign(item,{subcategoryCode:'document_printing',express:true,pricingUnit:'per_page',printLayouts:['fit_to_paper']});
+  const first=store.orders[0];
+  Object.assign(first,{state:'supplier_assigned',orderType:'express',fileCheck:{status:'passed'},
+   expressOrder:{version:1,originalSupplierId:'supplier',location:first.dropoff,pickupCode:'012345',events:[],
+    declines:kind==='declined'?2:0,declinedSupplierIds:kind==='timed_out'?['replacement']:[],printSettings:[]}});
+  startExpressAcceptance(first,AT);
+  const second=structuredClone(first);
+  Object.assign(second,{id:'second_order',supplierId:'replacement',fulfillmentMode:'pickup',deliveryFeeMinor:0,totalMinor:11000,onlineDueMinor:11000});
+  second.payments.initial.amountMinor=11000;
+  second.paymentAllocations=second.paymentAllocations.filter(allocation=>allocation.component!=='delivery_pass_through');
+  Object.assign(second.expressOrder,{originalSupplierId:'replacement',declines:0,declinedSupplierIds:[],pickupCode:'123456'});
+  startExpressAcceptance(second,'2026-10-05T00:01:00.000Z');
+  store.orders.push(second);
+  await db.transaction(()=>saveStore(db,store));
+  // Use the same load -> expiry -> save transaction as the lifecycle worker.
+  await db.transaction(async()=>{
+   const current=await loadStore(db),order=current.orders.find(o=>o.id===first.id);
+   if(kind==='declined')declineExpress(current,order,{at:'2026-10-05T00:04:00.000Z',id,kind,actorId:'supplier',reason:'Printer unavailable'});
+   else assert.equal(expireShopAcceptances(current,{at:'2026-10-05T00:05:00.000Z',createId:id}),true);
+   await saveStore(db,current);
+  });
+  let loaded=await loadStore(db),cancelled=loaded.orders.find(o=>o.id===first.id);
+  assert.equal(cancelled.state,'cancelled');
+  assert.equal(cancelled.cancelledBy,null);
+  assert.equal(cancelled.cancellationReason,'No Express shop accepted the order.');
+  assert.equal(cancelled.expressOrder.refundRequired,true);
+  assert.equal(loaded.orderJobs.find(j=>j.orderId===first.id).state,'cancelled');
+  assert.equal(cancelled.expressOrder.events.at(-1).state,'cancelled');
+  assert.ok(loaded.auditLog.some(a=>a.orderId===first.id&&a.action==='express.cancelled'));
+  assert.ok(loaded.notifications.some(n=>n.orderId===first.id&&n.type==='express_order'));
+  assert.equal(loaded.orders.find(o=>o.id===second.id).shopAcceptance.status,'pending');
+  // A later sweep must commit another shop's timeout and replacement too.
+  await db.transaction(async()=>{
+   const current=await loadStore(db);
+   assert.equal(expireShopAcceptances(current,{at:'2026-10-05T00:06:00.000Z',createId:id}),true);
+   await saveStore(db,current);
+  });
+  loaded=await loadStore(db);
+  const moved=loaded.orders.find(o=>o.id===second.id);
+  assert.equal(moved.supplierId,'supplier');
+  assert.equal(moved.expressOrder.declines,1);
+  assert.ok(moved.expressOrder.events.some(event=>event.state==='timed_out'));
+  assert.equal(moved.shopAcceptance.deadlineAt,'2026-10-05T00:11:00.000Z');
+ });
+}
