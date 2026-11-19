@@ -1,3 +1,4 @@
+import { startExpressAcceptance, declineExpress } from './express-orders.js';
 import { tightDeclineExemption } from './scheduling-policy.js';
 import { sameReviewData } from './review-data.js';
 import { supplementTotals, changePaymentPending } from './order-change-policy.js';
@@ -23,6 +24,7 @@ const fail = (code) => { throw Object.assign(new Error(code), { status: 409, cod
 const normalized = (value) => String(value || '').trim().toLowerCase();
 
 export function startShopAcceptance(store, order, at) {
+  if(order.orderType === "express") return startExpressAcceptance(order,at);
   snapshotShopClock(store, order);
   const schedule = structuredClone(shopSlaClock(order)?.schedule || store.supplierProfiles?.find((row) => row.userId === order.supplierId)?.schedule || defaultShopSchedule());
   order.shopAcceptance = { supplierId: order.supplierId, assignedAt: at, deadlineAt: addOpeningMilliseconds(schedule, at, 3600000),
@@ -149,6 +151,7 @@ export function recordShopFailure(store, order, { kind, reason, at, createId, ac
   if (recoveryHeld(order)) fail('shop_recovery_pending');
   if (!CANCELLABLE_SHOP_STATES.has(order.state)) fail('shop_cancel_not_available');
   if (refundHold(store, order) || refundSettlementFor(store, order)) fail('refund_fulfillment_stopped');
+  if(order.orderType === "express" && ["declined","timed_out"].includes(kind)) return declineExpress(store,order,{at,id:createId,kind,actorId,reason});
   assessProductionLapses(store, { at, createId, orderId: order.id });
   const fault = recoveryFault(kind);
   const event = { id: createId('shop_event'), supplierId: order.supplierId, kind, fault, stage: order.state, reason, reasonCode, at, actorId,

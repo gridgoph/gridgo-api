@@ -115,10 +115,10 @@ const TABLES = [
   performanceTable,
   ...staffTables,
   ...shopTeamTables.filter(table => table.name !== 'order_actions'),
-  { name: "client_carts", keys: ["id"], columns: ["id", "client_id", "state", "version", "service_level", "scheduled_for", "fulfillment_mode", "default_dropoff_lat", "default_dropoff_lng", "default_dropoff_label", "checked_out_order_id", "created_at", "updated_at", "checked_out_at", "deadline", "request_fulfillment"] },
-  { name: "client_cart_lines", keys: ["id"], columns: ["id", "cart_id", "supplier_id", "catalog_item_id", "option_ids", "speed_tier_id", "quantity", "service_fee_snapshot", "structured_spec", "artwork_file_id", "artwork_links", "artwork_attachments", "artwork_warning_acceptances", "print_layout", "quantity_mode", "color_targets", "cover_spine", "special_instructions", "document_pages", "match_deadline", "deadline", "delivery_key", "sample", "sample_batch_draft_id", "sample_batch_pricing", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "created_at", "updated_at"] },
+  { name: "client_carts", keys: ["id"], columns: ["id", "client_id", "state", "version", "service_level", "scheduled_for", "fulfillment_mode", "default_dropoff_lat", "default_dropoff_lng", "default_dropoff_label", "checked_out_order_id", "created_at", "updated_at", "checked_out_at", "deadline", "request_fulfillment", "order_type", "express_location"] },
+  { name: "client_cart_lines", keys: ["id"], columns: ["id", "cart_id", "supplier_id", "catalog_item_id", "option_ids", "speed_tier_id", "quantity", "service_fee_snapshot", "structured_spec", "artwork_file_id", "artwork_links", "artwork_attachments", "artwork_warning_acceptances", "express_print", "print_layout", "quantity_mode", "color_targets", "cover_spine", "special_instructions", "document_pages", "match_deadline", "deadline", "delivery_key", "sample", "sample_batch_draft_id", "sample_batch_pricing", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "created_at", "updated_at"] },
   { name: "order_jobs", keys: ["id"], columns: ["id", "order_id", "supplier_id", "rider_id", "state", "fulfillment_mode", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "supplier_subtotal_minor", "delivery_distance_meters", "delivery_fee_minor", "rider_commission_bps", "estimated_hours", "estimated_production_minutes", "scheduled_for", "deadline", "created_at", "updated_at"] },
-  { name: "order_line_items", keys: ["id"], columns: ["id", "order_id", "job_id", "source_catalog_item_id", "source_supplier_service_id", "item_name_snapshot", "description_snapshot", "pricing_basis_snapshot", "pricing_unit_snapshot", "package_qty_snapshot", "turnaround_hours_snapshot", "speed_tier_snapshot", "turnaround_days_snapshot", "turnaround_minutes_snapshot", "production_day_minutes_snapshot", "base_unit_price_minor", "effective_unit_price_minor", "quantity", "line_subtotal_minor", "accepted_format_codes_snapshot", "structured_spec_snapshot", "artwork_file_id", "artwork_links", "artwork_attachments", "artwork_guidance", "print_layout", "quantity_mode", "colour_pricing", "color_targets", "cover_spine", "special_instructions", "document_pages", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "snapshot_finalized", "created_at"] },
+  { name: "order_line_items", keys: ["id"], columns: ["id", "order_id", "job_id", "source_catalog_item_id", "source_supplier_service_id", "item_name_snapshot", "description_snapshot", "pricing_basis_snapshot", "pricing_unit_snapshot", "package_qty_snapshot", "turnaround_hours_snapshot", "speed_tier_snapshot", "turnaround_days_snapshot", "turnaround_minutes_snapshot", "production_day_minutes_snapshot", "base_unit_price_minor", "effective_unit_price_minor", "quantity", "line_subtotal_minor", "accepted_format_codes_snapshot", "structured_spec_snapshot", "artwork_file_id", "artwork_links", "artwork_attachments", "artwork_guidance", "express_print", "print_layout", "quantity_mode", "colour_pricing", "color_targets", "cover_spine", "special_instructions", "document_pages", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "snapshot_finalized", "created_at"] },
   { name: "order_line_item_options", keys: ["id"], columns: ["id", "order_line_item_id", "source_option_group_id", "source_option_id", "group_name_snapshot", "group_kind_snapshot", "option_label_snapshot", "price_modifier_minor", "sort_order"] },
   { name: "order_invoices", keys: ["order_id"], columns: ["order_id", "invoice_number", "issued_at", "snapshot"] },
   { name: "order_baskets", keys: ["id"], columns: ["id", "client_id", "receipt_order_id", "total_minor", "pickup_fee_minor", "deadline", "fulfillment_mode", "payment", "created_at", "updated_at"] },
@@ -654,6 +654,8 @@ function rowsFromStore(store) {
       checked_out_at: cart.checkedOutAt ?? null,
       deadline: cart.deadline ?? null,
       request_fulfillment: cart.requestFulfillment ?? null,
+      order_type: cart.orderType ?? null,
+      express_location: cart.expressLocation ?? null,
     });
   }
   for (const line of (store.cartLines || [])) {
@@ -677,6 +679,7 @@ function rowsFromStore(store) {
       artwork_warning_acceptances: line.artworkWarningAcceptances == null ? null : JSON.stringify(line.artworkWarningAcceptances),
       special_instructions: line.specialInstructions || "",
       document_pages: line.documentPages ?? null,
+      express_print: line.expressPrint ?? null,
       match_deadline: line.matchDeadline ?? null,
       deadline: line.deadline ?? null,
       delivery_key: line.deliveryKey ?? null,
@@ -756,6 +759,7 @@ function rowsFromStore(store) {
       artwork_guidance: line.artworkGuidance ?? null,
       special_instructions: line.specialInstructions || "",
       document_pages: line.documentPages ?? null,
+      express_print: line.expressPrint ?? null,
       mockup_file_id: line.mockupFileId ?? null,
       dropoff_lat: line.dropoff?.lat ?? null,
       dropoff_lng: line.dropoff?.lng ?? null,
@@ -2517,6 +2521,8 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
       serviceLevel: row.service_level, fulfillmentMode: row.fulfillment_mode,
       createdAt: row.created_at, updatedAt: row.updated_at,
     };
+    present(item, "orderType", row.order_type);
+    present(item, "expressLocation", row.express_location);
     present(item, "requestFulfillment", row.request_fulfillment);
     present(item, "scheduledFor", row.scheduled_for);
     if (row.default_dropoff_lat != null) item.defaultDropoff = { lat: row.default_dropoff_lat, lng: row.default_dropoff_lng, label: row.default_dropoff_label };
@@ -2542,6 +2548,7 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
     present(item, "sampleBatchPricing", row.sample_batch_pricing);
     present(item, "artworkFileId", row.artwork_file_id);
     present(item, "documentPages", row.document_pages);
+    present(item, "expressPrint", row.express_print);
     if (row.artwork_links?.length) item.artworkLinks = row.artwork_links;
     present(item, "artworkAttachments", row.artwork_attachments);
     present(item, "printLayout", row.print_layout);
@@ -2597,6 +2604,7 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
     ...(row.cover_spine == null ? {} : { coverSpine: row.cover_spine }),
     ...(row.artwork_guidance == null ? {} : { artworkGuidance: row.artwork_guidance }),
     ...(row.document_pages == null ? {} : { documentPages: row.document_pages }),
+    ...(row.express_print == null ? {} : { expressPrint: row.express_print }),
     ...(row.mockup_file_id == null ? {} : { mockupFileId: row.mockup_file_id }),
     ...(row.dropoff_lat == null ? {} : { dropoff: { lat: row.dropoff_lat, lng: row.dropoff_lng, label: row.dropoff_label } }),
   }));

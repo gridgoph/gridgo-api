@@ -1,3 +1,6 @@
+import { awardExpressFriendPass } from './express-rewards.js';
+import { expressRates, expressEvent, expressStatus } from './express-orders.js';
+import { routeExpressOrders } from './express-routes.js';
 import { reconcileDispatchOffers, declineDispatchOffer, requireDispatchOffer, offerTimeoutSeconds } from './dispatch-offers.js';
 import { routeCash, collectCash, cashRequest, settleCashRedelivery } from './cash-routes.js';
 import { hydrateCashWallets, reserveCash } from './cash-ledger.js';
@@ -526,6 +529,8 @@ async function save(view, { notificationsOnly = false } = {}) {
   const before = new Map((originalDomainStore(store)?.orders || []).map(order => [order.id, order]));
   if (scope) await assertStoredOrderPaymentGuards(database);
   for (const order of maintenance.orders || []) {
+    if(!scope) awardExpressFriendPass(store,order,before.get(order.id),{id,at:now()});
+    if(order.orderType==='express' && order.expressOrder.events.at(-1)?.state!==expressStatus(order)) expressEvent(store,order,expressStatus(order),{id,at:now()});
     if (before.get(order.id)?.state !== order.state && ["payment_authorized", "production"].includes(order.state)) assertApprovalBeforeProceeding(order);
     const topUpPending = changesFor(store, order).some(row => row.status === 'pending_confirmation' && awaitedTopUp(order, row));
     if (changePaymentPending(store, order) && (!changeWindowOpen(order)
@@ -932,6 +937,7 @@ function publicOperationalSettings(settings, store = null, user = null) {
     ...rest
   } = settings || {};
   if (!['ops_admin', 'super_admin'].includes(user?.role)) {
+    delete rest.expressRates;
     delete rest.serviceFeeSchedule;
     delete rest.scheduledServiceFee;
   }
@@ -1234,6 +1240,7 @@ function publicUser(u) {
   if (!u) return null;
   const rest = { ...u };
   delete rest.clerkUserId;
+  delete rest.expressGuide;
   // Identity-document references are exposed only through the dedicated, caller-aware
   // verification projection. publicUser is reused in catalogue and matching responses.
   delete rest.verificationDocumentFileIds;
@@ -3533,6 +3540,11 @@ async function handleAuditedRequest(req, res) {
       }
     }
 
+    const expressResponse=await routeExpressOrders({req,url,store,user,readBody,id,now});
+    if(expressResponse) {
+      if(expressResponse.mutated) await save(store);
+      return send(res,expressResponse.status,expressResponse.body);
+    }
     const orderMatchResponse = await routeOrderMatch({
       req,
       url,
@@ -4396,6 +4408,7 @@ async function handleAuditedRequest(req, res) {
       }
       const next = {
         ...store.settings,
+        expressRates: Object.hasOwn(body,"expressRates") ? body.expressRates : expressRates(store.settings),
         cash: Object.hasOwn(body,'cash') ? (body.cash && typeof body.cash==='object' && !Array.isArray(body.cash)
           ? {...cashSettings(store.settings),...body.cash}:body.cash) : cashSettings(store.settings),
         riderOfferTimeoutSeconds: Object.hasOwn(body, 'riderOfferTimeoutSeconds') ? body.riderOfferTimeoutSeconds : offerTimeoutSeconds(store.settings),
@@ -5771,6 +5784,7 @@ async function handleAuditedRequest(req, res) {
         createdAt: at,
       };
       store.shopReviews.push(review);
+      if(order.orderType==='express' && review.qualityStars<=2) notifyAdmins(store,'express_low_rating','Low Express rating',order,`express-rating:${review.id}`,{createId:id,at});
       audit(store, {
         actor: user,
         action: "order.rated",
@@ -6754,6 +6768,9 @@ async function handleAuditedRequest(req, res) {
       const order = store.orders.find((o) => o.id === orderId);
       if (!order) return send(res, 404, { error: "order_not_found" });
       const next = body.state;
+      if(order.orderType==='express' && order.fulfillmentMode==='pickup' && ['rider_assigned','picked_up','out_for_delivery','awaiting_collection','delivered','issue_window_open','completed'].includes(next)) {
+        return send(res,409,{error:'express_pickup_code_required'});
+      }
       if (isShopStaff(user) && (Object.keys(body).some(key => !['state', 'note', 'reason', 'specialInstructionsRead'].includes(key))
         || !['supplier_accepted', 'payment_authorized', 'approved_for_matching', 'production', 'supplier_self_qc', 'ready_for_dispatch', 'awaiting_collection'].includes(next))) {
         return send(res, 403, { error: 'shop_owner_required' });
