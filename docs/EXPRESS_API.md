@@ -150,7 +150,8 @@ to `sending | accepted | printing | ready | picked_up | delivered | cancelled`.
 The append-only `expressOrder.events[]` records timestamps, including `moved`,
 `declined`, and `timed_out`. `expressOrder` also exposes `originalSupplierId`,
 `currentSupplierId`, `declineCount`, `acceptBy`, and scoped `printSettings`.
-Custom orders read as `orderType: "custom"`.
+Existing custom orders retain their previous response fields; only Express adds
+`orderType: "express"`.
 
 Sending initially includes payment confirmation and Operations artwork review.
 Supplier access stays held until that review passes. The **five elapsed minutes**

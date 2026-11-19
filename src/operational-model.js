@@ -1260,7 +1260,6 @@ export function publicOrderFor(order, user, store = null) {
   if (!order) return null;
   const publicRecord = clone(order);
   delete publicRecord.expressOrder;
-  publicRecord.orderType = order.orderType === "express" ? "express" : "custom";
   if(order.orderType === "express") publicRecord.expressOrder = publicExpress(order,user);
   delete publicRecord.actions;
   delete publicRecord.deliveryReminder;
