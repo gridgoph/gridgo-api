@@ -23,7 +23,7 @@ export function voucherEvent(store, voucher, kind, { id, at, actorId = null, rea
 function notice(store, voucher, kind, { id, at }) {
   const campaign = campaignFor(store, voucher);
   const title = kind === 'issued' ? 'Your GRIDGO voucher is ready' : 'Your GRIDGO voucher expires soon';
-  const body = `${campaign.name}: PHP ${BigInt(voucher.valueMinor) / 100n}.${String(BigInt(voucher.valueMinor) % 100n).padStart(2, '0')}. Expires ${voucher.expiresAt}. Open your voucher wallet to use it.`;
+  const body = voucher.data?.expressDeliveryReward ? 'Your Friend Pass delivery reward is ready. Checkout shows its peso saving on your next delivery order.' : `${campaign.name}: PHP ${BigInt(voucher.valueMinor) / 100n}.${String(BigInt(voucher.valueMinor) % 100n).padStart(2, '0')}. Expires ${voucher.expiresAt}. Open your voucher wallet to use it.`;
   store.notifications ||= [];
   store.notifications.push({ id: id('not'), userId: voucher.clientId, appRole: 'client', type: `voucher_${kind}`, title, body, at, read: false,
     voucherId: voucher.id, ...(voucher.emailAllowed ? {} : { push: false }) });
@@ -46,7 +46,7 @@ export function issueVoucher(store, campaign, clientId, { id, at, actorId = null
     issuedAt: at, expiresAt: campaign.endsAt || new Date(Date.parse(at) + campaign.validityDays * 86400000).toISOString(),
     emailAllowed: adultConfirmed === true,
     ...(['founding_launch', 'friend_pass'].includes(campaign.purpose) ? { promotionKind: campaign.purpose === 'founding_launch' ? 'founding' : 'friend_pass' } : {}),
-    data: campaign.coversOrderTotal ? { coversOrderTotal: true, promotionClaimSequence: store.vouchers.filter(v => v.promotionKind).length + 1 } : {} };
+    data: campaign.purpose === 'express_friend_pass' ? {expressDeliveryReward:true} : campaign.coversOrderTotal ? { coversOrderTotal: true, promotionClaimSequence: store.vouchers.filter(v => v.promotionKind).length + 1 } : {} };
   store.vouchers.push(voucher);
   voucherEvent(store, voucher, 'issued', { id, at, actorId });
   notice(store, voucher, 'issued', { id, at });
@@ -60,7 +60,7 @@ export function availableVouchers(store, clientId, at, cartId = null) {
       && r.status === 'reserved' && !expired(r.expiresAt, at) && r.cartId !== cartId));
 }
 export function selectVoucher(store, cart, groups, at) {
-  const candidates = availableVouchers(store, cart.clientId, at, cart.id).filter(v => voucherMoney(groups, v.valueMinor, v.data).voucherDiscountMinor > 0);
+  const candidates = availableVouchers(store, cart.clientId, at, cart.id).filter(v => (!v.data?.expressDeliveryReward || cart.fulfillmentMode === 'delivery') && voucherMoney(groups, v.valueMinor, v.data).voucherDiscountMinor > 0);
   const choice = (store.voucherCartChoices || []).find(c => c.id === cart.id);
   if (choice?.removed) return null;
   if (choice?.voucherId) return candidates.find(v => v.id === choice.voucherId) || null;
@@ -183,7 +183,7 @@ export function publicVoucher(store, voucher, at) {
   const status = voucher.status === 'available' && expired(voucher.expiresAt, at) ? 'expired' : voucher.status;
   return { id: voucher.id, campaignId: voucher.campaignId, name: campaignFor(store, voucher)?.name,
     ...(voucher.promotionKind ? { promotionKind: voucher.promotionKind, coversOrderTotal: true, upgradedAt: voucher.data.upgradedAt ?? null } : {}),
-    valueMinor: voucher.valueMinor, status, issuedAt: voucher.issuedAt, expiresAt: voucher.expiresAt,
+    ...(voucher.data?.expressDeliveryReward ? {kind:'delivery_reward'} : {valueMinor:voucher.valueMinor}), status, issuedAt: voucher.issuedAt, expiresAt: voucher.expiresAt,
     secondsRemaining: Math.max(0, Math.ceil((Date.parse(voucher.expiresAt) - Date.parse(at)) / 1000)),
     redeemable: status === 'available' && !reservation && campaignFor(store, voucher)?.status === 'active',
     reservation: reservation ? { id: reservation.id, cartId: reservation.cartId, expiresAt: reservation.expiresAt } : null,

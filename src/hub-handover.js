@@ -51,6 +51,7 @@ export function checkHandoverAttempt(order, otp, at) {
 
 /** Both the rider proof and hub scan use this event; payouts keep their existing Operations gates. */
 export function completeHandover(store, order, { actor, at, id, note, fileId, mark = {} }) {
+  if (order.orderType === 'express' && order.fulfillmentMode === 'pickup' && !order.expressOrder?.pickedUpAt) fail(409, 'express_pickup_code_required');
   order.state = 'delivered';
   order.timeline.push({ at, state: 'delivered', by: actor.id, note, ...(fileId ? { fileId } : {}), ...mark });
   if (order.handover) order.handover.consumedAt = at;

@@ -18,7 +18,17 @@ export function splitVoucherMinor(total, weights) {
 }
 
 /** Client discounts leave gross supplier and rider entitlements intact. */
-export function voucherMoney(groups, valueMinor = 0, { coversOrderTotal = false } = {}) {
+export function voucherMoney(groups, valueMinor = 0, { coversOrderTotal = false, expressDeliveryReward = false } = {}) {
+  if (expressDeliveryReward) {
+    const amounts=groups.map(g=>Number((BigInt(minor(g.deliveryFeeMinor))*500n+5000n)/10000n));
+    const organizationDiscountMinor=sumMinor(groups.map(g=>minor(g.organizationDiscountMinor??0)));
+    const candidate=sumMinor(amounts), applies=candidate>organizationDiscountMinor;
+    return {voucherDiscountMinor:applies?candidate:0,organizationDiscountMinor:applies?0:organizationDiscountMinor,discountKind:applies?'voucher':organizationDiscountMinor?'organization':null,
+      groups:groups.map((g,i)=>{const fee=minor(g.grossServiceFeeMinor??g.serviceFeeMinor),discount=applies?amounts[i]:0,org=applies?0:(g.organizationDiscountMinor??0);
+        return {organizationDiscountMinor:org,organizationDiscountRateBps:applies?0:(g.organizationDiscountRateBps??0),serviceFeeMinor:fee-org,
+          voucherDiscountMinor:discount,voucherServiceFeeMinor:0,voucherDeliveryMinor:discount,clientServiceFeeMinor:fee-org,clientDeliveryFeeMinor:g.deliveryFeeMinor-discount,
+          totalMinor:sumMinor([g.supplierSubtotalMinor,fee-org,g.deliveryFeeMinor-discount])};})};
+  }
   const fees = groups.map(g => minor(g.grossServiceFeeMinor ?? g.serviceFeeMinor));
   const deliveries = groups.map(g => !coversOrderTotal && g.serviceFeeSchedule?.version === 2 ? 0 : minor(g.deliveryFeeMinor));
   const principals = groups.map(g => coversOrderTotal ? minor(g.supplierSubtotalMinor) : 0);
