@@ -103,7 +103,7 @@ export function declineExpress(store,order,{at,id,kind='declined',actorId=null,r
     for(const job of store.orderJobs||[])if(job.orderId===order.id){job.supplierId=order.supplierId;job.pickup=structuredClone(order.pickup);job.updatedAt=at;}
     expressEvent(store,order,'moved',{at,id,actorId,reason:kind==='timed_out'?'No response within five minutes.':reason});startExpressAcceptance(order,at);
   } else {
-    order.state='cancelled';order.cancelledAt=at;order.cancelledBy='system';order.cancellationReason='No Express shop accepted the order.';
+    order.state='cancelled';order.cancelledAt=at;order.cancelledBy=null;order.cancellationReason='No Express shop accepted the order.';
     e.refundRequired=Object.values(order.payments||{}).some(p=>p.status==='confirmed');
     for(const job of store.orderJobs||[])if(job.orderId===order.id){job.state='cancelled';job.updatedAt=at;}
     order.timeline.push({at,state:'cancelled',by:'system',note:order.cancellationReason});
