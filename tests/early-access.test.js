@@ -14,9 +14,14 @@ const DB = process.env.DATABASE_URL;
 const input = { email: 'tester@gmail.com', consent: true, platform: 'android', source: 'booth' };
 const checked = (res, status = 200) => { assert.equal(res.status, status, JSON.stringify(res.body)); return res.body; };
 
-test('early access validates consent, Google account email, Android and bounded source', () => {
+test('early access validates consent, account email, phone type and bounded source', () => {
   assert.deepEqual(validateEarlyAccess({ ...input, email: ' Test+Play@Example.Org ' }), {
     email: 'test+play@example.org', platform: 'android', source: 'booth',
+  });
+  const { platform, ...legacyInput } = input;
+  assert.equal(validateEarlyAccess(legacyInput).platform, 'android');
+  assert.deepEqual(validateEarlyAccess({ ...input, email: ' Apple.ID@iCloud.com ', platform: 'iphone' }), {
+    email: 'apple.id@icloud.com', platform: 'iphone', source: 'booth',
   });
   for (const consent of [false, 'true', 1, undefined]) {
     assert.throws(() => validateEarlyAccess({ ...input, consent }), { status: 400, code: 'consent_required' });
@@ -27,7 +32,9 @@ test('early access validates consent, Google account email, Android and bounded 
   for (const source of ['a'.repeat(65), 'booth?<email>', {}, ['booth']]) {
     assert.throws(() => validateEarlyAccess({ ...input, source }), { code: 'invalid_source' });
   }
-  assert.throws(() => validateEarlyAccess({ ...input, platform: 'ios' }), { code: 'invalid_platform' });
+  for (const platform of ['ios', 'Android', '', null, false, 1, {}, ['iphone']]) {
+    assert.throws(() => validateEarlyAccess({ ...input, platform }), { status: 400, code: 'invalid_platform' });
+  }
   for (const role of ['client', 'supplier', 'rider']) assert.equal(invalidateFrameVisible('early-access', role), false);
   for (const role of ['ops_admin', 'super_admin']) assert.equal(invalidateFrameVisible('early-access', role), true);
 });
@@ -56,20 +63,23 @@ test('early access HTTP and PostgreSQL contract with durable notifications and m
   });
   let signup, signupId;
 
-  await t.test('public signup, normalized dedupe, CORS and durable ops/super inbox', async () => {
-    const response = await api(null, 'POST', '/early-access', { ...input, email: ' TESTER@GMAIL.COM ' }, {
+  await t.test('public signup defaults to Android, normalized dedupe, CORS and durable ops/super inbox', async () => {
+    const { platform, ...legacyInput } = input;
+    const response = await api(null, 'POST', '/early-access', { ...legacyInput, email: ' TESTER@GMAIL.COM ' }, {
       headers: { Origin: 'https://landing.example.test', 'CF-Connecting-IP': '192.0.2.1' },
     });
     signup = checked(response);
     assert.match(signup.token, /^[a-f0-9]{64}$/);
-    assert.deepEqual(Object.keys(signup).sort(), ['createdAt', 'duplicate', 'grantedAt', 'status', 'token']);
+    assert.deepEqual(Object.keys(signup).sort(), ['createdAt', 'duplicate', 'grantedAt', 'platform', 'status', 'token']);
+    assert.equal(signup.platform, 'android');
     assert.equal(signup.status, 'pending'); assert.equal(signup.duplicate, false); assert.equal(signup.grantedAt, null);
     assert.equal(response.headers.get('access-control-allow-origin'), 'https://landing.example.test');
     assert.match(response.headers.get('cache-control'), /no-store/);
-    const duplicate = checked(await post({ ...input, source: 'nu' }));
+    const duplicate = checked(await post({ ...input, platform: 'iphone', source: 'nu' }));
     assert.deepEqual(duplicate, { ...signup, duplicate: true });
     const rows = (await database.query('SELECT * FROM early_access_signups')).rows;
     assert.equal(rows.length, 1); signupId = rows[0].id;
+    assert.equal(rows[0].platform, 'android');
     assert.equal(rows[0].email, input.email); assert.equal(rows[0].source, 'booth'); assert.equal(rows[0].consent_at, signup.createdAt);
     assert.equal((await database.query('SELECT count(*)::int AS n FROM early_access_email_outbox')).rows[0].n, 1);
     const inbox = (await database.query("SELECT user_id,data FROM notifications WHERE type='ops_early_access_signup' ORDER BY user_id")).rows;
@@ -86,7 +96,9 @@ test('early access HTTP and PostgreSQL contract with durable notifications and m
   await t.test('consent refusal, validation and body limits create nothing', async () => {
     assert.deepEqual(checked(await post({ ...input, consent: false }), 400), { error: 'consent_required' });
     assert.equal(checked(await post({ ...input, email: 'bad' }), 400).error, 'invalid_email');
-    assert.equal(checked(await post({ ...input, platform: 'ios' }), 400).error, 'invalid_platform');
+    for (const platform of ['ios', 'Android', '', null, false, 1, {}, ['iphone']]) {
+      assert.deepEqual(checked(await post({ ...input, platform }), 400), { error: 'invalid_platform' });
+    }
     assert.equal(checked(await post({ ...input, source: 'bad source' }), 400).error, 'invalid_source');
     checked(await post({ ...input, email: 'x'.repeat(5000) }), 413);
     assert.equal((await database.query('SELECT count(*)::int AS n FROM early_access_signups')).rows[0].n, 1);
@@ -94,7 +106,7 @@ test('early access HTTP and PostgreSQL contract with durable notifications and m
 
   await t.test('status token read never exposes email, IDs, or link before grant', async () => {
     const status = checked(await api(null, 'GET', `/early-access/status?token=${signup.token}`));
-    assert.deepEqual(status, { status: 'pending', grantedAt: null, optInUrl: null });
+    assert.deepEqual(status, { platform: 'android', status: 'pending', grantedAt: null, optInUrl: null });
     checked(await api(null, 'GET', `/early-access/status?token=${'f'.repeat(64)}`), 404);
     checked(await api(null, 'GET', '/early-access/status?token=invalid'), 404);
   });
@@ -107,6 +119,7 @@ test('early access HTTP and PostgreSQL contract with durable notifications and m
     const list = checked(await api('ops', 'GET', '/ops/early-access?q=TESTER&status=pending&limit=1&offset=0'));
     assert.deepEqual(list.counts, { pending: 1, granted: 0 }); assert.equal(list.total, 1);
     assert.equal(list.signups[0].id, signupId); assert.equal(list.signups[0].email, input.email);
+    assert.equal(list.signups[0].platform, 'android');
     assert.equal('token' in list.signups[0], false);
     assert.equal(checked(await api('admin', 'GET', '/ops/early-access?q=%25')).total, 0);
     for (const query of ['status=unknown', 'limit=0', 'limit=101', 'offset=-1']) checked(await api('ops', 'GET', `/ops/early-access?${query}`), 400);
@@ -127,7 +140,7 @@ test('early access HTTP and PostgreSQL contract with durable notifications and m
     assert.equal(grant.status, 'granted'); assert.ok(grant.grantedAt); assert.ok(['ops', 'admin'].includes(grant.grantedBy));
     await database.transaction(() => database.query("UPDATE tester_program_settings SET opt_in_url='https://play.google.com/apps/testing/ph.gridgo.next' WHERE app='client'"));
     assert.deepEqual(checked(await api(null, 'GET', `/early-access/status?token=${signup.token}`)), {
-      status: 'granted', grantedAt: grant.grantedAt, optInUrl: link,
+      platform: 'android', status: 'granted', grantedAt: grant.grantedAt, optInUrl: link,
     });
     const duplicate = checked(await post());
     assert.equal(duplicate.status, 'granted'); assert.equal(duplicate.token, signup.token); assert.equal(duplicate.duplicate, true);
@@ -145,6 +158,45 @@ test('early access HTTP and PostgreSQL contract with durable notifications and m
     assert.equal(grant.grantedBy, 'clerk_desk');
     const audit = (await database.query("SELECT actor_id,actor_role FROM audit_log WHERE action='early_access.granted' AND entity_id=$1", [id])).rows[0];
     assert.deepEqual(audit, { actor_id: 'clerk_desk', actor_role: 'support_desk' });
+  });
+
+  await t.test('iPhone signup and duplicate preserve phone type; desk grant records TestFlight addition without Play mail', async () => {
+    const iphone = checked(await post({ ...input, email: ' Apple.ID@iCloud.com ', platform: 'iphone', source: 'booth-iphone' }, null, '/api/early-access'));
+    assert.equal(iphone.platform, 'iphone'); assert.equal(iphone.status, 'pending');
+    assert.deepEqual(checked(await api(null, 'GET', `/api/early-access/status?token=${iphone.token}`)), {
+      platform: 'iphone', status: 'pending', grantedAt: null, optInUrl: null,
+    });
+    assert.deepEqual(checked(await post({ email: 'apple.id@icloud.com', consent: true, source: 'different' })), {
+      ...iphone, duplicate: true,
+    });
+    const before = checked(await api('ops', 'GET', '/ops/early-access?q=apple.id'));
+    const row = before.signups[0];
+    assert.equal(before.total, 1);
+    assert.deepEqual(row, { id: row.id, email: 'apple.id@icloud.com', platform: 'iphone', source: 'booth-iphone',
+      status: 'pending', createdAt: iphone.createdAt, grantedAt: null, grantedBy: null });
+    const grant = checked(await api('desk', 'POST', `/api/early-access/desk/${row.id}/grant`, {}, { claims: { email: 'desk@example.test' } }));
+    assert.equal(grant.platform, 'iphone'); assert.equal(grant.status, 'granted');
+    assert.ok(grant.grantedAt); assert.equal(grant.grantedBy, 'clerk_desk');
+    assert.deepEqual(checked(await api('ops', 'POST', `/ops/early-access/${row.id}/grant`, {})), grant);
+    assert.deepEqual(checked(await api(null, 'GET', `/early-access/status?token=${iphone.token}`)), {
+      platform: 'iphone', status: 'granted', grantedAt: grant.grantedAt, optInUrl: null,
+    });
+    const duplicate = checked(await post({ ...input, email: row.email }));
+    assert.equal(duplicate.platform, 'iphone'); assert.equal(duplicate.status, 'granted');
+    assert.equal(duplicate.grantedAt, grant.grantedAt); assert.equal(duplicate.token, iphone.token);
+    assert.equal(duplicate.duplicate, true);
+    assert.deepEqual(checked(await api('desk', 'GET', '/early-access/desk?q=apple.id&status=granted', null,
+      { claims: { email: 'desk@example.test' } })).signups, [grant]);
+    assert.equal((await database.query('SELECT opt_in_url FROM early_access_signups WHERE id=$1', [row.id])).rows[0].opt_in_url, null);
+    assert.deepEqual((await database.query('SELECT kind FROM early_access_email_outbox WHERE signup_id=$1', [row.id])).rows, [{ kind: 'team' }]);
+    assert.equal((await database.query("SELECT count(*)::int AS n FROM audit_log WHERE action='early_access.granted' AND entity_id=$1", [row.id])).rows[0].n, 1);
+    const notices = (await database.query("SELECT user_id,data FROM notifications WHERE type='ops_early_access_granted' AND data->>'occurrenceKey'=$1 ORDER BY user_id", [row.id])).rows;
+    assert.deepEqual(notices.map(notice => notice.user_id), ['admin', 'ops']);
+    assert.equal(JSON.stringify(notices).includes(row.email), false);
+    await assert.rejects(database.transaction(() => database.query('UPDATE early_access_signups SET opt_in_url=$2 WHERE id=$1',
+      [row.id, 'https://play.google.com/apps/testing/ph.gridgo.client'])), { code: '23514' });
+    await assert.rejects(database.transaction(() => database.query('UPDATE early_access_signups SET opt_in_url=NULL WHERE id=$1',
+      [signupId])), { code: '23514' });
   });
 
   await t.test('IP rate limit includes invalid submissions and status has its own bucket', async () => {
@@ -189,10 +241,15 @@ test('early access HTTP and PostgreSQL contract with durable notifications and m
     down = false;
     const secondInstance = createEarlyAccessEmailWorker({ database, mailer, env: { EARLY_ACCESS_TEAM_EMAIL: 'team@example.test' } });
     await Promise.all([drain(), drain(), secondInstance()]);
-    assert.equal(sent.filter(mail => mail.subject === `New tester: ${input.email}`).length, 1);
+    assert.equal(sent.filter(mail => mail.subject === `New Android tester: ${input.email}`).length, 1);
+    const iphoneAlert = sent.filter(mail => mail.subject === 'New iPhone tester: apple.id@icloud.com');
+    assert.equal(iphoneAlert.length, 1);
+    assert.match(iphoneAlert[0].text, /App Store Connect under TestFlight external testers/);
+    assert.equal(iphoneAlert[0].to, 'team@example.test');
+    assert.equal(sent.some(mail => mail.to === 'apple.id@icloud.com'), false);
     const invite = sent.find(mail => mail.to === input.email);
-    assert.match(invite.text, /Keep the app for 14 days\./);
-    assert.match(invite.text, /https:\/\/play.google.com\/apps\/testing\/ph.gridgo.client/);
+    assert.equal(invite.subject, "You're in — GRIDGO Google Play Early Access");
+    assert.equal(invite.text, `You're in!\n\nYour Google Play invite is ready. Open this link with the Google account you signed up with:\nhttps://play.google.com/apps/testing/ph.gridgo.client\n\nKeep the app for 14 days. Thank you for helping GRIDGO launch!`);
     assert.match(invite.messageId, /@gridgo.early-access>/);
     assert.ok((await database.query('SELECT status FROM early_access_email_outbox')).rows.every(row => row.status === 'sent'));
     await drain(); assert.equal(sent.length, failed.length);
@@ -232,7 +289,7 @@ test('early access HTTP and PostgreSQL contract with durable notifications and m
   await t.test('many source IPs and two instances share a durable team budget without blocking invitations', async () => {
     // Each IP remains within its route limit; the aggregate budget must still hold.
     for (let n = 0; n < 101; n++) checked(await api(null, 'POST', '/early-access', {
-      ...input, email: `budget-${n}@example.test`,
+      ...input, email: `budget-${n}@example.test`, platform: n % 2 ? 'iphone' : 'android',
     }, { headers: { 'CF-Connecting-IP': `198.18.0.${1 + Math.floor(n / 10)}` } }));
     const delivered = [];
     const mailer = { configured: true, async sendEarlyAccessEmail(mail) { delivered.push(mail); return { sent: true }; } };
