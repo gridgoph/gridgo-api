@@ -1,35 +1,302 @@
-# Express listings
+# Express API
 
-[Scheduling release 1](SCHEDULING_API.md) replaces the original Express
-availability override. Express now respects production, queue, capacity,
-shop/GRIDGO hours, closures and dispatch cutoff. The listing switch remains
-available until the separate release-2 shop editor/conversion task.
+Express is an order type on the existing checkout, payment, refund, production,
+QA and payout model. It is not the legacy scheduling override represented by a
+listing's `express` flag. Existing orders and custom checkout remain unchanged.
 
-## The shop's switch
+The 19 November decision applies: the client pays GRIDGO using the existing QR,
+cash-delivery (when enabled and eligible), or voucher paths. Printing includes
+the existing service fee. There is no Express fee, direct shop payment, load
+wallet, or starter load. **Spending Credits, refunds to Credits, and the Credits
+toggle are deferred until the kiosk resumes.** The existing Pilot Credits ledger
+is untouched. Mission rewards remain the existing vouchers.
 
-`supplier_catalog_items.express boolean NOT NULL DEFAULT false`. Every existing
-listing starts with it off.
+All money fields use integer PHP centavos. Express client responses contain
+peso amounts, with no service-fee rate, schedule, percentage or separate fee line.
+All routes require a Clerk session and the appropriate PostgreSQL membership.
+Mutations use the normal domain transaction, lock, audit/inbox and after-commit
+push boundary. No endpoint transfers money externally.
 
-| Route | Field |
-| --- | --- |
-| `POST /me/catalog-items` | Optional `express` boolean, default `false`. |
-| `PATCH /me/catalog-items/:id` | Optional `express` boolean, with `expectedVersion` (or `If-Match`) like every listing edit. Omitted or `null` leaves it unchanged. A non-boolean is `400 invalid_catalog_item` with `field: "express"`; a stale version is `409 catalog_item_stale`. |
+## Rates and Pay shops
 
-The change applies at once and **does not enter listing review**, the same as
-turnaround and active/hidden changes: The switch is retained as listing metadata; scheduling no longer treats it as a promise override. An approved listing with a
-review-sensitive revision pending still uses the shop's current Express switch
-on the approved version clients see. A change of the switch writes the
-`catalog_item.update` audit with `detail: { express }`.
+Super Admin uses the existing `GET /settings`, then:
 
-## Compatibility and historical promises
+```json
+PATCH /settings
+{
+  "expectedVersion": 42,
+  "reason": "Updated Express page prices",
+  "expressRates": { "bwMinor": 300, "colourMinor": 500 }
+}
+```
 
-Existing public and supplier listings still expose `express`. Match/cart
-`expressPromise` is false for all new projections; the shared ready-by rule
-supplies their timestamps. Calendar `expressAvailable` reports whether an
-eligible listing retains the switch, not whether today is reachable.
+Both rates must be positive safe integers; the object replaces both rates.
+Defaults are PHP 3.00 B&W and PHP 5.00 colour **shop principal per printed page**.
+Stale versions return `409 settings_version_conflict`; missing reason and invalid
+rates return `400`. Operations cannot edit these rates. Client settings omit them.
+The draft locks these rates and the same service-fee schedule as ordinary cart
+checkout. Later settings edits do not reprice that draft or an accepted order.
+Print principal = selected pages × copies × page rate. Duplex changes the sheet
+layout, not the page count: two printed sides are two pages.
 
-Existing `order.express` and its stored `readyBy`/`promiseBy` remain immutable.
-Previously placed Express orders are warning-only during the scheduling pilot,
-including pending unapplied lapses. No new fee is added. See [Scheduling](SCHEDULING_API.md)
-for per-date states, ready times, tier selection, role-safe order projections
-and Super Admin settings.
+`GET /express/shops?lat=7.06&lng=125.60&sort=nearest` is client-only.
+Sort is `nearest | top_rated | fewest_jobs`. Response:
+
+```json
+{
+  "shops": [{
+    "supplierId": "shop_1", "catalogItemIds": ["item_1"],
+    "name": "Example Print", "address": "Davao",
+    "location": { "lat": 7.06, "lng": 125.60, "label": "Davao" },
+    "distanceMeters": 250, "rating": { "average": 4.8, "count": 12 },
+    "jobsAhead": 3, "readyAt": "2026-12-01T03:00:00.000Z",
+    "isNew": false, "busy": true
+  }]
+}
+```
+
+Only active, approved suppliers open now under their shop calendar qualify.
+They must have a public, approved `document_printing`, `per_page` listing with
+`express: true`. Existing supplier listing editing controls this opt-in; staff
+visibility/approval holds still apply. Shop setup must offer the print layouts
+and option selections it accepts. Busy means at least three assigned/accepted/
+printing jobs. New means less than seven elapsed days since supplier approval
+(falling back to account creation for legacy rows). The first New shop is put
+second in `top_rated` and `fewest_jobs`; nearest remains strictly distance sorted.
+Rating uses the existing public rating threshold; it is null below that threshold.
+Ready time uses the existing queue/calendar projection, not an invented rush SLA.
+Review-data suppliers never mix with ordinary clients.
+
+## Files, Preview and Pay
+
+Upload through the existing Files API or reuse an owned ready artwork file.
+The server's document metadata supplies page count; the client cannot override
+PDF counts. For a Drive source, the client must download/export the document and upload its
+bytes through the Files API to obtain readable page metadata. The existing
+`/artwork/link-check` probe does not import bytes or establish page counts; a
+Drive viewer URL alone cannot create an Express draft.
+
+There is no cart **screen**. The app creates an internal draft with
+`POST /express/drafts`:
+
+```json
+{
+  "supplierId": "shop_1",
+  "location": { "lat": 7.06, "lng": 125.60 },
+  "fulfillmentMode": "pickup",
+  "files": [{
+    "fileId": "file_1", "catalogItemId": "item_1",
+    "copies": 2, "pageRange": "1-3, 5", "paper": "a4",
+    "colour": "bw", "sides": "two", "layout": "fit_to_paper",
+    "note": "Keep each copy together",
+    "acceptedWarnings": ["paper_size_mismatch"]
+  }]
+}
+```
+
+Use `fulfillmentMode: "delivery"` with `dropoff: {lat,lng,label}` for delivery.
+Pickup is at the chosen shop, without a rider/hub fee. Cash remains delivery-only.
+One to twenty file entries are allowed. Copies are positive integers. Paper is
+`a4 | short | long`, colour `bw | colour`, sides `one | two`, layout
+`fit_to_paper | actual_size_centered | actual_size_original_position` (top-left).
+The chosen listing must support the layout. The server selects its matching
+colour/size options and standard (first active) paper stock; that stock is saved
+with the print settings. Custom add-ons and client-supplied `optionIds` are refused.
+Unrecognized required option groups return `express_listing_configuration_required`.
+Omit `pageRange` for all pages. Accepted warnings are an array of
+`paper_size_mismatch | rgb_colour`. Notes use the existing masked, 300-character
+special-instructions contract.
+
+Returns `201 {cartId, confirmation, quote, shop}`. `quote` includes
+`clientItemSubtotalMinor` (printing including the fee), `deliveryFeeMinor`,
+`organizationDiscountMinor`, `voucherDiscountMinor`, `totalMinor`,
+`downpaymentMinor`, and `balanceMinor`. Amounts come from `clientCartQuote`, the
+same builder used by ordinary checkout. Use the existing cart voucher endpoints
+to select/remove a voucher, and `GET /me/carts/:cartId/quote` to refresh pricing.
+Only one discount wins; the existing organization/voucher comparison is retained.
+No price estimate is returned before files have a readable page count. Custom
+cart write routes refuse Express draft changes with `express_draft_replace_required`.
+
+Recreate the draft after changing files, print settings, shop or fulfillment;
+clear the local “Looks right” tick. Submit through the existing endpoint:
+
+```json
+POST /me/carts/:cartId/checkout
+{
+  "looksRight": true,
+  "expressConfirmation": "confirmation from the current draft",
+  "payment": {
+    "method": "qr_manual", "reference": "TRANSFER-REFERENCE",
+    "proofFileId": "file_payment"
+  }
+}
+```
+
+Include the existing artwork rights consent and approval-proof fields when their
+release gates require them. Enabled cash uses the existing `payment.method:
+"cash"`; a fully funded voucher uses the existing zero-cash boundary. The server
+rechecks shop availability, files, metadata, price and the preview fingerprint.
+A changed preview returns `409 express_preview_required`. Ordinary checkout
+errors, payment confirmation, file review and voucher expiry rules remain.
+
+The result is the normal `{order, invoice}`, with `orderType: "express"` and
+`expressOrder`. Stored line snapshots include the rate and print settings; client
+projections omit internal pricing and pickup credentials before readiness.
+
+## States, shop actions and five-minute timer
+
+The existing `order.state` remains authoritative. `expressOrder.status` maps it
+to `sending | accepted | printing | ready | picked_up | delivered | cancelled`.
+The append-only `expressOrder.events[]` records timestamps, including `moved`,
+`declined`, and `timed_out`. `expressOrder` also exposes `originalSupplierId`,
+`currentSupplierId`, `declineCount`, `acceptBy`, and scoped `printSettings`.
+Custom orders read as `orderType: "custom"`.
+
+Sending initially includes payment confirmation and Operations artwork review.
+Supplier access stays held until that review passes. The **five elapsed minutes**
+start when the existing workflow assigns the released order to the shop, not
+when the client uploads or submits a payment screenshot. `acceptBy` is an ISO
+server timestamp. Acceptance exactly at the deadline is late.
+
+Only the assigned, approved supplier may call:
+
+- `POST /orders/:id/express/accept` with `{specialInstructionsRead:true}` when
+  the order has notes (otherwise `{}`). Success is `200
+  {orderId,state:"payment_authorized",expressOrder}`. Repeated acceptance is
+  idempotent. It does not charge, release money or skip artwork/approval gates.
+- `POST /orders/:id/express/decline` with `{reason:"Printer unavailable"}`.
+  A decline or timeout increments the counter and chooses the nearest open,
+  eligible Express shop not already tried. The order and job assignment move
+  together; original print/money snapshots remain. A delivery replacement must
+  fall in the same delivery-fee band. The replacement gets a fresh five minutes.
+  The old shop loses order/file access through the normal assigned-job scoping.
+- Continue with the existing production, finished-product evidence, GRIDGO QA,
+  and ready transitions. No Express route bypasses those gates.
+
+At three refusals (timeouts count), or when no eligible same-price replacement
+remains, the order/jobs become cancelled. No reassignment is allowed after a shop
+payout release. Paid cancellations expose `refundRequired`; use the existing
+`/orders/:id/refund-requests` process, including staff review, verified collection,
+receiving destination and manual transfer. Cancellation never claims money has
+already been returned. Voucher-only remedies use the existing no-cash settlement.
+Clients can request cancellation through that same refund route before acceptance;
+its hold blocks acceptance/timer work. After acceptance, today's refund and work-stop
+rules continue; there is no new cancellation lock or charge.
+
+Reassignment is automatic and notified to the client; the app can show the moved
+event and the existing cancellation action. There is no extra move-approval state.
+No automatic shop pausing is introduced. Delivery rider offers begin at the
+existing ready-for-dispatch boundary. Pickup orders never enter rider offers.
+
+## Shop counter code
+
+When ready, only the owning client's `expressOrder` includes `pickupCode`, a
+six-character digit string (retain leading zeroes). Ordinary supplier, rider,
+staff and unrelated-client projections do not reveal it.
+
+The assigned approved shop calls
+`POST /orders/:id/express/pickup` with `{ "code": "012345" }`.
+This requires a ready pickup order, settled installments and no claim/refund/work
+hold. Five wrong attempts impose a 15-minute retry delay. Wrong code returns
+`409 express_pickup_code_mismatch`, throttling `429
+express_pickup_attempts_exceeded` with `retryAfter`.
+
+Success uses the existing handover completion function: records `pickedUpAt`,
+opens the usual issue window, marks the job delivered, and leaves supplier
+milestone amounts and Operations payout-release gates intact. Repeated success
+is idempotent. Legacy transition routes cannot bypass the counter code.
+Delivery Express orders use today's rider and delivery-proof flow.
+
+## Guide and missions
+
+`GET /me/express-guide` returns `{guide:{missions, popupLastShownDate,
+guideSeen, guideCompleted, showPopup}}`. Missions are the existing server-derived
+`added, placed, tracked, received, rated` flags; clients cannot mark operational
+steps complete. Dates are server-derived Asia/Manila calendar days.
+
+`PATCH /me/express-guide` takes one `action`:
+
+- `popup_shown`: records today's date; `showPopup` becomes false for the day.
+- `guide_seen`: Skip/seen, without completing the guide.
+- `guide_completed`: permanently sets both seen and completed.
+- `file_added` with `fileId`: records step one only after verifying an owned,
+  ready artwork upload. Creating an Express draft also records this step.
+
+Existing custom cart additions still complete step one. The popup stops after
+that step. The guide itself creates no order and awards no reward. All other
+mission rules and reward vouchers remain unchanged.
+
+## Friend Pass
+
+`POST /me/express-friend-pass` creates/reuses the existing tester referral code;
+`GET` reads it. Both return `{friendPass:{link,signups,successful}}`. `link` uses
+the existing Admin `testerSignupFormUrlTemplate` and is null until configured.
+The existing referral self-invite and shared phone/device/address checks also apply.
+Website signup and verified account matching reuse the existing tester invitation
+endpoints; there is no email-based authentication linking.
+
+When the referred client's first non-cancelled real order reaches `completed`
+after the issue window, both parties receive one delivery reward. Each takes
+5% off the delivery fee of its next eligible delivery checkout, rounded half-up
+in integer centavos. It never reduces supplier principal or rider entitlement.
+It competes with other discounts through the existing best-discount selection;
+no stacking. Pickup cannot consume it. Reward wallets, reservations, redemption,
+and no-fault restoration reuse vouchers, not Credits. These rewards use the
+existing maximum 365-day voucher validity; their calculated peso value is shown
+at checkout rather than as a fixed wallet face value. Existing mission/referral
+voucher awards continue under their original rules.
+
+The dedicated campaign purpose is `express_friend_pass`; its zero `valueMinor`
+means variable value, never a free cash credit. The value is computed from delivery
+at checkout, reserved, and snapshotted on the ordinary order. Campaign and per-client
+wallet uniqueness prevent repeated completion events awarding it twice. Review
+accounts never earn real rewards.
+
+## Admin and release
+
+`GET /ops/express/daily?date=2026-12-01` (Operations/Super Admin) returns
+`{date,orderCount,cancelledCount,totalMinor,lowRatings}` for orders created on that
+Manila day. `totalMinor` includes cancelled-order original totals; it is order
+volume, not collected revenue. Low ratings are quality scores of one or two.
+Submit ratings through the existing `POST /orders/:id/review` with whole-number
+`qualityStars`, `speedStars`, `valueStars` (1–5) and optional `comment`, after the
+issue window closes. A low Express rating also writes an admin inbox alert and queues
+push through the normal save boundary. Review data is excluded from totals.
+
+Run migrations before release:
+`1795069000000_express_delivery_rewards` permits variable-value delivery vouchers
+without changing fixed-value vouchers; `1795069100000_express_snapshots` protects
+original shop, print facts and counter credential against updates. No schema work
+runs at boot. Default rates require no production user or operational seed.
+
+Main refusals beyond the existing contracts: `invalid_express_rates`,
+`invalid_express_location`, `invalid_express_sort`, `invalid_express_files`,
+`invalid_express_print`, `invalid_express_warnings`, `express_shop_unavailable`,
+`express_listing_unavailable`, `express_preview_required`,
+`express_acceptance_not_pending`, `shop_acceptance_expired`,
+`express_reassignment_payout_released`, `express_pickup_required`,
+`express_not_ready`, `express_pickup_code_required`, and `invalid_express_guide_action`.
+Errors use `{error:"snake_case"}`. Wrong role/ownership is `403`; unknown IDs `404`;
+invalid input `400`; state/timer conflicts `409`.
+
+## Legacy listing compatibility
+
+The prior listing/scheduling contract remains: `supplier_catalog_items.express`
+is a boolean, default false, writable through `POST /me/catalog-items` or
+`PATCH /me/catalog-items/:id` with `expectedVersion` (or `If-Match`). Invalid
+non-booleans return `400 invalid_catalog_item`; stale versions return
+`409 catalog_item_stale`. The switch remains non-review-sensitive metadata and
+writes the existing `catalog_item.update` audit. Approved catalogue projections
+retain the current switch even while a private review-sensitive revision waits.
+
+Custom match/cart `expressPromise` remains false. Calendar `expressAvailable`
+reports the listing switch, not whether today is reachable. Scheduling still
+respects production time, queue, capacity, shop/GRIDGO hours and dispatch cutoff.
+Historical `order.express` tags and stored promises keep their existing pilot
+behavior. New document Express uses **orderType**, not that retired scheduling
+tag, and receives no legacy penalty exemption. See [Scheduling](SCHEDULING_API.md).
+
+Migration `1795069200000_express_reward_funding` retains the existing voucher
+money guard and adds one narrow exception for a verified delivery-reward wallet:
+exactly 5% delivery, zero service-fee/principal discount, delivery fulfillment
+only. It does not loosen ordinary voucher allocation or payout rules.

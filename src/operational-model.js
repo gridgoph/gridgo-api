@@ -1,3 +1,4 @@
+import { expressRates, validateExpressRates, publicExpress, expressClientProjection } from './express-orders.js';
 import { validateCashSettings, cashAmounts } from './cash-policy.js';
 import { staffOrderProjection } from './shop-staff-order.js';
 import { orderRemovalBlock } from './order-removal.js';
@@ -160,7 +161,7 @@ export function isContainedPickup(order) {
 
 /** A collected order: it travels to the office, and waits there to be claimed. */
 export function carriedToOffice(order) {
-  return order?.fulfillmentMode === "pickup" && !isContainedPickup(order);
+  return order?.fulfillmentMode === "pickup" && order?.orderType !== "express" && !isContainedPickup(order);
 }
 
 /*
@@ -273,6 +274,7 @@ export function defaultOperationalSettings() {
     testerMonthlyBudgetMinor: null,
     testerSignupFormUrlTemplate: null,
     operatingHours: defaultOperatingHours(),
+    expressRates: expressRates(),
     serviceFeeRateBps: 1_000,
     organizationDiscountRateBps: 500,
     riderCommissionBps: 8_500,
@@ -330,6 +332,7 @@ export function defaultOperationalSettings() {
 }
 
 export function validateOperationalSettings(settings) {
+  validateExpressRates(Object.hasOwn(settings || {}, 'expressRates') ? settings.expressRates : expressRates());
   validateCashSettings(settings);
   if (settings.riderOfferTimeoutSeconds !== undefined && (!Number.isInteger(settings.riderOfferTimeoutSeconds)
       || settings.riderOfferTimeoutSeconds < 10 || settings.riderOfferTimeoutSeconds > 120)) {
@@ -1256,6 +1259,9 @@ function minimizePartyContact(value, rider = false) {
 export function publicOrderFor(order, user, store = null) {
   if (!order) return null;
   const publicRecord = clone(order);
+  delete publicRecord.expressOrder;
+  publicRecord.orderType = order.orderType === "express" ? "express" : "custom";
+  if(order.orderType === "express") publicRecord.expressOrder = publicExpress(order,user);
   delete publicRecord.actions;
   delete publicRecord.deliveryReminder;
   if (['ops_admin', 'super_admin'].includes(user?.role)
@@ -1716,7 +1722,7 @@ export function publicOrderFor(order, user, store = null) {
     not theirs to have. Ops, the assigned supplier and riders are untouched.
   */
   if (owningClient && !ops) {
-    if (order.fulfillmentMode === "pickup") publicRecord.pickup = gridgoOfficePoint();
+    if (order.fulfillmentMode === "pickup") publicRecord.pickup = order.orderType === "express" ? clone(order.pickup) : gridgoOfficePoint();
     else delete publicRecord.pickup;
   }
 
@@ -1804,6 +1810,11 @@ export function publicOrderFor(order, user, store = null) {
   }
   // The orders queue names the client. Only Operations and Super Admin receive
   // it. A shop, a rider, and the client keep the projection they already had.
+  if (owningClient && order.orderType === 'express') {
+    publicRecord.clientItemSubtotalMinor = order.supplierSubtotalMinor + (order.grossServiceFeeMinor ?? order.serviceFeeMinor);
+    for(const key of ['supplierSubtotalMinor','subtotalMinor','serviceFeeMinor','grossServiceFeeMinor','serviceFeeRateBps','serviceFeeSchedule','serviceFeeWorking','organizationDiscountRateBps','downpaymentPercent']) delete publicRecord[key];
+    for(const payment of Object.values(publicRecord.payments||{})) delete payment.componentLines;
+  }
   if (ops) publicRecord.clientName = clientNameFor(store, order.clientId);
   // Typed removal confirmation is a Super Admin capability. Never trust an
   // arbitrary historical orders.data contact field for this projection.
@@ -1818,7 +1829,7 @@ export function publicOrderFor(order, user, store = null) {
     .sort((a, b) => a.at.localeCompare(b.at) || a.id.localeCompare(b.id))
     .map(row => ({ id: row.id, at: row.at, action: row.action, actor: { userId: row.actorUserId, name: row.actorName, role: row.actorRole } }));
   if (user?.shopRole === 'staff') return staffOrderProjection(publicRecord);
-  return publicRecord;
+  return owningClient && order.orderType === "express" ? expressClientProjection(publicRecord) : publicRecord;
 }
 
 export function issueWindowExpiresAt(openedAt, issueWindowHours) {

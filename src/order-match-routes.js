@@ -1,3 +1,4 @@
+import { expressRates, expressLinePrice, expressPoint, expressShopList, expressGuide, updateExpressGuide, createExpressSnapshot, publicExpress, expressClientProjection, expressCatalogOptions } from './express-orders.js';
 import { isReviewData, markReviewPayment, reviewCatalogView, REVIEW_CATALOG_TABLES } from './review-data.js';
 import { approvalPolicy, recordApprovalProof } from './approval-proof.js';
 import { publicColourQuote, publicColourListing } from './colour-projection.js';
@@ -484,6 +485,7 @@ function syncDocumentPages(store, item, line, body, { required = false, previous
  * price, and showing the last one it had is showing a price nobody will honour.
  */
 function cartLineSubtotal(store, line) {
+  if (line.expressPrint) return expressLinePrice(line).lineSubtotalMinor;
   // A sample costs the shop's sample price, whatever the intended batch is.
   if (line.sample) return sampleLinePriceMinor(store, line);
   const item = (store.catalogItems || []).find((row) => row.id === line.catalogItemId);
@@ -573,6 +575,7 @@ function heldLinePrice(store, item, line) {
 
 /** Sample and held-batch lines arrive priced; everything else uses the listing engine. */
 function sampleFirstPricedLine(store, item, line) {
+  if (line.expressPrint) return expressLinePrice(line);
   if (line.sample) {
     const price = sampleLinePriceMinor(store, line);
     return { unit: "sample", quantity: 1, billableMilliUnits: 1000, unitRateMinor: price, lineSubtotalMinor: price };
@@ -836,7 +839,7 @@ export function clientCartQuote(store, cart, lines, at) {
         - Math.min(allocation.voucherSupplierMinor || 0, roundBps(addMinor([group.supplierSubtotalMinor, group.grossServiceFeeMinor, group.deliveryFeeMinor], 'voucher.gross'), rate) - roundBps(group.grossServiceFeeMinor, rate) - roundBps(group.deliveryFeeMinor, rate));
     }), 'voucher.downpayment');
   }
-  return {
+  const projected = {
     status: totalMinor == null ? "incomplete" : "priced", reasons,
     colourPricing: lines.flatMap(line => { const item = store.catalogItems.find(row => row.id === line.catalogItemId); const quote = item && colourQuoteFor(store,item,line); return quote ? [{lineId:line.id,...publicColourQuote(quote,"client",colourAmounts.get(line.id))}] : []; }),
     voucher: voucherPlan?.voucher ? publicVoucher(store, voucherPlan.voucher, at) : null,
@@ -854,6 +857,7 @@ export function clientCartQuote(store, cart, lines, at) {
     upfrontReason: grouped.length > 1 ? "multiple_fulfillment_groups" : "platform_setting",
     downpaymentPercent, downpaymentMinor, balanceMinor: totalMinor == null ? null : totalMinor - downpaymentMinor,
   };
+  return cart.orderType === "express" ? expressClientProjection(projected) : projected;
 }
 
 function publicCart(store, cart, at, { compactListings = false } = {}) {
@@ -994,7 +998,7 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
   const operatingStatus = reviewTiming(store.settings, at);
   const readyBy = groups.length && groups.every(group => group.readyBy)
     ? groups.map(group => group.readyBy).sort().at(-1) : null;
-  return {
+  const projected = {
     id: cart.id,
     approvalProofRequired: store.settings.approvalProofRequired === true,
     operatingStatus,
@@ -1018,6 +1022,7 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
     createdAt: cart.createdAt,
     updatedAt: cart.updatedAt,
   };
+  return cart.orderType === "express" ? expressClientProjection(projected) : projected;
 }
 
 function publicCartSampleBatch(store, line) {
@@ -1100,7 +1105,7 @@ function publicMatchedOrder(store, order) {
       // never at the shop that ran it, and a delivered one gives the client no
       // origin at all. The stored `job.pickup` is unchanged — that is where the
       // rider really goes. See src/gridgo-office.js.
-      ...(job.fulfillmentMode === "pickup" ? { pickup: gridgoOfficePoint() } : { pickup: null }),
+      ...(job.fulfillmentMode === "pickup" ? { pickup: order.orderType === "express" ? structuredClone(job.pickup) : gridgoOfficePoint() } : { pickup: null }),
       dropoff: job.dropoff ? { ...job.dropoff } : null,
       deliveryDistanceMeters: job.deliveryDistanceMeters,
       deliveryFeeMinor: job.deliveryFeeMinor,
@@ -1114,12 +1119,13 @@ function publicMatchedOrder(store, order) {
     }));
   return {
     id: order.id,
+    ...(order.orderType === "express" ? {orderType:"express",expressOrder:publicExpress(order,{id:order.clientId,role:"client"})} : {}),
     deadline: order.deadline ?? null,
     ...(order.basketId ? { basketId: order.basketId, groupLabel: order.groupLabel } : {}),
     ...(order.shopDeliveryCount > 1 ? { deliveryNumber: order.deliveryNumber, shopDeliveryCount: order.shopDeliveryCount } : {}),
     state: order.state,
     ...publicOrganizationDiscount(order),
-    ...(order.basketId || order.organizationDiscountRateBps > 0 || order.serviceFeeSchedule?.version === 2 ? { clientItemSubtotalMinor: order.supplierSubtotalMinor + (order.grossServiceFeeMinor ?? order.serviceFeeMinor) } : {
+    ...(order.orderType === "express" || order.basketId || order.organizationDiscountRateBps > 0 || order.serviceFeeSchedule?.version === 2 ? { clientItemSubtotalMinor: order.supplierSubtotalMinor + (order.grossServiceFeeMinor ?? order.serviceFeeMinor) } : {
       itemSubtotalMinor: order.supplierSubtotalMinor,
       serviceFeeRateBps: order.serviceFeeRateBps,
       serviceFeeMinor: order.serviceFeeMinor,
@@ -1139,7 +1145,7 @@ function publicMatchedOrder(store, order) {
     review: orderReviewTiming(order, store.settings),
     downpaymentPercent: orderDownpaymentPercent(order),
     paymentPlan: {
-      method: "qr_manual",
+      method: order.orderType === "express" ? order.payments.initial.method : "qr_manual",
       downpaymentPercent: orderDownpaymentPercent(order),
       downpaymentMinor: order.payments.initial.amountMinor,
       balanceMinor: order.payments.final_online.amountMinor,
@@ -1175,6 +1181,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   const downpaymentPercent = cash || basketId ? 100 : downpaymentPercentSetting(store.settings);
   const order = {
     id: orderId,
+    ...(cart.orderType === "express" ? {orderType:"express", expressOrder:createExpressSnapshot(cart,cartLines,at)} : {}),
     shopClockVersion: 1,
     operatingClock: operatingClockSnapshot(store.settings, store.version),
     reviewSchedule: reviewTiming(store.settings, at),
@@ -1247,8 +1254,8 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
     if (isQuoteListing(item)) assertQuoteCheckout(store, item, { user, cart, line, at });
     assertPrinterCap(store, item, { line, optionIds: line.optionIds, measurement: line.measurement, structuredSpec: line.structuredSpec });
     assertListingArtwork(store, item, line);
-    syncDocumentPages(store, item, line, {}, { required: !item.pricedByColour });
-    if (item.pricedByColour) {
+    syncDocumentPages(store, item, line, {}, { required: !!line.expressPrint || !item.pricedByColour });
+    if (item.pricedByColour && !line.expressPrint) {
       const colour = colourQuoteFor(store,item,line);
       if (colour?.status !== 'priced') fail(409, colour?.status === 'needs_price_check' ? 'colour_price_check_required' : 'colour_analysis_required', 'Finish the artwork colour and price check before checkout.', {lineId:line.id,colourPricing:publicColourQuote(colour,"client")});
       line.measurement = {pages:colour.pages.length};
@@ -1305,10 +1312,11 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
         sortOrder: line.sortOrder,
       }, createId);
       snapshot.lineItem.jobId = jobId;
+      if(line.expressPrint) {snapshot.lineItem.expressPrint=structuredClone(line.expressPrint); snapshot.lineItem.effectiveUnitPriceMinor=line.expressPrint.rateMinor; snapshot.lineItem.baseUnitPriceMinor=line.expressPrint.rateMinor;}
       applySampleFirstSnapshot(store, line, snapshot);
       snapshot.lineItem.documentPages = structuredClone(line.documentPages ?? null);
       if (line.quantityMode) snapshot.lineItem.quantityMode = line.quantityMode;
-      if (!snapshot.lineItem.colourPricing) { const colour = colourQuoteFor(store,item,line); if (colour) snapshot.lineItem.colourPricing = structuredClone(colour); }
+      if (!line.expressPrint && !snapshot.lineItem.colourPricing) { const colour = colourQuoteFor(store,item,line); if (colour) snapshot.lineItem.colourPricing = structuredClone(colour); }
       snapshot.lineItem.artworkLinks = structuredClone(line.artworkLinks || []);
       if (line.artworkAttachments) snapshot.lineItem.artworkAttachments = artworkAttachmentsFor(line);
       // The layout is part of the agreed spec, with the fit the client saw.
@@ -1495,6 +1503,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
 
   const invoice = {
     ...fee,
+    ...(order.orderType === "express" ? {orderType:"express"} : {}),
     invoiceNumber: order.invoiceNumber,
     organizationOfficer: structuredClone(order.organizationOfficer),
     orderId,
@@ -1678,6 +1687,16 @@ function linkSampleFirstOrder(store, user, order, cartLines, { at, createId }) {
 }
 
 function checkoutBasket(store, user, cart, body, createId, at, req) {
+  if (cart.orderType === 'express') {
+    const lines=store.cartLines.filter(l=>l.cartId===cart.id);
+    const shop=expressShopList(store,user,{location:cart.expressLocation},at).find(s=>s.supplierId===lines[0]?.supplierId);
+    if(!shop || lines.some(line=>!line.expressPrint || !shop.catalogItemIds.includes(line.catalogItemId) || line.supplierId!==shop.supplierId)) fail(409,'express_shop_unavailable','Choose an open Express shop.');
+    for(const line of lines) {
+      const item=store.catalogItems.find(row=>row.id===line.catalogItemId);
+      if(JSON.stringify(documentPagesFor(store,item,line,undefined,{required:true}))!==JSON.stringify(line.documentPages)) fail(409,'express_preview_required','The detected pages changed. Review a new draft.');
+    }
+    if(body.looksRight!==true || body.expressConfirmation!==expressConfirmation(cart,lines)) fail(409,'express_preview_required','Review the current print settings and accept the preview.');
+  }
   const cash = body.payment?.method === 'cash';
   if (cash) {
     requireCashCheckout(store.settings, user, 0);
@@ -1685,7 +1704,7 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
     if (cart.fulfillmentMode !== 'delivery') cashFail('cash_delivery_required');
     if (store.orders.some(o => o.clientId === user.id && o.cashProgress?.noShowApprovedAt && !o.cashProgress.repaymentConfirmedAt)) cashFail('cash_client_barred');
   }
-  if (cart.fulfillmentMode === "pickup" && store.settings.hubPickupEnabled !== true) {
+  if (cart.fulfillmentMode === "pickup" && cart.orderType !== "express" && store.settings.hubPickupEnabled !== true) {
     fail(409, "hub_pickup_disabled", "Hub pickup is currently unavailable. Choose delivery for a new order.");
   }
   const lines = (store.cartLines || []).filter((line) => line.cartId === cart.id)
@@ -1804,6 +1823,7 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
 }
 
 export function isOrderMatchRoute(method, pathname) {
+  if (["/express/drafts", "/express/shops", "/me/express-guide"].includes(pathname)) return true;
   if (["/me/preferences", "/me/addresses", "/me/matches", "/me/matches/next", "/me/carts", "/me/deadline-days", "/me/catalog-quotes", "/me/print-layout-check"].includes(pathname)) return true;
   if (method === "DELETE" && /^\/me\/addresses\/[^/]+$/.test(pathname)) return true;
   if (/^\/me\/carts\/[^/]+(?:\/.*)?$/.test(pathname)) return true;
@@ -1898,17 +1918,33 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     const receiptOrderId = basketForOrder(store, orderId)?.receiptOrderId || orderId;
     const invoice = (store.orderInvoices || []).find((row) => row.orderId === receiptOrderId);
     if (!invoice) fail(404, "invoice_not_found", "This order does not have an invoice.");
-    const snapshot = clientInvoice(invoice.snapshot, { hideSupplierAmounts: Boolean(basketForOrder(store, orderId)
+    const snapshot = clientInvoice(invoice.snapshot, { hideSupplierAmounts: Boolean(order.orderType === "express" || basketForOrder(store, orderId)
       || invoice.snapshot.basketId || invoice.snapshot.groups?.length > 1
       || invoice.snapshot.organizationDiscountRateBps > 0 || invoice.snapshot.serviceFeeSchedule?.version === 2) && !privileged, exposeWorking: privileged });
     // Invoices issued before the snapshot carried the split were all 75/25.
     if (snapshot.paymentPlan && snapshot.paymentPlan.downpaymentPercent == null) {
       snapshot.paymentPlan.downpaymentPercent = orderDownpaymentPercent(order);
     }
-    return { status: 200, body: { invoice: snapshot }, mutated: false };
+    return { status: 200, body: { invoice: order.orderType === "express" && !privileged ? expressClientProjection(snapshot) : snapshot }, mutated: false };
   }
 
   requireClient(user);
+  const expressCartPath = /^\/me\/carts\/([^/]+)(?:\/(.*))?$/.exec(pathname);
+  if (expressCartPath && req.method !== 'GET') {
+    const cart = (store.carts || []).find(row => row.id === decodeURIComponent(expressCartPath[1]) && row.clientId === user.id);
+    if (cart?.orderType === 'express' && !['checkout', 'voucher', 'quote'].includes(expressCartPath[2])) {
+      fail(409, 'express_draft_replace_required', 'Create a new Express draft after changing the print settings.');
+    }
+  }
+  if (pathname === '/express/shops' && req.method === 'GET') {
+    if(!url.searchParams.has('lat')||!url.searchParams.has('lng'))fail(400,'invalid_express_location','Send lat and lng.');
+    return {status:200,body:{shops:expressShopList(store,user,{location:{lat:Number(url.searchParams.get('lat')),lng:Number(url.searchParams.get('lng'))},sort:url.searchParams.get('sort')||'nearest'},now())},mutated:false};
+  }
+  if(pathname==='/me/express-guide' && ['GET','PATCH'].includes(req.method)) {
+    const guide=req.method==='PATCH'?updateExpressGuide(store,user,await readBody(req),now()):expressGuide(store,user,now());
+    return {status:200,body:{guide},mutated:req.method==='PATCH'};
+  }
+  if(pathname==='/express/drafts' && req.method==='POST') return createExpressDraft(store,user,record(await readBody(req)),id,now());
   if (req.method === "POST" && pathname === "/me/catalog-quotes") {
     const body = record(await readBody(req));
     const item = (store.catalogItems || []).find((row) => row.id === body.catalogItemId);
@@ -2340,8 +2376,8 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
   if (specialCartMatch && specialCartMatch[2] === "checkout" && req.method === "POST") {
     const cart = ownCart(store, user, decodeURIComponent(specialCartMatch[1]), { draft: true });
     const result = checkoutBasket(store, user, cart, record(await readBody(req)), id, now(), req);
-    result.invoice = clientInvoice(result.invoice, { hideSupplierAmounts: Boolean(result.basket || result.invoice.organizationDiscountRateBps > 0 || result.invoice.serviceFeeSchedule?.version === 2) });
-    return { status: 201, body: result, mutated: true };
+    result.invoice = clientInvoice(result.invoice, { hideSupplierAmounts: Boolean(cart.orderType === "express" || result.basket || result.invoice.organizationDiscountRateBps > 0 || result.invoice.serviceFeeSchedule?.version === 2) });
+    return { status: 201, body: cart.orderType === "express" ? expressClientProjection(result) : result, mutated: true };
   }
   if (specialCartMatch && specialCartMatch[2] === "fulfillment" && req.method === "PUT") {
     const cart = ownCart(store, user, decodeURIComponent(specialCartMatch[1]), { draft: true });
@@ -2612,4 +2648,44 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
   }
 
   return null;
+}
+
+function expressConfirmation(cart,lines) {
+ return createHash('sha256').update(JSON.stringify({cartId:cart.id,fulfillmentMode:cart.fulfillmentMode,dropoff:cart.defaultDropoff,
+   lines:lines.map(l=>({id:l.id,catalogItemId:l.catalogItemId,optionIds:l.optionIds,dropoff:l.dropoff,supplierId:l.supplierId,fileId:l.artworkFileId,quantity:l.quantity,documentPages:l.documentPages,print:l.expressPrint,layout:l.printLayout,note:l.specialInstructions}))})).digest('hex');
+}
+function createExpressDraft(store,user,body,id,at) {
+ const location=expressPoint(body.location);
+ if(!['pickup','delivery'].includes(body.fulfillmentMode)) fail(400,'invalid_fulfillment_mode','Choose pickup or delivery.');
+ const shop=expressShopList(store,user,{location},at).find(s=>s.supplierId===body.supplierId);
+ if(!shop)fail(409,'express_shop_unavailable','Choose an open Express shop.');
+ if(!Array.isArray(body.files)||!body.files.length||body.files.length>20)fail(400,'invalid_express_files','Send one to twenty files.');
+ const cart={id:id('cart'),clientId:user.id,state:'draft',version:1,orderType:'express',expressLocation:location,
+   serviceLevel:'standard',fulfillmentMode:body.fulfillmentMode,defaultDropoff:body.fulfillmentMode==='delivery'?point(body.dropoff,'dropoff',{required:true,requireLabel:true}):null,createdAt:at,updatedAt:at};
+ const lines=body.files.map((input,index)=>{
+   record(input,'file');
+   const item=store.catalogItems.find(i=>i.id===(input.catalogItemId||shop.catalogItemIds[0]));
+   if(!item||!shop.catalogItemIds.includes(item.id))fail(409,'express_listing_unavailable','Choose an Express document listing.');
+   fileFor(store,user,input.fileId,'artwork','fileId');
+   if(!['bw','colour'].includes(input.colour)||!['a4','short','long'].includes(input.paper)||!['one','two'].includes(input.sides)) fail(400,'invalid_express_print','Choose colour, paper and sides.');
+   if(!Array.isArray(input.acceptedWarnings)||input.acceptedWarnings.length>20||input.acceptedWarnings.some(w=>!['paper_size_mismatch','rgb_colour'].includes(w))) fail(400,'invalid_express_warnings','Send accepted warning codes.');
+   if(input.optionIds != null)fail(400,'express_options_managed','Express selects standard print options from the print settings.');
+   const standard=expressCatalogOptions(store,item,{colour:input.colour,paper:input.paper});
+   const line={id:id('line'),cartId:cart.id,supplierId:shop.supplierId,catalogItemId:item.id,quantity:positiveInteger(input.copies,'copies'),
+     optionIds:standard.optionIds,artworkFileId:input.fileId,printLayout:parseCartPrintLayout(item,input.layout,fail),sortOrder:index,createdAt:at,updatedAt:at,
+     specialInstructions:specialInstructions(input.note),
+     expressPrint:{colour:input.colour,paper:input.paper,paperStock:standard.paperStock,sides:input.sides,rateMinor:expressRates(store.settings)[input.colour==='bw'?'bwMinor':'colourMinor'],acceptedWarnings:[...new Set(input.acceptedWarnings)]},
+     structuredSpec:{size:input.paper,colourMode:input.colour,sides:input.sides}};
+   line.documentPages=documentPagesFor(store,item,line,input.pageRange??null,{required:true});line.measurement={pages:line.documentPages.printed};
+   expressLinePrice(line);assertListingArtwork(store,item,line);
+   return line;
+ });
+ store.carts.push(cart);store.cartLines.push(...lines);
+ lockCartFeeSchedules(store,cart,at);
+ // The upload proves mission step one; no order or reward is manufactured.
+ let tester=(store.foundingTesters||=[]).find(t=>t.clientId===user.id);
+ if(!tester){tester={clientId:user.id};store.foundingTesters.push(tester);}tester.addedAt ||= at;
+ const quote=clientCartQuote(store,cart,lines,at);
+ delete quote.voucherGroups; delete quote.downpaymentPercent;
+ return {status:201,body:{cartId:cart.id,confirmation:expressConfirmation(cart,lines),quote,shop},mutated:true};
 }
