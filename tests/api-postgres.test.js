@@ -736,7 +736,7 @@ test("legacy verification decisions keep approval cases and fixed projections co
     const promotedProjection = await request(instance.api, "/auth/me/supplier", { subject: "clerk_promote" });
     assert.equal(promotedProjection.status, 200, JSON.stringify(promotedProjection.body));
     assert.equal(promotedProjection.body.approvalCase.status, "approved");
-    assert.equal(promotedProjection.body.capabilities.receiveJobOffers, true);
+    assert.equal(promotedProjection.body.capabilities.receiveJobOffers, false, 'approval alone does not supply a missing shop profile/location');
 
     const persisted = await loadStore(database);
     const supplierCase = persisted.approvalCases.find((approvalCase) => approvalCase.id === "case_supplier");
@@ -1346,7 +1346,7 @@ test("role demotion and re-promotion reset the approval case so a returnee re-ea
     assert.equal(repromotedProjection.body.approvalCase.status, "pending");
     assert.equal(repromotedProjection.body.approvalCase.decidedAt, null);
     assert.equal(repromotedProjection.body.capabilities.receiveJobOffers, false);
-    assert.equal(repromotedProjection.body.capabilities.acceptJobs, false);
+    assert.equal(repromotedProjection.body.capabilities.acceptJobs, true, 'a pending supplier can finish existing work');
 
     assert.equal((await request(instance.api, "/users/user_rider/role", {
       method: "PATCH", subject: "clerk_super", body: { role: "client" },
@@ -1424,7 +1424,7 @@ test("direct supplier and rider role switches never transfer approval across kin
     assert.equal(backProjection.body.approvalCase.status, "pending");
     assert.equal(backProjection.body.approvalCase.decidedAt, null);
     assert.equal(backProjection.body.capabilities.receiveJobOffers, false);
-    assert.equal(backProjection.body.capabilities.acceptJobs, false);
+    assert.equal(backProjection.body.capabilities.acceptJobs, true, 'pending supplier work no longer requires identity approval');
 
     const riderSwitch = await request(instance.api, "/users/user_rider/role", {
       method: "PATCH", subject: "clerk_super", body: { role: "supplier" },

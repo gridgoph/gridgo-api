@@ -222,6 +222,7 @@ test('routes off the test operations allowlist answer test_operations_forbidden'
 
 // One path per registered GET route; `{x}` placeholders expand to review and unmarked ids.
 const GET_ROUTES = [
+  '/me/supplier-verification', '/ops/supplier-verification', '/ops/supplier-verification/{shop}',
   '/health', '/auth/me', '/auth/me/client', '/auth/me/supplier', '/auth/me/rider', '/auth/me/ops', '/auth/me/admin', '/staff/me',
   '/me/play-optin?app=client&platform=android&channel=sideload', '/me/tester-program?app=client', '/ops/testers?app=client',
   '/me', '/me/legal/pending', '/legal/documents', '/legal/versions/missing', '/featured-prints', '/season-windows',

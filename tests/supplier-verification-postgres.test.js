@@ -6,6 +6,7 @@ import {fixture,AT,id} from './fixtures/reschedule.js';
 import {resetDatabase} from './fixtures/reset-database.js';
 import {apiForTest} from './fixtures/reschedule-http.js';
 import {prepareVerificationPayout,completeVerificationPayout,recordVerificationRecovery,verificationSummary} from '../src/supplier-verification.js';
+import {supplierMatchBlockersFor} from '../src/supplier-eligibility.js';
 
 async function setup(db) {
   await resetDatabase(db,'TRUNCATE users, platform_settings, taxonomy_categories RESTART IDENTITY CASCADE');
@@ -101,7 +102,7 @@ test('Express plan 4 persists independently of frozen regular plans', {skip:!pro
 });
 
 test('pending shop demand delivery reloads setup eligibility and retains the shared pause gate', {skip:!process.env.DATABASE_URL},async()=>{
-  const {loadDeliveryStore}=await import('../src/postgres-store.js');
+  const {loadDeliveryStore,loadHotReadStore}=await import('../src/postgres-store.js');
   const {deviceAcceptsNotification}=await import('../src/push-outbox.js');
   const db=createDatabase(process.env),at='2026-11-23T19:00:00+08:00';
   try {
@@ -116,7 +117,15 @@ test('pending shop demand delivery reloads setup eligibility and retains the sha
       await saveStore(db,s);});
     const loaded=await loadDeliveryStore(db,{userIds:['supplier'],notificationIds:['pending-demand']}),device={userId:'supplier',appRole:'supplier',platform:'android'};
     assert.equal(deviceAcceptsNotification(loaded,device,loaded.notifications[0],at),true);
+    const catalogue=await loadHotReadStore(db,'clerk_client','/catalog/shops/supplier',{at});
+    assert.deepEqual(supplierMatchBlockersFor(catalogue,{at})('supplier',catalogue.supplierProfiles[0]),[]);
     loaded.supplierProfiles[0].availability.pausedUntil=new Date(Date.parse(at)+3600000).toISOString();
     assert.equal(deviceAcceptsNotification(loaded,device,loaded.notifications[0],at),false);
+    await db.transaction(async()=>{const s=await loadStore(db),o=s.orders[0],ctx={at,actor:s.users.find(u=>u.id==='ops'),id};
+      const prepared=prepareVerificationPayout(s,o,{key:'stage:order:production_started',amountMinor:4000,...ctx});
+      completeVerificationPayout(s,o,prepared,ctx);o.payoutMilestones[0].status='released';o.payoutMilestones[0].releasedAt=at;
+      recordVerificationRecovery(s,o,ctx);await saveStore(db,s);});
+    const recovery=await loadHotReadStore(db,'clerk_client','/catalog/shops/supplier',{at});
+    assert.ok(supplierMatchBlockersFor(recovery,{at})('supplier',recovery.supplierProfiles[0]).includes('verification_recovery'));
   }finally{await db.close();}
 });

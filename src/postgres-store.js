@@ -946,7 +946,8 @@ async function readIdentity(graph, userIds) {
   await graph.read('users', 'WHERE id = ANY($1::text[])', [userIds]);
   await graph.read('user_role_memberships', 'WHERE user_id = ANY($1::text[])', [userIds]);
   await graph.read('approval_cases', 'WHERE user_id = ANY($1::text[])', [userIds]);
-  await graph.read('supplier_verification_ledger', 'WHERE supplier_id = ANY($1::text[])', [userIds]);
+  const pendingSuppliers=graph.loaded.approval_cases.filter(row=>row.kind==='supplier'&&row.status==='pending').map(row=>row.user_id);
+  if(pendingSuppliers.length)await graph.read('supplier_verification_ledger', 'WHERE supplier_id = ANY($1::text[])', [pendingSuppliers]);
 }
 
 async function readNotificationContext(graph, { orderIds = [], caseIds = [], activeRiderIds = [] } = {}) {
@@ -1178,7 +1179,6 @@ async function readCatalogueGraph(graph, actorIds, { supplierIds = null, itemIds
     ...loaded.supplier_shop_media.map(row => row.supplier_id)])];
   const owners = [...new Set([...actorIds, ...suppliers])];
   await read('supplier_profiles', 'WHERE user_id = ANY($1::text[])', [suppliers]);
-  await read('supplier_payout_accounts', 'WHERE supplier_id = ANY($1::text[])', [suppliers]);
   const snapshotServices = loaded.supplier_catalog_items.map(row => row.approved_snapshot?.item?.supplierServiceId).filter(Boolean);
   if (listingOnly) await read('supplier_services', 'WHERE id = ANY($1::text[])',
     [[...new Set([...loaded.supplier_catalog_items.map(row => row.supplier_service_id), ...snapshotServices])]]);
@@ -1193,15 +1193,17 @@ async function readCatalogueGraph(graph, actorIds, { supplierIds = null, itemIds
   await read('supplier_catalog_options', 'WHERE option_group_id = ANY($1::text[])', [loaded.supplier_catalog_option_groups.map(row => row.id)]);
   if (!listingOnly) await read('supplier_shop_media', 'WHERE supplier_id = ANY($1::text[])', [suppliers]);
   const photos = loaded.supplier_catalog_items.flatMap(row => row.approved_snapshot?.catalogItemPhotos || []).map(row => row.fileId);
-  await read('files', 'WHERE file_id = ANY($1::text[])', [[...photos, ...loaded.supplier_catalog_item_photos.map(row => row.file_id),
-    ...loaded.supplier_shop_media.map(row => row.file_id), ...loaded.supplier_payout_accounts.map(row => row.qr_file_id), ...(fileId ? [fileId] : [])]]);
-  await read('file_references', 'WHERE file_id = ANY($1::text[])', [loaded.files.map(row => row.file_id)]);
   if (ratings) {
     await read('shop_reviews', 'WHERE supplier_id = ANY($1::text[])', [suppliers]);
     // Ratings exclude marked orders even if the supplier itself is unmarked.
     await read('orders', 'WHERE id = ANY($1::text[])', [loaded.shop_reviews.map(row => row.order_id)]);
   }
   await readIdentity(graph, [...new Set([...owners, ...loaded.shop_reviews.map(row => row.client_id)])]);
+  const pendingSuppliers=loaded.approval_cases.filter(row=>row.kind==='supplier'&&row.status==='pending'&&suppliers.includes(row.user_id)).map(row=>row.user_id);
+  if(pendingSuppliers.length)await read('supplier_payout_accounts', 'WHERE supplier_id = ANY($1::text[])', [pendingSuppliers]);
+  await read('files', 'WHERE file_id = ANY($1::text[])', [[...photos, ...loaded.supplier_catalog_item_photos.map(row => row.file_id),
+    ...loaded.supplier_shop_media.map(row => row.file_id), ...loaded.supplier_payout_accounts.map(row => row.qr_file_id), ...(fileId ? [fileId] : [])]]);
+  await read('file_references', 'WHERE file_id = ANY($1::text[])', [loaded.files.map(row => row.file_id)]);
   for (const name of ['taxonomy_categories', 'taxonomy_category_aliases', 'taxonomy_subcategories',
     'taxonomy_materials', 'taxonomy_finishes', 'accepted_file_formats']) await read(name, '');
   await read('platform_settings', 'WHERE singleton');
@@ -1648,7 +1650,6 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
   if (staff || selected === 'supplier') await read('order_actions', 'WHERE order_id = ANY($1::text[])', [loaded.orders.map(row => row.id)]);
   const suppliers = [...new Set(loaded.orders.map(row => row.supplier_id).filter(Boolean))];
   await read('supplier_profiles', 'WHERE user_id = ANY($1::text[])', [suppliers]);
-  await read('supplier_payout_accounts', 'WHERE supplier_id = ANY($1::text[])', [suppliers]);
   await read('supplier_payout_accounts', 'WHERE supplier_id = ANY($1::text[])', [suppliers]);
   await read('zones', 'WHERE code = ANY($1::text[])', [loaded.orders.map(row => row.zone_code).filter(Boolean)]);
 
