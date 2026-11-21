@@ -942,7 +942,6 @@ async function readIdentity(graph, userIds) {
   await graph.read('users', 'WHERE id = ANY($1::text[])', [userIds]);
   await graph.read('user_role_memberships', 'WHERE user_id = ANY($1::text[])', [userIds]);
   await graph.read('approval_cases', 'WHERE user_id = ANY($1::text[])', [userIds]);
-  await graph.read('shop_worker_sessions','WHERE user_id=ANY($1::text[])',[userIds]);
 }
 
 async function readNotificationContext(graph, { orderIds = [], caseIds = [], activeRiderIds = [] } = {}) {
@@ -1872,6 +1871,8 @@ export async function loadClientSaveStore(database, clerkSubject, pathname, body
   if (['removed','suspended'].includes(actor.account_status)) return null;
   const clientId = actor.id;
   await readIdentity(graph, [clientId]);
+  // Shared-device authorization is needed for this write graph, not every public/read-only identity graph.
+  await read('shop_worker_sessions','WHERE user_id=$1',[clientId]);
   // Retain established nonclient/multirole policy on the legacy path.
   if (!loaded.user_role_memberships.some(row => row.user_id === clientId && row.role === 'client')) return null;
   if (pathname === '/files' && (actor.role !== 'client' || loaded.user_role_memberships.some(row => row.user_id === clientId && row.role !== 'client'))) return null;

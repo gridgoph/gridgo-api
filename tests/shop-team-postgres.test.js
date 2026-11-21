@@ -619,7 +619,8 @@ test('paged staff administration preserves shop refusals and independent admin/O
 test('HTTP shared device binds PIN to a Clerk session, records actor and never falls back to owner', {skip}, async t => {
   const {db,api}=await setup(t,store=>{
     const order=store.orders[0];order.fileCheck={status:'passed'};order.state='payment_authorized';
-    store.userRoleMemberships.push({userId:'supplier',role:'super_admin',createdAt:AT});
+    store.userRoleMemberships.push({userId:'supplier',role:'super_admin',createdAt:AT},{userId:'supplier',role:'client',createdAt:AT});
+    store.clientProfiles.push({userId:'supplier',clientKind:'personal',updatedAt:AT});
   });
   const create=await api('supplier','POST','/me/shop-team/pin-staff',{name:'Worker',pin:'1234'},supplier);
   assert.equal(create.status,201,bodyOf(create));const pinId=create.body.member.id;
@@ -636,6 +637,7 @@ test('HTTP shared device binds PIN to a Clerk session, records actor and never f
   assert.equal((await api('supplier','GET','/auth/me/supplier',null,worker)).body.shop.role,'staff');
   assert.equal((await api('supplier','GET','/auth/me/admin',null,worker)).body.error,'shop_worker_invalid');
   assert.equal((await api('supplier','GET','/settings',null,{headers:{'X-GRIDGO-Role':'super_admin'}})).body.error,'shop_worker_invalid');
+  assert.equal((await api('supplier','PATCH','/me/preferences',{}, {headers:{'X-GRIDGO-Role':'client'}})).body.error,'shop_worker_invalid');
   const foreign=await api('supplier','GET','/jobs',null,{...worker,claims:{sid:'different-device'}});
   assert.equal(foreign.body.error,'shop_worker_invalid');
   const second=await apiForTest(t);
