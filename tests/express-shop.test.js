@@ -139,3 +139,14 @@ test('unknown Staff payment methods cannot turn into a payment classification',a
   assert.equal(result.paymentClassification,undefined);assert.equal(result.paymentMethod,undefined);
  }
 });
+
+test('file-open observations infer their authorized job from the order file without an internal job ID',async()=>{
+ const {routeShopFileAccess}=await import('../src/shop-file-access.js');
+ const store=fixture(),order=express(store),file={fileId:'art',purpose:'artwork',state:'ready',references:[{type:'order',id:order.id,field:'line:line:artwork'}]};
+ store.files.push(file);store.orderLineItems[0].artworkFileId='art';
+ const result=await routeShopFileAccess({req:{method:'POST'},url:new URL('http://test/orders/order/files/art/access'),store,
+  user:{id:'supplier',actorUserId:'other',role:'supplier',shopRole:'staff'},readBody:async()=>({action:'opened',deviceId:'phone-1'}),
+  now:()=>AT,audit:()=>{},authorizeFileRead:()=>{}});
+ assert.equal(result.status,200);assert.equal(result.body.fileAccesses[0].jobId,'job');
+ assert.equal(result.body.fileAccesses[0].userId,'other');
+});

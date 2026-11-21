@@ -273,7 +273,8 @@ on restores the individual listing preferences and all ordinary eligibility gate
 ## Shop file access and delete reminders
 
 `GET /jobs`, `GET /orders` and `GET /orders/:id` expose `order.fileAccesses` only
-to that shop's active owners and Staff. Each record is:
+to that shop's active owners and Staff. Regular jobs omit the field until there
+is an observation; Express jobs return an empty array when none exists. Each record is:
 
 ```json
 {"jobId":"job_1","userId":"user_1","deviceId":"installation_1",
@@ -285,6 +286,9 @@ After a full file opens or a download succeeds (including an already-signed
 order attachment URL), the app/PC calls
 `POST /orders/:orderId/files/:fileId/access` with
 `{"jobId":"job_1","action":"opened","deviceId":"installation_1"}`.
+`jobId` is optional: the server infers authorized job(s) from the file's line
+assignment when omitted, since the ordinary order read need not expose internal
+job IDs. Supplying it narrows the observation to that authorized job.
 `action` is `opened | downloaded`. `deviceId` is a non-secret, locally persisted
 installation identifier, 1–128 ASCII letters/digits/`_.:-`; never send a push
 token or hardware identifier. The response is `200 {fileAccesses:[...]}`.

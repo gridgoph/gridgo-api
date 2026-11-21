@@ -1609,9 +1609,10 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
   }
   for (const name of ['order_line_items', 'order_payments', 'order_payment_allocations', 'payout_milestones',
     'platform_revenue_adjustments', 'claims', 'order_change_requests', 'order_change_payments', 'order_change_payouts',
-    'delivery_pin_payments', 'refund_supplier_payouts', 'shop_reviews', 'delivery_reminders', 'shop_file_accesses']) {
+    'delivery_pin_payments', 'refund_supplier_payouts', 'shop_reviews', 'delivery_reminders']) {
     await read(name, 'WHERE order_id = ANY($1::text[])', [orderIds]);
   }
+  if (selected === 'supplier') await read('shop_file_accesses', 'WHERE order_id = ANY($1::text[])', [orderIds]);
   if (selected === 'super_admin' && identityHasMembership(actor, 'super_admin')) {
     // The removal guard also sees shared payments and retained financial history.
     // Keep these facts scoped to the projected orders, including legacy credit

@@ -1367,7 +1367,11 @@ export function publicOrderFor(order, user, store = null) {
     .filter(file => publicArtworkPreview(file))
     .map(file => ({ fileId: file.fileId, ...publicArtworkPreview(file) }));
   delete publicRecord.fileAccesses;
-  if (user?.role === 'supplier' && supplierArtworkReleased(order)) publicRecord.fileAccesses = publicShopFileAccesses(store, order, user);
+  if (user?.role === 'supplier' && supplierArtworkReleased(order)) {
+    const accesses = publicShopFileAccesses(store, order, user);
+    // Empty regular-job reads retain their released projection.
+    if (order.orderType === 'express' || accesses.length) publicRecord.fileAccesses = accesses;
+  }
   /*
     Whether this order has been rated, so a client is asked once.
 

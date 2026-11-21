@@ -60,7 +60,8 @@ test('shop file access records survive reads, isolate user/device/job, and refus
  assert.equal((await api('client','POST',path,body)).status,403);
  const open=await api('other','POST',path,body,{headers});
  assert.equal(open.status,200,JSON.stringify(open.body));
- assert.equal((await api('other','POST',path,body,{headers})).status,200);
+ const appBody={action:body.action,deviceId:body.deviceId};
+ assert.equal((await api('other','POST',path,appBody,{headers})).status,200);
  assert.equal((await api('other','POST',path,{...body,action:'downloaded',deviceId:'pc-1'},{headers})).status,200);
  assert.equal((await api('other','POST',path,{...body,jobId:'missing'},{headers})).status,403);
  assert.equal((await api('other','POST',path,{...body,action:'bad'},{headers})).status,400);

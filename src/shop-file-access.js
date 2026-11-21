@@ -46,8 +46,8 @@ export async function routeShopFileAccess({ req,url,store,user,readBody,now,audi
   authorizeFileRead(user,store,file);
   const body=await readBody(req);
   if(!body||typeof body!=='object'||Array.isArray(body)||Object.keys(body).some(key=>!['action','deviceId','jobId'].includes(key))
-    || !['opened','downloaded'].includes(body.action)||typeof body.deviceId!=='string'||typeof body.jobId!=='string')fail(400,'invalid_file_access');
+    || !['opened','downloaded'].includes(body.action)||typeof body.deviceId!=='string'||(body.jobId!==undefined&&typeof body.jobId!=='string'))fail(400,'invalid_file_access');
   recordShopFileAccess(store,user,order,file,{...body,at:now()});
-  audit(store,{actor:user,action:'order.file_access',entityType:'file',entityId:file.fileId,orderId:order.id,detail:{jobId:body.jobId,action:body.action}});
+  audit(store,{actor:user,action:'order.file_access',entityType:'file',entityId:file.fileId,orderId:order.id,detail:{...(body.jobId?{jobId:body.jobId}:{}),action:body.action}});
   return {status:200,mutated:true,body:{fileAccesses:publicShopFileAccesses(store,order,user)}};
 }
