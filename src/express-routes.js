@@ -55,7 +55,7 @@ export async function routeExpressOrders({req,url,store,user,readBody,id,now,aud
  const profile=store.supplierProfiles.find(p=>p.userId===user.id);
  // A shop may finish an already accepted order while temporarily closed, but
  // approval and account standing remain mandatory.
- if(supplierMatchBlockersFor(store)(user.id,{...profile,isClosed:false}).length)fail(403,'supplier_not_approved');
+ if(supplierMatchBlockersFor(store)(user.id,{...profile,isClosed:false,availability:{...profile?.availability,pausedUntil:null}}).length)fail(403,'supplier_not_approved');
  const at=now(),body=await readBody(req),action=match[2];
  if(!body||typeof body!=='object'||Array.isArray(body))fail(400,'invalid_request');
  assertRefundWorkAllowed(store,order);

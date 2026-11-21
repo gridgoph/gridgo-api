@@ -1,3 +1,5 @@
+import { supplierMatchBlockersFor } from './supplier-eligibility.js';
+import { expressAvailability } from './shop-availability.js';
 import { playBelowTargetSql } from './play-optin.js';
 import { knownPlayInstallSql } from './play-install.js';
 import { listWebSubscriptions } from "./web-push.js";
@@ -15,6 +17,16 @@ export function outboxVerdict(row, results, at) {
   return row.attempts >= 8 ? "failed" : "pending";
 }
 export function deviceAcceptsNotification(store, device, notification, at) {
+  if (notification.type === 'printer_demand') {
+    const instant = at || new Date().toISOString(), shopId = notification.shopId || notification.userId;
+    const profile = store.supplierProfiles?.find(p => p.userId === shopId);
+    const current = profile && expressAvailability(profile, store.settings, instant);
+    const members = (store.shopMemberships || []).filter(m => m.shopId === shopId);
+    if (!profile?.availability?.printerDemandPings || !current?.nightWindow
+      || supplierMatchBlockersFor(store, instant)(shopId, profile).length
+      || current.nightWindow.night !== notification.night || Date.parse(notification.expiresAt) <= Date.parse(instant)
+      || (members.length && !members.some(m => m.userId === notification.userId && m.role === 'owner' && m.status === 'active'))) return false;
+  }
   if (notification.type === 'shop_express_offer') {
     const order = store.orders?.find(order => order.id === notification.orderId);
     if (!order || order.state !== 'supplier_assigned' || order.shopAcceptance?.status !== 'pending'
@@ -140,12 +152,13 @@ export function createOutboxWorker({
         : store.deviceTokens.find((d) => d.id === row.device_id);
       let results = [];
       let status = "suppressed";
+      const deliveryAt = new Date(clock()).toISOString();
       if (
         n &&
         d &&
         d.userId === row.user_id &&
         n.push !== false &&
-        deviceAcceptsNotification(store, d, n, new Date(clock()).toISOString())
+        deviceAcceptsNotification(store, d, n, deliveryAt)
       ) {
         // Recheck opt-in/dismissal/campaign changes after the broadcast and
         // before retries. No stale campaign push after a Play build is seen.
@@ -162,7 +175,15 @@ export function createOutboxWorker({
           }
         }
         try {
-          results = await (isWeb ? webDelivery : delivery).send(pushMessageFor(n, process.env, { at: new Date(clock()).toISOString() }), [d]);
+          let notification = n;
+          if (n.type === 'printer_demand') {
+            const profile = store.supplierProfiles.find(p => p.userId === (n.shopId || n.userId));
+            const { nightWindow } = expressAvailability(profile, store.settings, deliveryAt);
+            // A retry must honor shortened hours without extending the issued
+            // deadline when hours are later expanded. Keep the inbox immutable.
+            notification = { ...n, expiresAt: new Date(Math.min(Date.parse(n.expiresAt), Date.parse(nightWindow.endsAt))).toISOString() };
+          }
+          results = await (isWeb ? webDelivery : delivery).send(pushMessageFor(notification, process.env, { at: deliveryAt }), [d]);
         } catch {
           results = [{ deviceId: d.id, ok: false, prune: false, code: "transport_error" }];
         }

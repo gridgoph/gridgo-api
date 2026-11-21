@@ -1,5 +1,7 @@
+import { shopPaused } from './shop-availability.js';
+import { pingPrinterDemand } from './printer-demand.js';
 import { isDeepStrictEqual } from 'node:util';
-import { expressRates, expressLinePrice, expressPoint, expressShopList, expressGuide, updateExpressGuide, createExpressSnapshot, publicExpress, expressClientProjection, expressCatalogOptions } from './express-orders.js';
+import { expressRates, expressLinePrice, expressPoint, expressShopList, assertExpressNightJob, expressGuide, updateExpressGuide, createExpressSnapshot, publicExpress, expressClientProjection, expressCatalogOptions } from './express-orders.js';
 import { isReviewData, markReviewPayment, reviewCatalogView, REVIEW_CATALOG_TABLES } from './review-data.js';
 import { approvalPolicy, recordApprovalProof } from './approval-proof.js';
 import { publicColourQuote, publicColourListing } from './colour-projection.js';
@@ -652,7 +654,7 @@ function cartShops(store, lines) {
 
 function cartLinePromiseBy(store, cart, line, item, at) {
   const profile = (store.supplierProfiles || []).find((row) => row.userId === line.supplierId);
-  if (!item || item.supplierId !== line.supplierId || !profile?.shop || profile.isClosed
+  if (!item || item.supplierId !== line.supplierId || !profile?.shop || profile.isClosed || shopPaused(profile, at)
       || catalogItemBlockers(store, item, { publicOnly: true }).length) return null;
   try {
     const group = (store.cartLines || []).filter(row => row.cartId === cart.id && sameDelivery(row, line));
@@ -794,7 +796,7 @@ export function clientCartQuote(store, cart, lines, at) {
   const subtotals = lines.map((line) => {
     const item = (store.catalogItems || []).find((row) => row.id === line.catalogItemId);
     const profile = (store.supplierProfiles || []).find((row) => row.userId === line.supplierId);
-    const unavailable = !item || item.supplierId !== line.supplierId || !profile?.shop || profile.isClosed
+    const unavailable = !item || item.supplierId !== line.supplierId || !profile?.shop || profile.isClosed || shopPaused(profile, at)
       || catalogItemBlockers(store, item, { publicOnly: true }).length;
     const amount = unavailable ? null : cartLineSubtotal(store, line);
     if (amount == null) reasons.push({ lineId: line.id, code: unavailable ? "catalog_item_stale" : "line_unpriced" });
@@ -1288,7 +1290,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   const snapshots = [];
   for (const [supplierId, entries] of [...grouped.entries()].sort(([left], [right]) => left.localeCompare(right))) {
     const profile = (store.supplierProfiles || []).find((row) => row.userId === supplierId);
-    if (!profile?.shop || profile.isClosed) fail(409, "shop_unavailable", "A shop in this cart is no longer available.", basketId ? { groupLabel } : { supplierId });
+    if (!profile?.shop || profile.isClosed || shopPaused(profile, at)) fail(409, "shop_unavailable", "A shop in this cart is no longer available.", basketId ? { groupLabel } : { supplierId });
     const delivery = cartDelivery(store, cart, supplierId, entries.map(({ line }) => line));
     if (delivery.error) fail(409, delivery.error, "Set a delivery drop-off for every cart line.");
     const { dropoff: jobDropoff, distance, feeMinor: deliveryFeeMinor } = delivery;
@@ -1384,6 +1386,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   order.express = projection.express === true;
   order.scheduling = structuredClone(projection.scheduling);
   order.reviewSchedule = structuredClone(projection.review);
+  if (order.expressOrder && projection.nightWindow) order.expressOrder.nightWindow = structuredClone(projection.nightWindow);
   if (projection.scheduling.tightDeadline) {
     for (const row of snapshots) {
       const item = store.catalogItems.find(item => item.id === row.cartLine.catalogItemId);
@@ -1690,8 +1693,9 @@ function linkSampleFirstOrder(store, user, order, cartLines, { at, createId }) {
 function checkoutBasket(store, user, cart, body, createId, at, req) {
   if (cart.orderType === 'express') {
     const lines=store.cartLines.filter(l=>l.cartId===cart.id);
-    const shop=expressShopList(store,user,{location:cart.expressLocation},at).find(s=>s.supplierId===lines[0]?.supplierId);
+    const shop=expressShopList(store,user,{location:cart.expressLocation,fulfillmentMode:cart.fulfillmentMode},at).find(s=>s.supplierId===lines[0]?.supplierId);
     if(!shop || lines.some(line=>!line.expressPrint || !shop.catalogItemIds.includes(line.catalogItemId) || line.supplierId!==shop.supplierId)) fail(409,'express_shop_unavailable','Choose an open Express shop.');
+    assertExpressNightJob(store,shop.supplierId,lines,cart.fulfillmentMode,at);
     for(const line of lines) {
       const item=store.catalogItems.find(row=>row.id===line.catalogItemId);
       if(!isDeepStrictEqual(documentPagesFor(store,item,line,undefined,{required:true}),line.documentPages)) fail(409,'express_preview_required','The detected pages changed. Review a new draft.');
@@ -1824,7 +1828,7 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
 }
 
 export function isOrderMatchRoute(method, pathname) {
-  if (["/express/drafts", "/express/shops", "/me/express-guide"].includes(pathname)) return true;
+  if (["/express/drafts", "/express/shops", "/express/demand", "/me/express-guide"].includes(pathname)) return true;
   if (["/me/preferences", "/me/addresses", "/me/matches", "/me/matches/next", "/me/carts", "/me/deadline-days", "/me/catalog-quotes", "/me/print-layout-check"].includes(pathname)) return true;
   if (method === "DELETE" && /^\/me\/addresses\/[^/]+$/.test(pathname)) return true;
   if (/^\/me\/carts\/[^/]+(?:\/.*)?$/.test(pathname)) return true;
@@ -1937,9 +1941,13 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
       fail(409, 'express_draft_replace_required', 'Create a new Express draft after changing the print settings.');
     }
   }
+  if (pathname === '/express/demand' && req.method === 'POST') {
+    const mutated = pingPrinterDemand(store, user, record(await readBody(req)), { at: now(), id });
+    return {status:200,body:{ok:true},mutated};
+  }
   if (pathname === '/express/shops' && req.method === 'GET') {
     if(!url.searchParams.has('lat')||!url.searchParams.has('lng'))fail(400,'invalid_express_location','Send lat and lng.');
-    return {status:200,body:{shops:expressShopList(store,user,{location:{lat:Number(url.searchParams.get('lat')),lng:Number(url.searchParams.get('lng'))},sort:url.searchParams.get('sort')||'nearest'},now())},mutated:false};
+    return {status:200,body:{shops:expressShopList(store,user,{location:{lat:Number(url.searchParams.get('lat')),lng:Number(url.searchParams.get('lng'))},sort:url.searchParams.get('sort')||'nearest',fulfillmentMode:url.searchParams.get('fulfillmentMode')||'pickup'},now())},mutated:false};
   }
   if(pathname==='/me/express-guide' && ['GET','PATCH'].includes(req.method)) {
     const guide=req.method==='PATCH'?updateExpressGuide(store,user,await readBody(req),now()):expressGuide(store,user,now());
@@ -2437,7 +2445,7 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     if (selection && (item.supplierId !== selection.supplierId || item.subcategoryCode !== selection.subcategoryCode)) {
       fail(409, "catalog_item_stale", "That listing changed since matching; match again.");
     }
-    if (selection && (store.supplierProfiles || []).find((row) => row.userId === item.supplierId)?.isClosed) {
+    if (selection && ((store.supplierProfiles || []).find((row) => row.userId === item.supplierId)?.isClosed || shopPaused((store.supplierProfiles || []).find(row => row.userId === item.supplierId), at))) {
       fail(409, "catalog_item_stale", "That shop is no longer accepting work; match again.");
     }
     const explicitDeadline = Object.hasOwn(body, "deadline") ? parseDeadline(body.deadline) : null;
@@ -2662,7 +2670,7 @@ function expressConfirmation(cart,lines) {
 function createExpressDraft(store,user,body,id,at) {
  const location=expressPoint(body.location);
  if(!['pickup','delivery'].includes(body.fulfillmentMode)) fail(400,'invalid_fulfillment_mode','Choose pickup or delivery.');
- const shop=expressShopList(store,user,{location},at).find(s=>s.supplierId===body.supplierId);
+ const shop=expressShopList(store,user,{location,fulfillmentMode:body.fulfillmentMode},at).find(s=>s.supplierId===body.supplierId);
  if(!shop)fail(409,'express_shop_unavailable','Choose an open Express shop.');
  if(!Array.isArray(body.files)||!body.files.length||body.files.length>20)fail(400,'invalid_express_files','Send one to twenty files.');
  const cart={id:id('cart'),clientId:user.id,state:'draft',version:1,orderType:'express',expressLocation:location,
@@ -2685,6 +2693,7 @@ function createExpressDraft(store,user,body,id,at) {
    expressLinePrice(line);assertListingArtwork(store,item,line);
    return line;
  });
+ assertExpressNightJob(store,shop.supplierId,lines,cart.fulfillmentMode,at);
  store.carts.push(cart);store.cartLines.push(...lines);
  lockCartFeeSchedules(store,cart,at);
  // The upload proves mission step one; no order or reward is manufactured.
