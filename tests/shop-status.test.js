@@ -117,3 +117,16 @@ test('listing hide/show preserves prices and removing a referenced listing archi
   const snapshot=structuredClone(store.orderLineItems);
   await call('DELETE',{expectedVersion:3});assert.equal(item.active,false);assert.equal(item.basePriceMinor,price);assert.deepEqual(store.orderLineItems,snapshot);
 });
+test('night dispatch ends at the selected deadline even without weekday overrides and resumes in normal hours',()=>{
+  const {store,profile}=setup();
+  profile.availability.nightJobs='until_21';
+  store.settings.operatingHours.schedule.week=[0,1,2,3,4,5,6].map(weekday=>({weekday,opensMinute:0,closesMinute:1440}));
+  const order={orderType:'express',fulfillmentMode:'delivery',state:'ready_for_dispatch',
+    expressOrder:{nightWindow:nightWindow(profile,at('19:00'))},shopClock:{schedule:{utcOffsetMinutes:480,week:[1,2,3,4,5,6].map(weekday=>({weekday,opensMinute:480,closesMinute:1080})),closures:[]}},operatingClock:{version:1}};
+  assert.equal(availableDispatch(order,store,at('20:59')),true);
+  assert.equal(availableDispatch(order,store,at('21:00')),false);
+  assert.equal(availableDispatch(order,store,'2026-11-24T08:00:00+08:00'),true);
+  profile.availability.nightJobs='all_night';
+  order.expressOrder.nightWindow=nightWindow(profile,at('19:00'));
+  assert.equal(availableDispatch(order,store,'2026-11-24T02:00:00+08:00'),true);
+});

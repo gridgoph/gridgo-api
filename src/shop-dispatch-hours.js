@@ -1,4 +1,4 @@
-import { AvailabilityError, addOpeningMilliseconds, isOpenAt } from './availability.js';
+import { AvailabilityError, addOpeningMilliseconds, isOpenAt, defaultShopSchedule } from './availability.js';
 import { dispatchReadyAt } from './operating-hours.js';
 
 // Only new order clocks containing overrides opt in. Historical dispatch and
@@ -6,7 +6,8 @@ import { dispatchReadyAt } from './operating-hours.js';
 export const hasWeekdayOverrides = schedule => Boolean(schedule?.weekdayOverrides?.length);
 export const shopDispatchOpen = (order, at) => {
   const night = order?.orderType === 'express' && order.expressOrder?.nightWindow;
-  if (night && Date.parse(at) >= Date.parse(night.startsAt) && Date.parse(at) < Date.parse(night.endsAt)) return true;
+  if (night) return (Date.parse(at) >= Date.parse(night.startsAt) && Date.parse(at) < Date.parse(night.endsAt))
+    || isOpenAt(order.shopClock?.schedule || defaultShopSchedule(), at);
   return !hasWeekdayOverrides(order?.shopClock?.schedule) || isOpenAt(order.shopClock.schedule, at);
 };
 
