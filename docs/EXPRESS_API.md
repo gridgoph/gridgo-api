@@ -1,7 +1,8 @@
 # Express API
 
 Express is an order type on the existing checkout, payment, refund, production,
-QA and payout model. It is not the legacy scheduling override represented by a
+artwork review and payout model. Express document production skips finished photos
+and product QA; regular orders retain their evidence gates. It is not the legacy scheduling override represented by a
 listing's `express` flag. Existing orders and custom checkout remain unchanged.
 
 The 19 November decision applies: the client pays GRIDGO using the existing QR,
@@ -57,7 +58,8 @@ Sort is `nearest | top_rated | fewest_jobs`. Response:
 
 Only active, approved suppliers open now under their shop calendar qualify.
 They must have a public, approved `document_printing`, `per_page` listing with
-`express: true`. Existing supplier listing editing controls this opt-in; staff
+`express: true`, and the shop-wide `expressEnabled` must not be false.
+The listing switch remains its individual opt-in; staff
 visibility/approval holds still apply. Shop setup must offer the print layouts
 and option selections it accepts. Busy means at least three assigned/accepted/
 printing jobs. New means less than seven elapsed days since supplier approval
@@ -171,8 +173,17 @@ Only the assigned, approved supplier may call:
   together; original print/money snapshots remain. A delivery replacement must
   fall in the same delivery-fee band. The replacement gets a fresh five minutes.
   The old shop loses order/file access through the normal assigned-job scoping.
-- Continue with the existing production, finished-product evidence, GRIDGO QA,
-  and ready transitions. No Express route bypasses those gates.
+- **It's ready:** `POST /orders/:id/transition` with
+  `{"state":"ready_for_dispatch"}` works directly from accepted
+  (`payment_authorized`), `production`, or `supplier_self_qc` for document Express.
+  The released supplier app's `production` then `ready_for_dispatch` chain also
+  works. No production/finished/packing photo, product review or receipt-scan gate
+  is required for this shop readiness action. Pickup waits for the client's code;
+  delivery becomes ready for rider assignment. Ordinary orders, including the
+  legacy listing `express` scheduling flag, retain all their existing gates.
+  Ownership, supplier approval, checkout approval, payment, independent work
+  holds and claim holds still apply. Payout amounts/releases do not change.
+  Operations forced corrections still require the existing reason code and note.
 
 At three refusals (timeouts count), or when no eligible same-price replacement
 remains, the order/jobs become cancelled. No reassignment is allowed after a shop
@@ -206,7 +217,100 @@ Success uses the existing handover completion function: records `pickedUpAt`,
 opens the usual issue window, marks the job delivered, and leaves supplier
 milestone amounts and Operations payout-release gates intact. Repeated success
 is idempotent. Legacy transition routes cannot bypass the counter code.
-Delivery Express orders use today's rider and delivery-proof flow.
+Delivery Express orders use today's rider and delivery-proof flow. A shop-side
+“Give to the rider” completion route is **not shipped**: today's version-2 flow
+requires the assigned rider's six checks and exact per-line counts, an
+inspection-bound rider packing photo, and the shop signature attached by that
+rider through `/dispatch/:id/pickup-confirm`. A shop-only tap cannot supply or
+confirm those rider-owned facts. Express skips the shop production evidence
+only; replacing rider evidence/authority needs a separate handover contract.
+
+## Supplier offer push
+
+Released Express assignments and replacements create `shop_express_offer`
+inbox rows instead of `shop_job_assigned`. The owner copy shows shop principal
+(earnings), printed pages including copies, client pickup/rider delivery and
+minutes left in its title/body. Staff copies omit earnings. Removed/demoted
+members never receive an earnings-bearing copy; accepted, expired or moved
+offers are suppressed again before delivery. Retry copy uses the remaining
+server time, and the message expires at the acceptance deadline.
+
+The supplier app already registers category `gridgo_express_offer`, channel
+`gridgo_express`, and actions `express_accept` (Accept) / `express_see` (See job).
+Accept calls the existing ownership-checked `POST /orders/:id/express/accept`;
+no token, credential, or unauthenticated accept URL is sent. Notes still require
+`specialInstructionsRead:true`, so the app opens the accept screen when needed.
+
+Android Express uses a high-priority data-only FCM presentation envelope:
+fixed `categoryId`, `channelId`, sound and vibration, plus title/message and a
+JSON `body` containing only the existing application routing fields
+`notificationId`, `type`, `orderId`, `at`. This lets Expo display its category
+buttons when backgrounded instead of Android displaying an actionless system
+notification. iOS uses `aps.category`; its ordinary application data remains
+unchanged. There are no file URLs, pickup codes, client identity or payout
+stages in either payload. Channel audibility/lock-screen permission remains a
+handset setting. An installed-device FCM walkthrough is still a release check.
+
+## Shop-wide Express availability
+
+Owners, including delegated owners/managers of the selected shop, use:
+
+- `GET /me/express-settings` → `{expressEnabled:true, version:1}`.
+- `PATCH /me/express-settings` with
+  `{"expressEnabled":false,"expectedVersion":1}` → the new flag/version.
+
+Use the normal `X-GRIDGO-Role: supplier` and selected `X-GRIDGO-Shop-Id` headers.
+The shop-team model has `owner | staff`; a manager must have active `owner`
+access. Ordinary Staff cannot read or write this switch. Invalid bodies return
+`400 invalid_express_settings`; stale shared profile versions return
+`409 shop_profile_stale`. A write audits the actual person and notifies
+Operations/Super Admin. The additive `supplier_profiles.express_enabled` defaults
+to true, preserving existing listing opt-ins. Off excludes the shop from new
+Express drafts, checkout revalidation and automatic replacements without
+rewriting any listing's `express` flag or changing an accepted order. Turning
+on restores the individual listing preferences and all ordinary eligibility gates.
+
+## Shop file access and delete reminders
+
+`GET /jobs`, `GET /orders` and `GET /orders/:id` expose `order.fileAccesses` only
+to that shop's active owners and Staff. Each record is:
+
+```json
+{"jobId":"job_1","userId":"user_1","deviceId":"installation_1",
+ "fileId":"file_1","action":"downloaded","firstAt":"2026-11-21T09:00:00.000Z",
+ "lastAt":"2026-11-21T09:01:00.000Z","count":2}
+```
+
+After a full file opens or a download succeeds (including an already-signed
+order attachment URL), the app/PC calls
+`POST /orders/:orderId/files/:fileId/access` with
+`{"jobId":"job_1","action":"opened","deviceId":"installation_1"}`.
+`action` is `opened | downloaded`. `deviceId` is a non-secret, locally persisted
+installation identifier, 1–128 ASCII letters/digits/`_.:-`; never send a push
+token or hardware identifier. The response is `200 {fileAccesses:[...]}`.
+Repeated observations aggregate first/last time and count for each
+job/shop/person/device/file/action; timestamps and person come from the server.
+
+The route rechecks current membership, assigned job, artwork release and
+job/line file authorization. Wrong scope returns `403`; missing order/file
+`404`; invalid observation `400 invalid_file_access`. Logs remain scoped to the
+shop that recorded them after reassignment. Clients and riders never see them.
+
+Existing `GET /files/:id/download-url` additionally records
+`action:download_authorized` for every authorized shop job. Send
+`X-GRIDGO-Device-Id` to attribute that request to an installation; older apps
+record `unspecified`. A signed URL issuance is not proof the bytes downloaded.
+Use confirmed `opened`/`downloaded` rows for a precise delete-files reminder;
+legacy apps can conservatively remind on `download_authorized`. Thumbnails and
+background order-attachment signing do not record an open. No file bytes, URLs
+or credentials are stored in the log, and logs do not delete files remotely.
+
+Staff work reads also include `orderType`, scoped `expressOrder`, and the
+allowlisted `paymentMethod` (`qr_manual | cash | gridgo_voucher`) for the app's
+payment label, without payment amounts, references, proof or earnings.
+
+Migration `1795270000000_express_shop_work` adds the shop availability flag and
+indexed `shop_file_accesses` metadata table. Run it before API deployment.
 
 ## Guide and missions
 

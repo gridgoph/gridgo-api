@@ -373,9 +373,9 @@ export function notificationVisible(store, notification, userId, role, { shopId 
   // A former Owner keeps the business user ID; role demotion must also hide
   // their historical money notifications. Selected Staff context never mixes
   // in notices for another shop the same person happens to own.
-  const staffContext = (store.shopMemberships || []).find(m => m.userId === userId && m.shopId === (shopId || userId) && m.role === 'staff');
+  const staffContext = (store.shopMemberships || []).find(m => m.userId === userId && m.shopId === (shopId || notification.shopId || userId) && m.role === 'staff');
   if (staffContext && (!requiredRole || requiredRole === 'supplier') && (!role || role === 'supplier')) {
-    if (staffContext.status !== 'active' || notification.type !== 'shop_job_assigned'
+    if (staffContext.status !== 'active' || notification.expressOffer?.earningsMinor != null || !['shop_job_assigned', 'shop_express_offer'].includes(notification.type)
       || (notification.shopId || orderFromNotification(store, notification)?.supplierId) !== staffContext.shopId) return false;
   }
 

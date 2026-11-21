@@ -1,3 +1,4 @@
+import { isExpressDocumentOrder, expressOfferFields, expressOfferCopy } from './express-offers.js';
 import { sameReviewData } from './review-data.js';
 import { riderPackingFlow } from './shop-handover.js';
 import { supplierArtworkReleased } from "./artwork-gates.js";
@@ -333,7 +334,9 @@ export function writeDraft(store, draft, { id, at }) {
 export function shopNotificationDraft(order) {
   if (!supplierArtworkReleased(order)) return null;
   if (!order?.supplierId || !order.id || !order.state) return null;
-  const copy = SHOP_COPY[order.state];
+  const offer = isExpressDocumentOrder(order) && order.state === 'supplier_assigned' && order.shopAcceptance?.status === 'pending';
+  const expressOffer = offer ? expressOfferFields(order) : null;
+  const copy = offer ? { type: 'shop_express_offer', ...expressOfferCopy(expressOffer, order.updatedAt) } : SHOP_COPY[order.state];
   if (!copy) return null;
   return {
     userId: order.supplierId,
@@ -343,6 +346,7 @@ export function shopNotificationDraft(order) {
     orderId: order.id,
     title: copy.title,
     body: copy.body,
+    ...(expressOffer ? { expressOffer } : {}),
     read: false,
   };
 }

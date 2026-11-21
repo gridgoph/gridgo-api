@@ -15,7 +15,14 @@ export function outboxVerdict(row, results, at) {
   return row.attempts >= 8 ? "failed" : "pending";
 }
 export function deviceAcceptsNotification(store, device, notification, at) {
-  if (notification.type === 'play_optin' && (device.platform !== 'android'
+  if (notification.type === 'shop_express_offer') {
+    const order = store.orders?.find(order => order.id === notification.orderId);
+    if (!order || order.state !== 'supplier_assigned' || order.shopAcceptance?.status !== 'pending'
+      || order.supplierId !== (notification.shopId || notification.userId)
+      || order.shopAcceptance.deadlineAt !== notification.expressOffer?.acceptBy
+      || Date.parse(order.shopAcceptance.deadlineAt) <= Date.parse(at || new Date().toISOString())) return false;
+  }
+  if (notification.type === 'play_optin'  && (device.platform !== 'android'
     || device.appRole !== notification.appRole || installChannelOf(device) === 'play')) return false;
   if (notification.type === "order_call_incoming" &&
       Date.parse(notification.callExpiresAt) <= Date.parse(at || new Date().toISOString())) return false;
@@ -155,7 +162,7 @@ export function createOutboxWorker({
           }
         }
         try {
-          results = await (isWeb ? webDelivery : delivery).send(pushMessageFor(n), [d]);
+          results = await (isWeb ? webDelivery : delivery).send(pushMessageFor(n, process.env, { at: new Date(clock()).toISOString() }), [d]);
         } catch {
           results = [{ deviceId: d.id, ok: false, prune: false, code: "transport_error" }];
         }

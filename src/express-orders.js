@@ -37,7 +37,7 @@ export function expressShopList(source,user,{location,sort='nearest'}={},at) {
   const rows=[];
   for(const profile of store.supplierProfiles||[]) {
     const supplierId=profile.userId, supplier=store.users.find(u=>u.id===supplierId);
-    if(!supplier || !sameReviewData(user,supplier) || blockers(supplierId,profile).length || !isOpenAt(profile.schedule||defaultShopSchedule(),at)) continue;
+    if(profile.expressEnabled === false || !supplier || !sameReviewData(user,supplier) || blockers(supplierId,profile).length || !isOpenAt(profile.schedule||defaultShopSchedule(),at)) continue;
     const listings=(store.catalogItems||[]).filter(item=>item.supplierId===supplierId && item.express===true
       && item.pricingUnit==='per_page' && item.subcategoryCode==='document_printing' && publicCatalogItem(store,item));
     if(!listings.length) continue;

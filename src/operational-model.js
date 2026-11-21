@@ -1,3 +1,4 @@
+import { publicShopFileAccesses } from './shop-file-access.js';
 import { expressRates, validateExpressRates, publicExpress, expressClientProjection } from './express-orders.js';
 import { validateCashSettings, cashAmounts } from './cash-policy.js';
 import { staffOrderProjection } from './shop-staff-order.js';
@@ -1365,6 +1366,8 @@ export function publicOrderFor(order, user, store = null) {
     .map(fileId => (store?.files || []).find(file => file.fileId === fileId))
     .filter(file => publicArtworkPreview(file))
     .map(file => ({ fileId: file.fileId, ...publicArtworkPreview(file) }));
+  delete publicRecord.fileAccesses;
+  if (user?.role === 'supplier' && supplierArtworkReleased(order)) publicRecord.fileAccesses = publicShopFileAccesses(store, order, user);
   /*
     Whether this order has been rated, so a client is asked once.
 

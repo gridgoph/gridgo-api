@@ -1,3 +1,4 @@
+import { expressOfferCopy } from './express-offers.js';
 /**
  * Firebase Cloud Messaging (HTTP v1) push delivery.
  *
@@ -43,6 +44,7 @@ export const PRODUCTION_NUDGE_SOUND = "notification_alert.mp3";
 const PRODUCTION_NUDGE_TYPES = new Set(["shop_production_inactive", "ops_production_inactive"]);
 
 export function pushPresentation(notification) {
+  if (notification?.type === "shop_express_offer") return { androidChannelId: "gridgo_express", sound: "default" };
   if (PRODUCTION_NUDGE_TYPES.has(notification?.type)) {
     return { androidChannelId: PRODUCTION_NUDGE_CHANNEL_ID, sound: PRODUCTION_NUDGE_SOUND };
   }
@@ -502,7 +504,7 @@ export function resolveFcmImageUrl(imageUrl, env = process.env) {
  * `data` is built from PUSH_DATA_FIELDS only — enough for the app to open the
  * right screen, and nothing else regardless of what the record carries.
  */
-export function pushMessageFor(notification, env = process.env) {
+export function pushMessageFor(notification, env = process.env, { at = notification.at } = {}) {
   const data = {
     notificationId: String(notification.id),
     type: trimmedString(notification.type),
@@ -518,6 +520,14 @@ export function pushMessageFor(notification, env = process.env) {
   const presentation = pushPresentation(notification);
   const publicMessage = ["announcement", "season_window"].includes(notification.type);
   const reviewPrefix = notification.reviewData === true ? "[Review data] " : "";
+  if (notification.type === "shop_express_offer" && notification.expressOffer) {
+    const copy = expressOfferCopy(notification.expressOffer, at);
+    return {
+      ...copy, title: reviewPrefix + copy.title, data, ...presentation,
+      ttlSeconds: Math.max(0, Math.floor((Date.parse(notification.expressOffer.acceptBy) - Date.parse(at)) / 1000)),
+      category: "gridgo_express_offer",
+    };
+  }
   // Fixed offer copy carries no customer, address, or money fields.
   if (notification.type === "dispatch_available") return {
     title: `${reviewPrefix}New delivery job`,
@@ -597,15 +607,32 @@ export function assertStrangerSafeMessage(message) {
  * without delivering anything (`validate_only` on `messages:send`). The
  * stale-token sweep uses it; nothing reaches the handset.
  */
-export function fcmRequestBody(message, token, { validateOnly = false } = {}) {
+export function fcmRequestBody(message, token, { validateOnly = false, platform = null } = {}) {
+  // Expo must present Android Express itself to attach its registered actions.
+  // The application body remains the ordinary routing allowlist.
+  if (platform === 'android' && message.category === 'gridgo_express_offer' && message.data?.type === 'shop_express_offer') {
+    return {
+      ...(validateOnly ? { validate_only: true } : {}),
+      message: { token, data: {
+        title: message.title, message: message.body, body: JSON.stringify(message.data),
+        categoryId: 'gridgo_express_offer', channelId: 'gridgo_express', sound: 'default', vibrate: '[0,500,200,500]',
+      }, android: { priority: 'high', ...(Number.isFinite(message.ttlSeconds) ? { ttl: `${message.ttlSeconds}s` } : {}) } },
+    };
+  }
   const notification = { title: message.title, body: message.body };
   const androidNotification = {
     channel_id: message.androidChannelId || ANDROID_NOTIFICATION_CHANNEL_ID,
     sound: message.sound || "default",
   };
   const aps = { sound: message.sound || "default" };
+  if (message.category === "gridgo_express_offer") {
+    aps.category = message.category;
+    androidNotification.click_action = message.category;
+    androidNotification.visibility = "PUBLIC";
+    androidNotification.default_vibrate_timings = true;
+  }
   const apns = {
-    headers: { "apns-priority": "10", ...(message.transient ? { "apns-expiration": "0" } : {}) },
+    headers: { "apns-priority": "10", ...(message.transient ? { "apns-expiration": "0" } : Number.isFinite(message.ttlSeconds) ? { "apns-expiration": String(Math.floor(Date.now() / 1000) + message.ttlSeconds) } : {}) },
     payload: { aps },
   };
   if (message.image) {
@@ -622,7 +649,7 @@ export function fcmRequestBody(message, token, { validateOnly = false } = {}) {
       data: message.data,
       android: {
         priority: "high",
-        ...(message.transient ? { ttl: "0s" } : {}),
+        ...(message.transient ? { ttl: "0s" } : Number.isFinite(message.ttlSeconds) ? { ttl: `${message.ttlSeconds}s` } : {}),
         notification: androidNotification,
       },
       apns,
@@ -914,14 +941,14 @@ function buildPushDelivery(credentials, env, options) {
     return inFlightToken;
   }
 
-  async function postMessage(token, message, bearer, validateOnly = false) {
+  async function postMessage(token, message, bearer, validateOnly = false, platform = null) {
     const response = await fetchImpl(`${baseUrl}/v1/projects/${credentials.projectId}/messages:send`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${bearer}`,
         "Content-Type": "application/json; charset=utf-8",
       },
-      body: JSON.stringify(fcmRequestBody(message, token, { validateOnly })),
+      body: JSON.stringify(fcmRequestBody(message, token, { validateOnly, platform })),
       signal: AbortSignal.timeout(timeoutMs),
     });
     let payload = null;
@@ -935,12 +962,12 @@ function buildPushDelivery(credentials, env, options) {
 
   async function postWithRefresh(device, message, validateOnly) {
     let bearer = await accessToken();
-    let result = await postMessage(device.token, message, bearer, validateOnly);
+    let result = await postMessage(device.token, message, bearer, validateOnly, device.platform);
     if (result.status === 401) {
       // The cached token was revoked or clock-skewed out from under us. One
       // forced refresh, then accept the verdict.
       bearer = await accessToken({ forceRefresh: true });
-      result = await postMessage(device.token, message, bearer, validateOnly);
+      result = await postMessage(device.token, message, bearer, validateOnly, device.platform);
     }
     return result;
   }

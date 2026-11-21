@@ -1,3 +1,4 @@
+import { fileAccessTable, fileAccessRows, loadFileAccessRows } from './shop-file-access.js';
 import { shopTeamTables, emptyShopTeam, shopTeamRows, loadShopTeamRows, ensureShopOwners } from './shop-team-store.js';
 import { STAFF_LIST_PAGE, readStaffPage, staffPageRequested, staffListPlan, parseStaffPage, encodeStaffCursor } from './staff-list-pages.js';
 import { orderReadQuery, activeOrderSql, attachOrderRemovalContext } from './order-removal.js';
@@ -78,7 +79,7 @@ const TABLES = [
   { name: "client_match_selections", keys: ["token_hash"], columns: ["token_hash", "client_id", "request_id", "expires_at", "selection"] },
   { name: "client_match_preferences", keys: ["client_id"], columns: ["client_id", "ranking", "version", "updated_at"] },
   { name: "client_saved_addresses", keys: ["id"], columns: ["id", "client_id", "label", "address_line", "lat", "lng", "is_default", "version", "created_at", "updated_at", "deleted_at"] },
-  { name: "supplier_profiles", keys: ["user_id"], columns: ["user_id", "shop_name", "contact_name", "shop_lat", "shop_lng", "shop_label", "pickup_available", "is_closed", "schedule", "version", "updated_at"] },
+  { name: "supplier_profiles", keys: ["user_id"], columns: ["user_id", "shop_name", "contact_name", "shop_lat", "shop_lng", "shop_label", "pickup_available", "is_closed", "express_enabled", "schedule", "version", "updated_at"] },
   { name: "shop_reviews", keys: ["id"], columns: ["id", "order_id", "supplier_id", "client_id", "quality_stars", "speed_stars", "value_stars", "comment", "created_at"] },
   { name: "supplier_payment_terms", keys: ["supplier_id"], columns: ["supplier_id", "delivery_downpayment_rate_bps", "pickup_full_online_enabled", "pickup_downpayment_store_enabled", "pickup_downpayment_rate_bps", "version", "updated_at"] },
   { name: "rider_profiles", keys: ["user_id"], columns: ["user_id", "vehicle_type", "plate_number", "license_number", "version", "updated_at"] },
@@ -147,6 +148,7 @@ const TABLES = [
   { name: "claims", keys: ["id"], columns: ["id", "order_id", "status", "created_at", "updated_at", "position", "data"] },
   { name: "issues", keys: ["id"], columns: ["id", "order_id", "client_id", "claim_id", "kind", "status", "created_at", "updated_at", "position", "data"] },
   ...shopTeamTables.filter(table => table.name === 'order_actions'),
+  fileAccessTable,
   { name: "audit_log", appendOnly: true, keys: ["id"], columns: ["id", "at", "actor_id", "actor_role", "action", "entity_type", "entity_id", "order_id", "position", "data"] },
   { name: "notifications", keys: ["id"], columns: ["id", "user_id", "type", "order_id", "created_at", "read_at", "deleted_at", "position", "data"] },
   { name: "location_pings", keys: ["id"], columns: ["id", "order_id", "rider_id", "lat", "lng", "accuracy_meters", "at", "position", "data"] },
@@ -158,6 +160,7 @@ export function emptyStore() {
   return {
     ...emptyStaffStore(),
     ...emptyShopTeam(),
+    shopFileAccesses: [],
     ...emptyVoucherStore(),
     orderSurveys: [],
     ...emptySharingStore(),
@@ -245,6 +248,7 @@ function rowsFromStore(store) {
   const rows = Object.fromEntries(TABLES.map(({ name }) => [name, []]));
   ensureShopOwners(store);
   shopTeamRows(store, rows);
+  rows.shop_file_accesses = fileAccessRows(store);
   staffRows(store, rows);
   voucherRows(store, rows);
   performanceRows(store, rows);
@@ -331,7 +335,7 @@ function rowsFromStore(store) {
     });
   }
   for (const profile of (store.supplierProfiles || [])) {
-    rows.supplier_profiles.push({ user_id: profile.userId, shop_name: profile.shopName, contact_name: profile.contactName, shop_lat: profile.shop.lat, shop_lng: profile.shop.lng, shop_label: profile.shop.label, pickup_available: Boolean(profile.pickupAvailable), is_closed: Boolean(profile.isClosed), schedule: profile.schedule ?? null, version: profile.version || 1, updated_at: profile.updatedAt });
+    rows.supplier_profiles.push({ user_id: profile.userId, shop_name: profile.shopName, contact_name: profile.contactName, shop_lat: profile.shop.lat, shop_lng: profile.shop.lng, shop_label: profile.shop.label, pickup_available: Boolean(profile.pickupAvailable), is_closed: Boolean(profile.isClosed), express_enabled: profile.expressEnabled !== false, schedule: profile.schedule ?? null, version: profile.version || 1, updated_at: profile.updatedAt });
   }
   for (const review of (store.shopReviews || [])) {
     rows.shop_reviews.push({
@@ -1605,7 +1609,7 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
   }
   for (const name of ['order_line_items', 'order_payments', 'order_payment_allocations', 'payout_milestones',
     'platform_revenue_adjustments', 'claims', 'order_change_requests', 'order_change_payments', 'order_change_payouts',
-    'delivery_pin_payments', 'refund_supplier_payouts', 'shop_reviews', 'delivery_reminders']) {
+    'delivery_pin_payments', 'refund_supplier_payouts', 'shop_reviews', 'delivery_reminders', 'shop_file_accesses']) {
     await read(name, 'WHERE order_id = ANY($1::text[])', [orderIds]);
   }
   if (selected === 'super_admin' && identityHasMembership(actor, 'super_admin')) {
@@ -2276,6 +2280,7 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
   const store = emptyStore();
   store.legalPenaltyGate = legalPenaltyGate;
   loadShopTeamRows(store, loaded);
+  store.shopFileAccesses = loadFileAccessRows(loaded.shop_file_accesses);
   loadStaffRows(store, loaded);
   loadVoucherRows(store, loaded);
   loadPerformanceRows(store, loaded);
@@ -2345,7 +2350,7 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
     createdAt: row.created_at, updatedAt: row.updated_at,
   }));
   store.supplierProfiles = orderedBy(loaded.supplier_profiles, "user_id").map((row) => {
-    const item = { userId: row.user_id, shopName: row.shop_name, contactName: row.contact_name, shop: { lat: row.shop_lat, lng: row.shop_lng, label: row.shop_label }, pickupAvailable: row.pickup_available, version: row.version || 1, updatedAt: row.updated_at };
+    const item = { userId: row.user_id, shopName: row.shop_name, contactName: row.contact_name, shop: { lat: row.shop_lat, lng: row.shop_lng, label: row.shop_label }, pickupAvailable: row.pickup_available, expressEnabled: row.express_enabled !== false, version: row.version || 1, updatedAt: row.updated_at };
     if (row.is_closed) item.isClosed = true;
     // Absent means the shop has not set its own hours and is scheduled against
     // the platform default -- never "open at all times".

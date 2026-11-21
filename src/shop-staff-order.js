@@ -1,6 +1,6 @@
 // An allowlist prevents future order money/private fields leaking through the
 // legacy supplier projection. Nested production specs also discard money.
-const FIELDS = new Set(['id', 'title', 'state', 'createdAt', 'updatedAt', 'version', 'supplierId', 'riderId',
+const FIELDS = new Set(['id', 'title', 'orderType', 'expressOrder', 'fileAccesses', 'state', 'createdAt', 'updatedAt', 'version', 'supplierId', 'riderId',
   'readyBy', 'promisedDate', 'fulfillmentMode', 'pickup', 'productionItems', 'jobDetails', 'timeline', 'actions',
   'artworkFileIds', 'mockupFileIds', 'artworkLinks', 'artworkAttachments', 'productionProgress', 'packingProgress',
   'shopAcceptance', 'shopHandover', 'pickupChecklist', 'pickupChat', 'clientShopChat', 'fileCheck', 'specialInstructions',
@@ -17,5 +17,7 @@ export function staffOrderProjection(record) {
   // Free-text payment history can contain amounts; only work events and the
   // deliberately bounded actor history belong in the staff UI.
   result.timeline = (record.timeline || []).map(({ at, state, actor }) => ({ at, state, ...(actor ? { actor } : {}) }));
+  const method = record.payments?.initial?.method ?? record.paymentMethod;
+  if (['qr_manual','cash','gridgo_voucher'].includes(method)) result.paymentMethod = method;
   return result;
 }

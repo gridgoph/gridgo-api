@@ -1,3 +1,5 @@
+import { routeShopFileAccess, recordShopFileAccess, fileAccessJobs } from './shop-file-access.js';
+import { isExpressDocumentOrder } from './express-offers.js';
 import { awardExpressFriendPass } from './express-rewards.js';
 import { expressRates, expressEvent, expressStatus } from './express-orders.js';
 import { routeExpressOrders } from './express-routes.js';
@@ -2397,7 +2399,7 @@ async function handleAuditedRequest(req, res) {
       res.gridgoCorsHeaders = {
         "Access-Control-Allow-Origin": requestOrigin,
         "Access-Control-Allow-Credentials": "true",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization, Last-Event-ID, Idempotency-Key, X-GRIDGO-Role, X-GRIDGO-Shop-Id, X-GRIDGO-App, If-Match",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, Last-Event-ID, Idempotency-Key, X-GRIDGO-Role, X-GRIDGO-Shop-Id, X-GRIDGO-Device-Id, X-GRIDGO-App, If-Match",
         "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
         Vary: "Origin",
       };
@@ -3540,7 +3542,12 @@ async function handleAuditedRequest(req, res) {
       }
     }
 
-    const expressResponse=await routeExpressOrders({req,url,store,user,readBody,id,now});
+    const fileAccessResponse = await routeShopFileAccess({req,url,store,user,readBody,now,audit,authorizeFileRead});
+    if (fileAccessResponse) {
+      await save(store);
+      return send(res,fileAccessResponse.status,fileAccessResponse.body);
+    }
+    const expressResponse=await routeExpressOrders({req,url,store,user,readBody,id,now,audit});
     if(expressResponse) {
       if(expressResponse.mutated) await save(store);
       return send(res,expressResponse.status,expressResponse.body);
@@ -3896,6 +3903,12 @@ async function handleAuditedRequest(req, res) {
           const latestFile = findFile(latest, file.fileId);
           authorizeFileRead(latestUser, latest, latestFile);
           const orderIds = [...new Set((latestFile.references || []).filter(ref => ref.type === 'order').map(ref => ref.id))];
+          for (const orderId of orderIds) {
+            const order = latest.orders.find(order => order.id === orderId);
+            if (order && fileAccessJobs(latest,latestUser,order,latestFile).length) {
+              recordShopFileAccess(latest,latestUser,order,latestFile,{action:'download_authorized',deviceId:req.headers['x-gridgo-device-id'] || 'unspecified',at:now()});
+            }
+          }
           audit(latest, { actor: latestUser, action: 'artwork.download_authorized', entityType: 'file', entityId: file.fileId,
             orderId: orderIds.length === 1 ? orderIds[0] : null,
             detail: { purpose: file.purpose }, before: null, after: { authorized: true } });
@@ -6916,7 +6929,8 @@ async function handleAuditedRequest(req, res) {
           && (typeof body.note !== "string" || !body.note.trim())) {
         return send(res, 400, { error: "file_check_reason_required", message: "Explain what the client must fix in the artwork." });
       }
-      const allowed = releasingProhibitedItem ? ['ops_admin', 'super_admin'] : TRANSITIONS[order.state]?.[next];
+      const expressReady = isExpressDocumentOrder(order) && order.state === 'payment_authorized' && next === 'ready_for_dispatch';
+      const allowed = releasingProhibitedItem ? ['ops_admin', 'super_admin'] : expressReady ? ['supplier', 'ops_admin', 'super_admin'] : TRANSITIONS[order.state]?.[next];
       if (!allowed || !allowed.includes(user.role)) {
         return send(res, 409, {
           error: "transition_not_allowed",
@@ -6944,6 +6958,7 @@ async function handleAuditedRequest(req, res) {
       if (order.state === "proof_approval" && next === "approved_for_matching") {
         approveSample({ store, order, user, approval: body.approval, at: now(), id, req });
       }
+      if (expressReady) assertApprovalBeforeProceeding(order);
       if (PACKAGING_STATES.includes(next)) {
         const readiness = productionTransitionReadiness(store, order, next, { operations: isOps(user), reason: body.reason, reasonCode: body.reasonCode });
         if (!readiness.allowed) {
@@ -6952,7 +6967,7 @@ async function handleAuditedRequest(req, res) {
             { error: first.code, message: first.message, missing: readiness.missing });
         }
         if (isOps(user)) {
-          const skippedChecks = riderPackingFlow(order) ? handoverRequirements(store, order, next).map(item => item.code)
+          const skippedChecks = isExpressDocumentOrder(order) ? [] : riderPackingFlow(order) ? handoverRequirements(store, order, next).map(item => item.code)
             : [!productionPhotoFiles(store, order).length && 'production_photo_required',
               next === 'ready_for_dispatch' && !packingPhotoFiles(store, order).length && 'packing_photo_required'].filter(Boolean);
           if (readiness.receiptScan.required && !readiness.receiptScan.attached) skippedChecks.push('receipt_scan_required');
