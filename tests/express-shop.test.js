@@ -112,3 +112,30 @@ test('Express replacement events create one detailed offer instead of a generic 
  assert.equal(offers.length,1);assert.equal(offers[0].expressOffer.pages,8);
  assert.equal(store.notifications.some(n=>n.type==='shop_job_assigned'),false);
 });
+
+test('Staff Express uses an explicit work allowlist and safe payment classification',async()=>{
+ const {staffOrderProjection}=await import('../src/shop-staff-order.js');
+ const record={id:'order',orderType:'express',fulfillmentMode:'pickup',
+  payments:{initial:{method:'gridgo_voucher',amountMinor:12345}},
+  expressOrder:{status:'accepted',acceptBy:AT,pickupCode:'012345',opaqueFutureMoney:12345,
+    events:[{state:'declined',reason:'PHP 123.45'}],
+    printSettings:[{fileId:'art',pages:{total:4,range:null,printed:4,amount:12345},copies:2,paper:'a4',colour:'bw',sides:'two',layout:'fit_to_paper',rateMinor:12345,opaqueFutureMoney:12345}]}};
+ const result=staffOrderProjection(record);
+ assert.equal(result.paymentClassification,'voucher');
+ assert.equal(result.expressOrder.pickupCode,undefined);
+ assert.equal(result.expressOrder.events,undefined);
+ assert.equal(result.expressOrder.opaqueFutureMoney,undefined);
+ assert.equal(result.expressOrder.printSettings[0].opaqueFutureMoney,undefined);
+ assert.equal(result.expressOrder.printSettings[0].pages.amount,undefined);
+ assert.equal(result.expressOrder.printSettings[0].pages.printed,4);
+ assert.doesNotMatch(JSON.stringify(result),/12345|012345|PHP/);
+});
+
+
+test('unknown Staff payment methods cannot turn into a payment classification',async()=>{
+ const {staffOrderProjection}=await import('../src/shop-staff-order.js');
+ for (const method of ['unknown','__proto__','constructor']) {
+  const result=staffOrderProjection({id:'order',payments:{initial:{method}}});
+  assert.equal(result.paymentClassification,undefined);assert.equal(result.paymentMethod,undefined);
+ }
+});

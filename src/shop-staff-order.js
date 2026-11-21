@@ -6,6 +6,18 @@ const FIELDS = new Set(['id', 'title', 'orderType', 'expressOrder', 'fileAccesse
   'shopAcceptance', 'shopHandover', 'pickupChecklist', 'pickupChat', 'clientShopChat', 'fileCheck', 'specialInstructions',
   'specialInstructionsAcknowledgement', 'specialInstructionLines', 'artworkPreviews', 'scheduling', 'refundHold', 'shopRecovery', 'workHeld', 'holdReasons',
   'transitionReadiness', 'handoverFlow', 'pickupReminder', 'forcedByGridgo', 'material', 'size', 'finish', 'artworkName', 'quantity', 'spec', 'specs', 'categoryCode', 'subcategoryCode', 'productName', 'productionFinishedAt']);
+const pick = (record, fields) => Object.fromEntries(fields.filter(field => Object.hasOwn(record || {}, field)).map(field => [field, record[field]]));
+export function staffExpressProjection(express) {
+  if (!express || typeof express !== 'object') return null;
+  return {
+    ...pick(express, ['status', 'originalSupplierId', 'currentSupplierId', 'declineCount', 'acceptBy']),
+    printSettings: (express.printSettings || []).map(print => ({
+      ...pick(print, ['fileId', 'copies', 'colour', 'paper', 'paperStock', 'sides', 'layout', 'note', 'acceptedWarnings']),
+      pages: pick(print.pages, ['total', 'range', 'printed']),
+    })),
+  };
+}
+const PAYMENT_CLASSIFICATIONS = new Map([['qr_manual', 'in_app'], ['cash', 'cash'], ['gridgo_voucher', 'voucher']]);
 const FINANCIAL = /minor|price|cost|payout|earnings|commission|payment|settlement|allocation|discount|refundfinance|amount|ratebps|quote|invoice/i;
 function workValue(value) {
   if (Array.isArray(value)) return value.map(workValue);
@@ -17,7 +29,12 @@ export function staffOrderProjection(record) {
   // Free-text payment history can contain amounts; only work events and the
   // deliberately bounded actor history belong in the staff UI.
   result.timeline = (record.timeline || []).map(({ at, state, actor }) => ({ at, state, ...(actor ? { actor } : {}) }));
+  if (record.expressOrder) result.expressOrder = staffExpressProjection(record.expressOrder);
   const method = record.payments?.initial?.method ?? record.paymentMethod;
-  if (['qr_manual','cash','gridgo_voucher'].includes(method)) result.paymentMethod = method;
+  const classification = PAYMENT_CLASSIFICATIONS.get(method);
+  if (classification) {
+    result.paymentMethod = method;
+    result.paymentClassification = classification;
+  }
   return result;
 }

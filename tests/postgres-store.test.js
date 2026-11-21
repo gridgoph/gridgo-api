@@ -236,7 +236,7 @@ test("relational store maps memberships, approval records, profiles, and rider d
   const reloaded = await loadStore(database);
 
   assert.deepEqual(reloaded.userRoleMemberships, [...store.userRoleMemberships].sort((a, b) => a.userId.localeCompare(b.userId)));
-  assert.deepEqual(reloaded.supplierProfiles, store.supplierProfiles);
+  assert.deepEqual(reloaded.supplierProfiles, store.supplierProfiles.map(profile => ({ ...profile, expressEnabled: true })));
   assert.deepEqual(reloaded.riderProfiles, store.riderProfiles);
   assert.deepEqual(reloaded.approvalCases, store.approvalCases);
   assert.deepEqual(reloaded.approvalCaseEvents, store.approvalCaseEvents);

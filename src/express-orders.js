@@ -1,3 +1,4 @@
+import { staffExpressProjection } from './shop-staff-order.js';
 import { listingAcceptsArtwork } from './file-formats.js';
 import { randomInt } from 'node:crypto';
 import { approvedCatalogView } from './catalog-review-state.js';
@@ -67,11 +68,12 @@ export function publicExpress(order,user) {
   const e=order.expressOrder;if(!e)return null;
   const own=user?.id===order.clientId, staff=['ops_admin','super_admin'].includes(user?.role), shop=user?.id===order.supplierId;
   if(!own&&!staff&&!shop&&user?.id!==order.riderId)return null;
-  return {status:expressStatus(order),originalSupplierId:e.originalSupplierId,currentSupplierId:order.supplierId,declineCount:e.declines,
+  const result = {status:expressStatus(order),originalSupplierId:e.originalSupplierId,currentSupplierId:order.supplierId,declineCount:e.declines,
     acceptBy:order.shopAcceptance?.status==='pending'?order.shopAcceptance.deadlineAt:null,
     events:structuredClone(e.events||[]),refundRequired:e.refundRequired===true,
     ...(own&&order.fulfillmentMode==='pickup'&&['ready','picked_up'].includes(expressStatus(order))?{pickupCode:e.pickupCode}:{}),
     ...(own||staff||shop?{printSettings:structuredClone(e.printSettings||[])}:{})};
+  return user?.shopRole === 'staff' ? staffExpressProjection(result) : result;
 }
 export function startExpressAcceptance(order,at) {
   order.shopAcceptance={supplierId:order.supplierId,assignedAt:at,deadlineAt:new Date(Date.parse(at)+EXPRESS_ACCEPT_MS).toISOString(),workingMinutes:5,status:'pending'};

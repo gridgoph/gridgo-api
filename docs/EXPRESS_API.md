@@ -306,8 +306,10 @@ background order-attachment signing do not record an open. No file bytes, URLs
 or credentials are stored in the log, and logs do not delete files remotely.
 
 Staff work reads also include `orderType`, scoped `expressOrder`, and the
-allowlisted `paymentMethod` (`qr_manual | cash | gridgo_voucher`) for the app's
-payment label, without payment amounts, references, proof or earnings.
+allowlisted `paymentMethod` (`qr_manual | cash | gridgo_voucher`) plus
+`paymentClassification` (`in_app | cash | voucher`) for the app's payment label.
+Staff Express uses an explicit work-field/print-setting allowlist; it omits pickup
+codes, free-text event history, payment amounts, references, proof and earnings.
 
 Migration `1795270000000_express_shop_work` adds the shop availability flag and
 indexed `shop_file_accesses` metadata table. Run it before API deployment.

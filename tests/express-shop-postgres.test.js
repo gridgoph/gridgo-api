@@ -34,6 +34,8 @@ test('Express readiness works directly after acceptance and through the released
  assert.equal(ready.status,200,JSON.stringify(ready.body));
  assert.equal(ready.body.order.orderType,'express');assert.ok(ready.body.order.expressOrder);
  assert.equal(ready.body.order.supplierSubtotalMinor,undefined);
+ assert.equal(ready.body.order.paymentClassification,'in_app');
+ assert.equal(ready.body.order.expressOrder.pickupCode,undefined);
  assert.equal((await api('other','POST','/orders/order/express/pickup',{code:'999999'},{headers})).status,409);
  assert.equal((await api('other','POST','/orders/order/express/pickup',{code:'012345'},{headers})).status,200);
  const after=(await loadStore(db)).orders[0];
@@ -108,4 +110,23 @@ test('authorized full-file links record a device-scoped authorization without pr
  assert.equal(details.body.order.fileAccesses.length,1);
  assert.equal(details.body.order.fileAccesses[0].action,'download_authorized');
  assert.equal(details.body.order.fileAccesses[0].deviceId,'phone-1');
+});
+
+
+test('active Staff can decline with normal ownership, notes, timer and work-stop authorization',{skip:!DATABASE_URL},async t=>{
+ const {db,api}=await setup(t);
+ let loaded=await loadStore(db);loaded.orders[0].shopRecovery={status:'requested'};
+ await db.transaction(()=>saveStore(db,loaded));
+ assert.equal((await api('other','POST','/orders/order/express/accept',{}, {headers})).body.error,'shop_recovery_pending');
+ assert.equal((await api('other','POST','/orders/order/express/decline',{reason:'Printer unavailable'}, {headers})).body.error,'shop_recovery_pending');
+ assert.equal((await api('other','POST','/orders/order/transition',{state:'ready_for_dispatch'}, {headers})).status,409);
+ loaded=await loadStore(db);delete loaded.orders[0].shopRecovery;
+ await db.transaction(()=>saveStore(db,loaded));
+ assert.equal((await api('other','POST','/orders/order/express/decline',{}, {headers})).status,400);
+ const declined=await api('other','POST','/orders/order/express/decline',{reason:'Printer unavailable'}, {headers});
+ assert.equal(declined.status,200,JSON.stringify(declined.body));
+ assert.equal(declined.body.expressOrder.pickupCode,undefined);
+ assert.equal(declined.body.expressOrder.events,undefined);
+ const after=await loadStore(db);
+ assert.ok(after.auditLog.some(entry=>entry.action==='express.cancelled'&&entry.actorId==='other'));
 });
