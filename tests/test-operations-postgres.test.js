@@ -258,6 +258,7 @@ const GET_ROUTES = [
   '/me/supplier-readiness', '/me/supplier-services', '/me/shop-hours', '/me/supplier-payment-terms', '/me/rider-profile', '/me/reviews',
   '/me/production-lapses', '/me/performance', '/me/surveys', '/me/vouchers', '/me/organization', '/me/organization/statements',
   '/me/client-application', '/me/client-application/checklist', '/me/product-types', '/me/product-type-requests',
+  '/me/shop-memberships', '/me/shop-team', '/me/shop-team/stats', '/me/shop-team/settings', '/me/shop-team/working',
   '/me/supplier-invoices', '/me/payout-account', '/me/catalog-preview', '/me/shop-failures',
 ];
 

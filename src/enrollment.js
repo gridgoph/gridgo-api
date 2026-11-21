@@ -243,7 +243,7 @@ function addInitialCase(store, { user, kind, submittedAt, key, body, createId, a
 
 function validateSupplierInput(body) {
   if (!plainObject(body)) invalidApplication({ body: "must be a JSON object" });
-  rejectUnexpected(body, ["profile", "serviceCategories", "legalConsentVersion", "legalConsent"]);
+  rejectUnexpected(body, ["profile", "serviceCategories", "jobsHandledBy", "legalConsentVersion", "legalConsent"]);
   if (plainObject(body.profile)) {
     rejectUnexpected(body.profile, ["shopName", "contactName", "phone", "location"], "profile.");
     if (plainObject(body.profile.location)) {
@@ -253,6 +253,7 @@ function validateSupplierInput(body) {
   const profile = plainObject(body.profile) ? body.profile : {};
   const location = plainObject(profile.location) ? profile.location : {};
   const fields = {};
+  if (body.jobsHandledBy !== undefined && !["just_me","me_and_staff"].includes(body.jobsHandledBy)) invalidApplication({jobsHandledBy:"choose just_me or me_and_staff"});
   const shopName = nonblank(profile.shopName);
   const contactName = nonblank(profile.contactName);
   const phone = nonblank(profile.phone);
@@ -365,6 +366,7 @@ export function enrollSupplier({ store, clerkUserId, clerkUser, body, idempotenc
   user.shop = application.location;
   const membership = ensureMembership(store, user.id, "supplier", at);
   ensureShopOwners(store);
+  (store.shopTeamSettings ||= []).push({shopId:user.id,jobsHandledBy:body.jobsHandledBy || "just_me",showRankingToStaff:true,updatedAt:at});
   const currentProfile = (store.supplierProfiles || []).find((profile) => profile.userId === user.id);
   const profile = {
     userId: user.id,

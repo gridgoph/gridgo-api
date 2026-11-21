@@ -953,6 +953,8 @@ async function readIdentity(graph, userIds) {
 async function readNotificationContext(graph, { orderIds = [], caseIds = [], activeRiderIds = [] } = {}) {
   const { loaded, read } = graph;
   await read('shop_memberships', 'WHERE user_id = ANY($1::text[])', [loaded.users.map(row => row.id)]);
+  await read('shop_team_member_settings', 'WHERE user_id=ANY($1::text[])',[loaded.users.map(row=>row.id)]);
+  await read('shop_worker_sessions', 'WHERE user_id=ANY($1::text[])',[loaded.users.map(row=>row.id)]);
   const recipientIds = [...new Set([...loaded.users.map(row => row.id), ...(loaded.shop_memberships || []).map(row => row.shop_id)])];
   await read('user_role_memberships', 'WHERE user_id = ANY($1::text[])', [recipientIds]);
   await read('approval_cases', 'WHERE user_id = ANY($1::text[]) OR id = ANY($2::text[])', [recipientIds, caseIds]);
@@ -1783,6 +1785,8 @@ export async function loadTesterProgramIdentityStore(database, clerkSubject) {
     await graph.read('users', 'WHERE clerk_user_id = $1', [clerkSubject]);
     await readIdentity(graph, graph.loaded.users.map(row => row.id));
     await graph.read('shop_memberships', 'WHERE user_id = ANY($1::text[])', [graph.loaded.users.map(row => row.id)]);
+    await graph.read('shop_team_member_settings','WHERE user_id=ANY($1::text[])',[graph.loaded.users.map(row=>row.id)]);
+    await graph.read('shop_worker_sessions','WHERE user_id=ANY($1::text[])',[graph.loaded.users.map(row=>row.id)]);
     return graph.finish();
   });
 }
@@ -1795,6 +1799,10 @@ export async function loadUploadIntakeStore(database, clerkSubject) {
     await graph.read('users','WHERE clerk_user_id=$1',[clerkSubject]);
     const ids=graph.loaded.users.map(row=>row.id);
     await graph.read('shop_memberships','WHERE user_id=ANY($1::text[])',[ids]);
+    const shops=graph.loaded.shop_memberships.map(r=>r.shop_id);
+    await graph.read('shop_team_member_settings','WHERE user_id=ANY($1::text[])',[ids]);
+    await graph.read('shop_worker_sessions','WHERE user_id=ANY($1::text[])',[ids]);
+    await graph.read('shop_pin_staff','WHERE shop_id=ANY($1::text[])',[shops]);
     const actors=[...new Set([...ids,...graph.loaded.shop_memberships.map(row=>row.shop_id)])];
     await readIdentity(graph,actors);
     for (const table of ['supplier_profiles','staff_profiles']) await graph.read(table,'WHERE user_id=ANY($1::text[])',[actors]);
@@ -1877,6 +1885,8 @@ export async function loadClientSaveStore(database, clerkSubject, pathname, body
   if (['removed','suspended'].includes(actor.account_status)) return null;
   const clientId = actor.id;
   await readIdentity(graph, [clientId]);
+  // Shared-device authorization is needed for this write graph, not every public/read-only identity graph.
+  await read('shop_worker_sessions','WHERE user_id=$1',[clientId]);
   // Retain established nonclient/multirole policy on the legacy path.
   if (!loaded.user_role_memberships.some(row => row.user_id === clientId && row.role === 'client')) return null;
   if (pathname === '/files' && (actor.role !== 'client' || loaded.user_role_memberships.some(row => row.user_id === clientId && row.role !== 'client'))) return null;
@@ -2272,6 +2282,7 @@ export async function loadNotificationStore(database, clerkSubject, { lastEventI
       const caseIds = [...new Set(loaded.notifications.map(row => row.data?.approvalCaseId).filter(Boolean))];
       await read('user_role_memberships', 'WHERE user_id = $1', [userId]);
       await read('shop_memberships', 'WHERE user_id = $1', [userId]);
+      await read('shop_team_member_settings','WHERE user_id=$1',[userId]);
       await read('approval_cases', 'WHERE user_id = $1 OR id = ANY($2::text[])', [userId, caseIds]);
       if (loaded.users[0].review_data) {
         // Test operations inbox visibility checks each case owner's review mark.

@@ -15,10 +15,11 @@ const call = (store, userId, method, path, body) => routeShopTeam({
 test('an existing client enrolls a shop under the same identity and keeps client orders', () => {
   const store = fixture(), before = structuredClone(store.orders);
   const result = enrollSupplier({ store, clerkUserId: 'clerk_client', clerkUser: null,
-    body: { profile: { shopName: 'Shop', contactName: 'Contact', phone: '+639170000001',
+    body: { jobsHandledBy:'me_and_staff', profile: { shopName: 'Shop', contactName: 'Contact', phone: '+639170000001',
       location: { lat: 7.06, lng: 125.6, label: 'Pickup' } }, serviceCategories: ['marketing_collateral'] },
     idempotencyKey: 'same-person', createId: id, now: () => AT });
   assert.equal(result.user.id, 'client');
+  assert.equal(store.shopTeamSettings.find(s=>s.shopId==='client').jobsHandledBy,'me_and_staff');
   assert.equal(result.user.role, 'client');
   assert.equal(store.users.filter(row => row.clerkUserId === 'clerk_client').length, 1);
   assert.ok(store.userRoleMemberships.some(row => row.userId === 'client' && row.role === 'client'));

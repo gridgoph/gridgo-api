@@ -240,7 +240,10 @@ test('HTTP Apple revocation binds Clerk identity, audits results, retries safely
         if (stall.body) { res.writeHead(200, { 'Content-Type': 'application/json' }); res.write('{"object":"user",'); }
         stall.entered.resolve();
         await stall.release.promise;
-        if (res.destroyed) return;
+        // Releasing a stalled fixture only cleans up its existing sockets.
+        // Body stalls already sent headers and cannot start another response.
+        res.destroy();
+        return;
       }
       if (!clerkAvailable) return json(503, { errors: [{ code: 'unavailable', message: 'mock unavailable' }] });
       const id = req.url.split('/').at(-1);
@@ -378,7 +381,7 @@ test('HTTP Apple revocation binds Clerk identity, audits results, retries safely
       const mutation = await request(instance.api, '/me/account-deletion-request', {
         method: 'POST', token: clerkToken(uid(otherRole)), body: { confirmed: true },
       });
-      assert.equal(mutation.status, 202, 'an unrelated mutation must still commit through the same API pool');
+      assert.equal(mutation.status, 202, `an unrelated mutation must still commit through the same API pool: ${JSON.stringify(mutation.body)}\n${instance.output()}`);
       assert.ok(Date.now() - started < 1500, 'unrelated requests must not await the Clerk deadline');
       assert.equal((await database.query("SELECT id FROM account_deletion_requests WHERE user_id=$1 AND status='pending'", [uid(otherRole)])).rowCount, 1);
       const result = await pending[0];

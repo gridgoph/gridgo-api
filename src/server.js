@@ -2,6 +2,8 @@ import { supplierCanWork, verificationSettings, verificationSummary,
   prepareVerificationPayout, completeVerificationPayout, recordVerificationRecovery, cancelVerificationReservation, reconcileVerificationHolds, remindSupplierVerification } from "./supplier-verification.js";
 import { supplierMatchBlockersFor } from "./supplier-eligibility.js";
 import { changePaymentsFor, changePayoutsFor } from "./order-change-policy.js";
+import { enforceShopWorkerBoundary } from './shop-worker-boundary.js';
+import { bindShopDeviceRequest, effectiveShopRole, resolveShopWorker, managerRouteAllowed } from './shop-team-work.js';
 import { shopPaused } from './shop-availability.js';
 import { routeShopStatus } from './shop-status.js';
 import { routeShopFileAccess, recordShopFileAccess, fileAccessJobs } from './shop-file-access.js';
@@ -1123,6 +1125,7 @@ async function authenticateRequest(req, store) {
   const verified = await verifiedClerkClaimsFor(req);
   const auth = await authenticateBearerToken(m?.[1] || null, store, AUTH, verified);
   if (auth.user) {
+    bindShopDeviceRequest(store,req,auth.user);
     setAuditActor(auth.user);
     noteLastAuthenticated(auth.user, verified.claims?.sid);
   }
@@ -1139,10 +1142,11 @@ function shopBootstrap(req, store, user, pathname) {
   const member = selectedShop(store, user, req.headers['x-gridgo-shop-id']);
   if (!member) return null;
   if (member.status === 'removed') assertActiveShop(member);
-  if (member.userId === member.shopId && member.role === 'owner' && member.status === 'active') return null;
+  const worker=resolveShopWorker(store,req,user,member,now());
+  if (!worker && member.userId === member.shopId && member.role === 'owner' && member.status === 'active') return null;
   const held = accountHoldDenial(user);
   if (held) throw Object.assign(new Error(held.error), { status: 403, code: held.error });
-  return { user: { id: user.id, name: user.name, role: 'supplier' }, shop: shopSummary(store, member),
+  return { user: { id: user.id, name: user.name, role: 'supplier' }, shop: {...shopSummary(store, member),...(worker?{role:worker.role,worker}: {})},
     memberships: [{ role: 'supplier' }], approvalCases: [] };
 }
 function shopRequestActor(req, store, user, role) {
@@ -1150,23 +1154,26 @@ function shopRequestActor(req, store, user, role) {
   const member = selectedShop(store, user, req.headers['x-gridgo-shop-id']);
   if (!member) return null;
   assertActiveShop(member);
+  const worker=resolveShopWorker(store,req,user,member,now());
+  const shopRole=worker?.role || effectiveShopRole(store,member);
   // Existing Owners without an explicit app role keep the legacy role resolver.
-  if (member.role === 'owner' && member.shopId === user.id && !role) return null;
+  if (!worker && shopRole === 'owner' && member.shopId === user.id && !role) return null;
   const pathname = new URL(req.url, 'http://localhost').pathname;
-  if (member.role === 'staff' && !staffRouteAllowed(req.method, pathname)) {
+  if (shopRole !== 'owner' && !staffRouteAllowed(req.method, pathname) && !(shopRole === 'manager' && managerRouteAllowed(req.method,pathname))) {
     throw Object.assign(new Error('shop_owner_required'), { status: 403, code: 'shop_owner_required' });
   }
   if (identityShopRoute(pathname)) {
+    if (worker) throw Object.assign(new Error('shop_owner_required'),{status:403,code:'shop_owner_required'});
     // Inbox/device ownership always remains the signed-in person's, not the shop.
     const actor = new Proxy(user, { get(target, key) {
       if (key === 'role') return 'supplier';
-      if (key === 'shopRole') return member.role;
+      if (key === 'shopRole') return shopRole;
       if (key === 'shopId') return member.shopId;
       return target[key];
     } });
     return actor;
   }
-  return supplierShopActor(store, user, member);
+  return supplierShopActor(store, user, member,worker);
 }
 function requestActor(req, store, user, role) {
   const held = user && accountHoldDenial(user);
@@ -1217,6 +1224,7 @@ async function recordStaffSignIn(req, store, user) {
  */
 async function verifyClerkBeforeMutation(req, pathname) {
   const verified = await verifiedClerkClaimsFor(req);
+  await enforceShopWorkerBoundary(database,req,verified?.claims,now());
   const needsClerkProfile = [
     "/auth/staff/redeem",
     "/auth/shop-invites",
@@ -2419,7 +2427,7 @@ async function handleAuditedRequest(req, res) {
       res.gridgoCorsHeaders = {
         "Access-Control-Allow-Origin": requestOrigin,
         "Access-Control-Allow-Credentials": "true",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization, Last-Event-ID, Idempotency-Key, X-GRIDGO-Role, X-GRIDGO-Shop-Id, X-GRIDGO-Device-Id, X-GRIDGO-App, If-Match",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, Last-Event-ID, Idempotency-Key, X-GRIDGO-Role, X-GRIDGO-Shop-Id, X-GRIDGO-Worker-Token, X-GRIDGO-Device-Id, X-GRIDGO-App, If-Match",
         "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
         Vary: "Origin",
       };
@@ -2428,6 +2436,12 @@ async function handleAuditedRequest(req, res) {
 
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
     pathname = url.pathname;
+    // Keep the bound-device allowlist ahead of every route registration.
+    // Mutations also check before provider/preflight work and recheck here under their lock.
+    if (hasBearerToken(req) || req.headers['x-gridgo-worker-token']) {
+      const verified=await verifiedClerkClaimsFor(req);
+      await enforceShopWorkerBoundary(database,req,verified?.claims,now());
+    }
 
     if (req.method === "GET" && pathname === "/health") {
       const databaseHealth = await database.health();
@@ -2636,7 +2650,7 @@ async function handleAuditedRequest(req, res) {
         const member = selectedShop(identityStore, auth.user, req.headers['x-gridgo-shop-id']);
         if (member) {
           assertActiveShop(member);
-          if (member.role !== 'owner') return send(res, 403, { error: 'shop_owner_required' });
+          if (resolveShopWorker(identityStore,req,auth.user,member,now()) || effectiveShopRole(identityStore,member) !== 'owner') return send(res, 403, { error: 'shop_owner_required' });
         }
       }
       if (role && (!EVENT_ROLES.includes(role) || !hasRole(identityStore, auth.user.id, role))) return send(res, 403, { error: 'forbidden' });
@@ -2659,7 +2673,10 @@ async function handleAuditedRequest(req, res) {
     if ((hotRead || notificationRead) && notificationClaims?.claims?.sub) {
       const team = await database.query(`SELECT 1 FROM shop_memberships m JOIN users u ON u.id=m.user_id
         WHERE u.clerk_user_id=$1 AND (m.shop_id<>m.user_id OR m.status<>'active' OR m.role<>'owner') LIMIT 1`, [notificationClaims.claims.sub]);
-      if (team.rowCount) { hotRead = false; notificationRead = false; }
+      const worker = await database.query(`SELECT 1 FROM shop_worker_sessions s JOIN users u ON u.id=s.user_id
+        WHERE u.clerk_user_id=$1 AND s.session_hash=$2 AND s.expires_at IS NOT NULL LIMIT 1`,
+        [notificationClaims.claims.sub,notificationClaims.claims.sid ? crypto.createHash('sha256').update(notificationClaims.claims.sid).digest('hex') : '']);
+      if (team.rowCount || worker.rowCount || req.headers['x-gridgo-worker-token']) { hotRead = false; notificationRead = false; }
     }
     const uploadIntake = req.method === 'POST' && pathname === '/files';
     let store = uploadIntake
@@ -2939,6 +2956,10 @@ async function handleAuditedRequest(req, res) {
 
     const auth = await authenticateRequest(req, store);
     let user = auth.user;
+    if (user && pathname.startsWith('/me/shop-team') && !pathname.startsWith('/me/shop-team/working')) {
+      const m=selectedShop(store,user,req.headers['x-gridgo-shop-id']);
+      if(m) setAuditActor(supplierShopActor(store,user,m,resolveShopWorker(store,req,user,m,now())));
+    }
     const teamResponse = await routeShopTeam({ req, url, store, user, readBody, id, now, audit });
     if (teamResponse) {
       res.setHeader('Cache-Control', 'private, no-store');
@@ -4235,12 +4256,16 @@ async function handleAuditedRequest(req, res) {
       res.flushHeaders();
       res.write("retry: 5000\n\n");
 
+      const sharedSessionHash = req.gridgoVerifiedClaims?.claims?.sid ? crypto.createHash('sha256').update(req.gridgoVerifiedClaims.claims.sid).digest('hex') : null;
+      const workerSessionLocked = current => sharedSessionHash && (current.shopWorkerSessions || []).some(s=>s.userId===user.id && s.sessionHash===sharedSessionHash && s.expiresAt);
       const writeNotification = (notification, committedStore = store) => {
+        if (workerSessionLocked(committedStore)) { res.end(); return; }
         if (notification.push === false || !notificationVisible(committedStore, notification, user.id, eventRole, { shopId: streamShopId })) return;
         res.write(formatNotificationEvent(notification, orderFromNotification(committedStore, notification)));
       };
       const unsubscribe = notificationEvents.subscribe(user.id, writeNotification);
       const unsubscribeInvalidate = notificationEvents.subscribeInvalidate(user.id, (payload, committedStore = store) => {
+        if (workerSessionLocked(committedStore)) {res.end();return;}
         if (!invalidateFrameVisible(payload.resource, eventRole)) return;
         if (testOperations && !reviewSubject(committedStore, payload)) return;
         if (streamShopId && payload.resource === 'identity') {
@@ -4274,6 +4299,8 @@ async function handleAuditedRequest(req, res) {
       const heartbeat = setInterval(async () => {
         if (streamShopId) {
           try {
+            const locked=await database.query('SELECT 1 FROM shop_worker_sessions WHERE user_id=$1 AND session_hash=$2 AND expires_at IS NOT NULL LIMIT 1',[user.id,sharedSessionHash]);
+            if(locked.rowCount){res.end();return;}
             const current = await database.query(`SELECT status FROM shop_memberships WHERE shop_id=$1 AND user_id=$2
               UNION ALL SELECT 'active' WHERE $1=$2
                 AND NOT EXISTS (SELECT 1 FROM shop_memberships WHERE shop_id=$1 AND user_id=$2)
@@ -8137,7 +8164,7 @@ async function handleAuditedRequest(req, res) {
     }
     if (isEarlyAccessRoute(pathname) || isStaffEarlyAccessRoute(pathname)) {
       console.error({ event: 'early_access_request_failed', code: /^[0-9A-Z]{5}$/.test(err?.code || '') ? err.code : 'unknown' });
-    } else if (/^\/me\/shop-team\/invites(?:\/|$)/.test(pathname)) {
+    } else if (pathname.startsWith('/me/shop-team')) {
       // PostgreSQL errors can include entire invite rows in detail/message.
       // Keep hashes and recipient data out of diagnostics, including failed saves.
       console.error({ event: 'shop_invite_request_failed', code: /^[0-9A-Z]{5}$/.test(err?.code || '') ? err.code : 'unknown' });

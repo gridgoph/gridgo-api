@@ -90,7 +90,7 @@ export function publicExpress(order,user) {
     events:structuredClone(e.events||[]),refundRequired:e.refundRequired===true,
     ...(own&&order.fulfillmentMode==='pickup'&&['ready','picked_up'].includes(expressStatus(order))?{pickupCode:e.pickupCode}:{}),
     ...(own||staff||shop?{printSettings:structuredClone(e.printSettings||[])}:{})};
-  return user?.shopRole === 'staff' ? staffExpressProjection(result) : result;
+  return ['staff','manager'].includes(user?.shopRole) ? staffExpressProjection(result) : result;
 }
 export function startExpressAcceptance(order,at) {
   order.shopAcceptance={supplierId:order.supplierId,assignedAt:at,deadlineAt:new Date(Date.parse(at)+EXPRESS_ACCEPT_MS).toISOString(),workingMinutes:5,status:'pending'};

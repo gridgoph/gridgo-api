@@ -1,3 +1,4 @@
+import { effectiveShopRole, memberPreferences, routeTeamWork, resolveShopWorker, teamPhotoReadable, bindTeamPhoto } from './shop-team-work.js';
 import { expressOfferCopy } from './express-offers.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { clerkClientProfile } from './auth.js';
@@ -10,7 +11,7 @@ export const shopTeamError = (status, code) => { throw Object.assign(new Error(c
 export const inviteHash = token => createHash('sha256').update(token).digest('hex');
 export const actorUserId = user => user?.actorUserId || user?.id;
 export const actorRole = user => user?.shopRole || user?.role || 'system';
-export const isShopStaff = user => user?.shopRole === 'staff';
+export const isShopStaff = user => ['staff','manager'].includes(user?.shopRole);
 const ops = user => identityHasMembership(user, 'ops_admin') || identityHasMembership(user, 'super_admin');
 const isoNow = () => new Date().toISOString();
 
@@ -45,12 +46,15 @@ export function assertActiveShop(member) {
 }
 export function shopSummary(store, member) {
   return { id: member.shopId, name: store.supplierProfiles?.find(row => row.userId === member.shopId)?.shopName
-    || store.users.find(row => row.id === member.shopId)?.supplierName || 'Print shop', role: member.role, status: member.status };
+    || store.users.find(row => row.id === member.shopId)?.supplierName || 'Print shop', role: effectiveShopRole(store, member), status: member.status };
 }
 
 // Every unlisted supplier route is Owner-only, including future routes. The
 // existing handler still checks ownership, approval, artwork release and state.
 export function staffRouteAllowed(method, path) {
+  if (method === 'GET' && ['/me/shop-team','/me/shop-team/stats','/me/shop-team/settings','/me/shop-team/working'].includes(path)) return true;
+  if (method === 'POST' && ['/me/shop-team/working/select','/me/shop-team/working/lock'].includes(path)) return true;
+  if (method === 'PATCH' && path === '/me/shop-team/me') return true;
   if (method === 'PATCH' && path === '/me/shop-memberships/selected') return true;
   if (method === 'GET' && ['/auth/me', '/auth/me/supplier', '/me/shop-memberships', '/notifications', '/notifications/stream', '/web-push/public-key', '/orders', '/jobs', '/me/shop-status'].includes(path)) return true;
   if (method === 'POST' && ['/auth/logout', '/devices', '/web-push/subscribe', '/web-push/unsubscribe', '/notifications/read-all'].includes(path)) return true;
@@ -66,7 +70,7 @@ export function staffRouteAllowed(method, path) {
   return false;
 }
 export const identityShopRoute = path => /^\/(notifications|devices|web-push)(\/|$)/.test(path) || path === '/auth/logout' || path === '/me';
-export function supplierShopActor(store, identity, member) {
+export function supplierShopActor(store, identity, member, worker = null) {
   assertActiveShop(member);
   const shop = store.users.find(row => row.id === member.shopId);
   if (!shop || (shop.accountStatus || 'active') !== 'active') shopTeamError(403, 'shop_unavailable');
@@ -75,16 +79,25 @@ export function supplierShopActor(store, identity, member) {
   const target = member.userId === member.shopId ? identity : { ...shop, name: identity.name };
   const facade = new Proxy(target, { get(object, key, receiver) {
     if (key === 'actorUserId') return identity.id;
-    if (key === 'shopRole') return member.role;
-    if (key === 'actorName') return identity.name;
+    if (key === 'shopRole') return worker?.role || effectiveShopRole(store,member);
+    if (key === 'actorPinStaffId') return worker?.pinStaffId || null;
+    if (key === 'actorName') return worker?.name || identity.name;
     return Reflect.get(object, key, receiver);
   } });
   return selectActorRole(store, facade, 'supplier', { restrictMemberships: true });
 }
 
-export const STAFF_UPLOAD_PURPOSES = new Set(['fulfilment_proof', 'production_photo', 'finished_product_photo', 'packing_photo', 'client_shop_chat_attachment', 'pickup_chat_image']);
+export const STAFF_UPLOAD_PURPOSES = new Set(['shop_team_photo','fulfilment_proof', 'production_photo', 'finished_product_photo', 'packing_photo', 'client_shop_chat_attachment', 'pickup_chat_image']);
 export function assertStaffFile(user, store, file, { upload = false, purpose = file?.purpose } = {}) {
   if (!isShopStaff(user)) return;
+  if (purpose === 'shop_team_photo') {
+    if (upload || teamPhotoReadable(store,file,user,user.id)) return;
+    shopTeamError(403,'forbidden');
+  }
+  if (user.shopRole === 'manager' && purpose === 'catalog_item_photo') {
+    if (upload || file?.ownerId === user.id) return;
+    shopTeamError(403,'forbidden');
+  }
   if (upload) {
     if (!STAFF_UPLOAD_PURPOSES.has(purpose)) shopTeamError(403, 'shop_owner_required');
     return;
@@ -119,10 +132,10 @@ function inviteAvailable(invite, at) {
 const publicInvite = (row, at) => ({ id: row.id, shopId: row.shopId, kind: row.kind, identity: row.identity,
   createdAt: row.createdAt, expiresAt: row.expiresAt, claimedBy: row.claimedBy || null,
   status: row.claimedAt ? 'claimed' : row.revokedAt ? 'revoked' : Date.parse(row.expiresAt) <= Date.parse(at) ? 'expired' : 'open' });
-function publicMember(store, member) {
+export function publicMember(store, member) {
   const person = store.users.find(row => row.id === member.userId);
-  return { userId: member.userId, name: person?.name || 'Member', role: member.role, status: member.status,
-    createdAt: member.createdAt, updatedAt: member.updatedAt };
+  return { userId: member.userId, name: person?.name || 'Member', role: effectiveShopRole(store, member), status: member.status,
+    createdAt: member.createdAt, updatedAt: member.updatedAt, jobAlerts: memberPreferences(store,member.shopId,member.userId)?.jobAlerts !== false, photoFileId: memberPreferences(store,member.shopId,member.userId)?.photoFileId || null };
 }
 function issueShopInvite({ store, user, shopId, kind, identity, at, id, audit }) {
   const token = randomBytes(32).toString('base64url');
@@ -149,12 +162,14 @@ export function claimShopInvite({ store, claims, clerkUser, body, id, at, audit 
   let user = store.users.find(row => row.clerkUserId === claims.sub);
   if (user && (user.accountStatus || 'active') !== 'active') shopTeamError(403, 'forbidden');
   if (!user) {
+    if (['link','qr'].includes(invite.kind) && !verifiedIdentities(clerkUser).phone.length) shopTeamError(403,'shop_mobile_verification_required');
+    if (body.name !== undefined && (typeof body.name!=='string' || !body.name.trim() || body.name.trim().length>100)) shopTeamError(400,'invalid_shop_member_name');
     const profile = clerkClientProfile(clerkUser);
     // Phone-only Clerk accounts have no email. This private sentinel is never
     // used as verification evidence; invite matching always uses verified BAPI fields.
     const email = profile.email || `phone-${inviteHash(claims.sub)}@identity.invalid`;
     if (store.users.some(row => row.email.toLowerCase() === email.toLowerCase())) shopTeamError(409, 'email_already_registered');
-    user = { id: id('user'), clerkUserId: claims.sub, email, name: profile.name || profile.phone || 'Shop staff', phone: profile.phone,
+    user = { id: id('user'), clerkUserId: claims.sub, email, name: body.name?.trim() || profile.name || profile.phone || 'Shop staff', phone: profile.phone,
       role: 'staff', accountStatus: 'active', createdAt: at };
     store.users.push(user);
   }
@@ -164,6 +179,7 @@ export function claimShopInvite({ store, claims, clerkUser, body, id, at, audit 
   const member = existing || { shopId: invite.shopId, userId: user.id, createdAt: at };
   Object.assign(member, { role: 'staff', status: 'pending', updatedAt: at, decidedBy: null });
   if (!existing) store.shopMemberships.push(member);
+  const oldPreferences=memberPreferences(store,invite.shopId,user.id);if(oldPreferences) oldPreferences.manager=false;
   invite.claimedAt = at; invite.claimedBy = user.id;
   audit(store, { actor: user, action: 'shop_team.invite_claimed', entityType: 'shop_invite', entityId: invite.id, detail: { shopId: invite.shopId } });
   const recipients = [
@@ -185,7 +201,7 @@ export async function routeShopTeam({ req, url, store, user, readBody, id, now, 
   const operations = /^\/ops\/shops\/([^/]+)\/team(?:\/([^/]+))?$/.exec(path);
   const own = /^\/me\/shop-team(?:\/(invites|members)(?:\/([^/]+))?)?$/.exec(path)
     || /^\/me\/shop-team\/(invites)\/([^/]+)\/(replace)$/.exec(path);
-  if (!['/me/shop-memberships', '/me/shop-memberships/selected'].includes(path) && !operations && !own) return null;
+  if (!['/me/shop-memberships', '/me/shop-memberships/selected'].includes(path) && !operations && !own && !path.startsWith('/me/shop-team/')) return null;
   if (!user) shopTeamError(401, 'unauthorized');
   if ((user.accountStatus || 'active') !== 'active') shopTeamError(403, 'forbidden');
   const at = now();
@@ -205,6 +221,7 @@ export async function routeShopTeam({ req, url, store, user, readBody, id, now, 
     const member = selectedShop(store, user, body.shopId);
     assertActiveShop(member);
     supplierShopActor(store, user, member);
+    resolveShopWorker(store,req,user,member,at);
     for (const row of store.shopMemberships.filter(row => row.userId === user.id)) row.lastUsedAt = row === member ? at : null;
     audit(store, { actor: user, action: 'shop_team.shop_selected', entityType: 'shop_membership', entityId: user.id, detail: { shopId: member.shopId } });
     queueInvalidate(store, { resource: 'identity', userIds: [user.id] });
@@ -215,8 +232,20 @@ export async function routeShopTeam({ req, url, store, user, readBody, id, now, 
     const role = req.headers['x-gridgo-role'];
     if (!ops(user) || (role && (!['ops_admin','super_admin'].includes(role) || !identityHasMembership(user, role)))) shopTeamError(403, 'forbidden');
   }
-  else { assertActiveShop(member); if (member.role !== 'owner') shopTeamError(403, 'shop_owner_required'); }
+  else {
+    assertActiveShop(member);
+    supplierShopActor(store,user,member);
+    const response = await routeTeamWork({req,url,store,user,member,readBody,id,now,audit,publicMember});
+    if (response) {
+      const worker = path === '/me/shop-team' ? resolveShopWorker(store,req,user,member,at) : null;
+      if (path === '/me/shop-team' && ['owner','manager'].includes(worker?.role || effectiveShopRole(store,member))) response.body.invites=store.shopInvites.filter(r=>r.shopId===member.shopId).map(r=>publicInvite(r,at));
+      return response;
+    }
+    const worker = resolveShopWorker(store,req,user,member,at);
+    if (!['owner','manager'].includes(worker?.role || effectiveShopRole(store,member))) shopTeamError(403,'shop_owner_required');
+  }
   const shopId = operations?.[1] || member.shopId;
+  const manager = !operations && (resolveShopWorker(store,req,user,member,at)?.role || effectiveShopRole(store,member)) === 'manager';
   if (!store.shopMemberships.some(row => row.shopId === shopId)) shopTeamError(404, 'shop_not_found');
   const memberId = operations?.[2] || (own?.[1] === 'members' ? own[2] : null);
   if (req.method === 'GET' && !memberId && !own?.[2]) return { status: 200, body: {
@@ -253,15 +282,25 @@ export async function routeShopTeam({ req, url, store, user, readBody, id, now, 
     if (!target) shopTeamError(404, 'shop_member_not_found');
     const body = req.method === 'DELETE' ? { status: 'removed' } : await readBody(req);
     if (!body || typeof body !== 'object' || Array.isArray(body)) shopTeamError(400, 'invalid_shop_member_update');
-    if (Object.keys(body).some(key => !['status', 'role'].includes(key)) || (!body.status && !body.role)
-      || (body.status && !['active', 'removed'].includes(body.status)) || (body.role && !['owner', 'staff'].includes(body.role))) shopTeamError(400, 'invalid_shop_member_update');
+    if (Object.keys(body).some(key => !['status', 'role', 'jobAlerts', 'photoFileId'].includes(key)) || (!body.status && !body.role && !Object.hasOwn(body,'jobAlerts') && !Object.hasOwn(body,'photoFileId'))
+      || (body.status && !['active', 'removed'].includes(body.status)) || (body.role && !['owner', 'manager', 'staff'].includes(body.role))) shopTeamError(400, 'invalid_shop_member_update');
+    if (manager && (effectiveShopRole(store,target) !== 'staff' || (body.role && body.role !== 'staff'))) shopTeamError(403,'shop_owner_required');
+    if (Object.hasOwn(body,'jobAlerts') && typeof body.jobAlerts !== 'boolean') shopTeamError(400,'invalid_shop_member_update');
     if (target.status === 'removed' && body.status !== 'removed') shopTeamError(409, 'shop_invite_required');
-    const status = body.status || target.status, role = body.role || target.role;
-    if (status === 'pending' && role === 'owner') shopTeamError(409, 'shop_approval_required');
+    const status = body.status || target.status, role = body.role || effectiveShopRole(store,target);
+    if (status === 'pending' && ['owner','manager'].includes(role)) shopTeamError(409, 'shop_approval_required');
     if (target.role === 'owner' && target.status === 'active' && (status !== 'active' || role !== 'owner')
       && !store.shopMemberships.some(row => row.shopId === shopId && row.userId !== target.userId && row.role === 'owner' && row.status === 'active')) shopTeamError(409, 'last_shop_owner');
     const before = { role: target.role, status: target.status };
-    Object.assign(target, { status, role, updatedAt: at, decidedBy: user.id });
+    const preferences=memberPreferences(store,shopId,target.userId,true);
+    preferences.manager=role==='manager';
+    if(Object.hasOwn(body,'jobAlerts')) preferences.jobAlerts=body.jobAlerts;
+    if(Object.hasOwn(body,'photoFileId')) {
+      const file=store.files.find(f=>f.fileId===body.photoFileId);
+      if(body.photoFileId!==null && (!file || file.purpose!=='shop_team_photo' || file.ownerId!==shopId || file.createdByUserId!==user.id || file.state!=='ready' || file.references?.length)) shopTeamError(400,'invalid_shop_team_photo');
+      preferences.photoFileId=body.photoFileId;bindTeamPhoto(store,body.photoFileId,shopId,target.userId);
+    }
+    Object.assign(target, { status, role: role==='manager'?'staff':role, updatedAt: at, decidedBy: user.id });
     audit(store, { actor: user, action: 'shop_team.member_updated', entityType: 'shop_membership', entityId: target.userId,
       detail: { shopId }, before, after: { role, status } });
     queueInvalidate(store, { resource: 'identity', userIds: [target.userId, shopId] });
@@ -281,7 +320,7 @@ export function notifyShopStaff(store, baseline, { id }) {
     const members = (store.shopMemberships || []).filter(member => member.shopId === shopId && member.status === 'active');
     const copyFor = member => {
       const copy = structuredClone(source);
-      if (member.role === 'staff' && copy.expressOffer) {
+      if (member.role !== 'owner' && copy.expressOffer) {
         delete copy.expressOffer.earningsMinor;
         Object.assign(copy, expressOfferCopy(copy.expressOffer, copy.at));
       }
@@ -290,11 +329,11 @@ export function notifyShopStaff(store, baseline, { id }) {
     // Keep the original inbox ID, but derive its Express copy from the person's
     // current role. Other Owners still need the original earnings-bearing source.
     const original = members.find(member => member.userId === notification.userId);
-    if (notification.type === 'shop_express_offer' && original?.role === 'staff') {
+    if (notification.type === 'shop_express_offer' && original && original.role !== 'owner') {
       Object.assign(notification, copyFor(original));
     }
     for (const member of members) {
-      if (member.userId === notification.userId) continue;
+      if (member.userId === notification.userId || memberPreferences(store,shopId,member.userId)?.jobAlerts === false) continue;
       const occurrenceKey = `${source.occurrenceKey || source.id}:${member.userId}`;
       if (store.notifications.some(row => row.shopTeamCopy && row.shopId === shopId && row.userId === member.userId && row.occurrenceKey === occurrenceKey)) continue;
       store.notifications.push({ ...copyFor(member), id: id('ntf'), userId: member.userId, shopId, shopTeamCopy: true, occurrenceKey });
