@@ -40,7 +40,7 @@ test('early access validates consent, account email, phone type and bounded sour
   assert.equal(validateEarlyAccess({ ...input, app: 'shop', shopName: 'x'.repeat(80) }).shopName.length, 80);
   assert.equal(validateEarlyAccess({ ...input, app: 'shop', shopName: '🖨'.repeat(80) }).shopName, '🖨'.repeat(80));
   for (const app of ['supplier', '', null, 1, {}]) assert.throws(() => validateEarlyAccess({ ...input, app }), { code: 'invalid_app' });
-  for (const shopName of ['x'.repeat(81), '🖨'.repeat(81), 1, {}, 'a\nb']) {
+  for (const shopName of ['x'.repeat(81), '🖨'.repeat(81), 1, {}, 'a\nb', 'a\u0085b']) {
     assert.throws(() => validateEarlyAccess({ ...input, app: 'shop', shopName }), { code: 'invalid_shop_name' });
   }
   for (const role of ['client', 'supplier', 'rider']) assert.equal(invalidateFrameVisible('early-access', role), false);
@@ -341,7 +341,7 @@ test('early access HTTP and PostgreSQL contract with durable notifications and m
       (id,email,app,token,consent_at,created_at) VALUES(gen_random_uuid(),$1,'shop',repeat('b',64),now(),now())`, [input.email])), { code: '23505' });
     const notices = (await database.query("SELECT data->>'title' AS title FROM notifications WHERE type='ops_early_access_signup' AND data->>'occurrenceKey'=$1", [rows[1].id])).rows;
     assert.ok(notices.length > 0); assert.ok(notices.every(row => /shop tester/i.test(row.title)));
-    for (const body of [{ ...input, app: 'invalid' }, { ...input, app: 'shop', shopName: 'x'.repeat(81) }]) checked(await post(body), 400);
+    for (const body of [{ ...input, app: 'invalid' }, { ...input, app: 'shop', shopName: 'x'.repeat(81) }, { ...input, app: 'shop', shopName: 'a\u0085b' }]) checked(await post(body), 400);
   });
 
   await t.test('desk filters app, separates Android grants from notify-only iPhone shops and never grants those requests', async () => {

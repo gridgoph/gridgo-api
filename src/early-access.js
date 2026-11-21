@@ -29,7 +29,7 @@ export function validateEarlyAccess(body) {
   const app = body.app === undefined ? 'customer' : body.app;
   if (!['customer', 'shop'].includes(app)) fail(400, 'invalid_app');
   const shopName = body.shopName == null ? null : body.shopName;
-  if (shopName !== null && (typeof shopName !== 'string' || [...shopName.trim()].length > 80 || /[\x00-\x1f\x7f]/.test(shopName))) fail(400, 'invalid_shop_name');
+  if (shopName !== null && (typeof shopName !== 'string' || [...shopName.trim()].length > 80 || /[\x00-\x1f\x7f-\x9f]/.test(shopName))) fail(400, 'invalid_shop_name');
   const platform = body.platform === undefined ? 'android' : body.platform;
   if (!['android', 'iphone'].includes(platform)) fail(400, 'invalid_platform');
   const source = body.source == null || body.source === '' ? null : body.source;
