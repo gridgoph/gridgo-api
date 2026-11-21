@@ -70,7 +70,7 @@ function notifyParties(store, order, senderRole, { createId, at }) {
 function checkFiles(store, user, ids) {
   for (const id of ids) {
     const file = store.files.find(row => row.fileId === id);
-    if (!file || (user.shopRole === 'staff' && file.createdByUserId !== actorUserId(user)) || file.ownerId !== user.id || file.purpose !== CLIENT_SHOP_CHAT_PURPOSE || file.state !== 'ready'
+    if (!file || (['staff','manager'].includes(user.shopRole) && file.createdByUserId !== actorUserId(user)) || file.ownerId !== user.id || file.purpose !== CLIENT_SHOP_CHAT_PURPOSE || file.state !== 'ready'
         || !CLIENT_SHOP_CHAT_TYPES.includes(file.detectedContentType) || !Number.isSafeInteger(file.size) || file.size <= 0
         || file.size > CLIENT_SHOP_CHAT_MAX_BYTES || (file.detectedContentType !== 'application/pdf' && !file.metadataSanitizedAt)) {
       throw invalid('invalid_chat_attachment');

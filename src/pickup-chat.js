@@ -302,7 +302,7 @@ export async function routePickupChat({ req, res, pathname, user, store, databas
     send(res, 400, { error: "invalid_request", message: parsed.message });
     return true;
   }
-  if (user.shopRole === 'staff' && photos.fileIds.some(id => store.files.find(file => file.fileId === id)?.createdByUserId !== actorUserId(user))) { send(res, 403, { error: 'forbidden' }); return true; }
+  if (['staff','manager'].includes(user.shopRole) && photos.fileIds.some(id => store.files.find(file => file.fileId === id)?.createdByUserId !== actorUserId(user))) { send(res, 403, { error: 'forbidden' }); return true; }
   const refused = checkPhotos(store, user.id, photos.fileIds);
   if (refused) {
     send(res, refused.status, refused.body);
