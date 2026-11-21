@@ -368,6 +368,9 @@ Migration `1795272000000` adds the saved selection timestamp and an immutable
 invite lifetime snapshot. Existing 48-hour invitations retain their original
 deadlines; newly created/replaced invitations use 24 hours. No existing owner or
 staff sign-in, Clerk subject, membership status, or order snapshot is rewritten.
+The database default remains 48 hours for API processes running the previous
+release during deployment; this release always explicitly writes a 24-hour
+lifetime for new and replacement invites.
 Manager registration while the owner is away, owner SMS confirmation/dispute,
 and PIN-only staff are separate product work; this change retains the published
 owner/staff permissions and approval flow.

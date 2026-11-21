@@ -2,8 +2,8 @@
 export async function up(pgm) {
   pgm.sql(`
     ALTER TABLE shop_memberships ADD COLUMN last_used_at timestamptz;
+    -- Old API processes omit this column; new issuance supplies 24 explicitly.
     ALTER TABLE shop_invites ADD COLUMN lifetime_hours smallint NOT NULL DEFAULT 48;
-    ALTER TABLE shop_invites ALTER COLUMN lifetime_hours SET DEFAULT 24;
     DO $$ DECLARE constraint_name text;
     BEGIN
       SELECT conname INTO STRICT constraint_name FROM pg_constraint

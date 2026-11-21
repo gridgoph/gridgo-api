@@ -184,8 +184,8 @@ test('HTTP replacement refuses Staff, non-members, other shops and consumed or e
   }
   assert.equal((await api(null,'POST',path,{},supplier)).status,401);
   assert.deepEqual((await db.query('SELECT * FROM shop_invites ORDER BY id')).rows,before.rows);
-  await db.query(`INSERT INTO shop_invites(id,shop_id,kind,token_hash,created_by,created_at,expires_at)
-    VALUES ('expired','supplier','qr',$1,'supplier',now()-interval '24 hours',now())`,[inviteHash('z'.repeat(43))]);
+  await db.query(`INSERT INTO shop_invites(id,shop_id,kind,token_hash,created_by,created_at,expires_at,lifetime_hours)
+    VALUES ('expired','supplier','qr',$1,'supplier',now()-interval '24 hours',now(),24)`,[inviteHash('z'.repeat(43))]);
   assert.equal((await api('supplier','POST','/me/shop-team/invites/expired/replace',{},supplier)).body.error,'shop_invite_expired');
   assert.equal((await api('client','POST','/auth/shop-invites/claim',{token:original.token})).status,200);
   assert.equal((await api('supplier','POST',path,{},supplier)).body.error,'shop_invite_used');
@@ -384,8 +384,8 @@ test('HTTP all invite kinds use verified identities, expire, revoke, claim once,
   // Build a genuinely expired invite at insertion; immutable issued timestamps cannot be edited.
   const expiredToken='z'.repeat(43);
   const {inviteHash}=await import('../src/shop-team.js');
-  await db.query(`INSERT INTO shop_invites(id,shop_id,kind,token_hash,created_by,created_at,expires_at)
-    VALUES ('expired','supplier','qr',$1,'supplier',now()-interval '25 hours',now()-interval '1 hour')`,[inviteHash(expiredToken)]);
+  await db.query(`INSERT INTO shop_invites(id,shop_id,kind,token_hash,created_by,created_at,expires_at,lifetime_hours)
+    VALUES ('expired','supplier','qr',$1,'supplier',now()-interval '25 hours',now()-interval '1 hour',24)`,[inviteHash(expiredToken)]);
   assert.equal((await api('other','POST','/auth/shop-invites/claim',{token:expiredToken})).body.error,'shop_invite_expired');
   const concurrent=await invite(api);
   const results=await Promise.all(['other','client'].map(account=>api(account,'POST','/auth/shop-invites/claim',{token:concurrent.token})));
@@ -461,6 +461,7 @@ test('additive migration backfills every existing supplier owner and retains Cle
   const db=createDatabase(process.env);t.after(()=>db.close());
   await db.transaction(async()=>{
     await db.query('CREATE SCHEMA shop_team_migration_test');
+    await db.query('SAVEPOINT migration_fixture');
     try {
       await db.query('SET LOCAL search_path TO shop_team_migration_test');
       await db.query(`CREATE TABLE users(id text PRIMARY KEY,name text,clerk_user_id text);
@@ -480,12 +481,19 @@ test('additive migration backfills every existing supplier owner and retains Cle
       const migrated=(await db.query("SELECT * FROM shop_invites WHERE id='old'")).rows[0];
       assert.deepEqual(migrated,{...oldInvite,lifetime_hours:48});
       assert.deepEqual((await db.query('SELECT * FROM shop_memberships')).rows,rows.map(row=>({...row,last_used_at:null})));
+      // A process from before deployment omits the new column and still issues 48 hours.
       await db.query(`INSERT INTO shop_invites(id,shop_id,kind,token_hash,created_by,created_at,expires_at)
-        VALUES ('new','owner','link',$1,'owner','2026-11-21T00:00:00Z','2026-11-22T00:00:00Z')`,[inviteHash('n'.repeat(43))]);
+        VALUES ('legacy_writer','owner','link',$1,'owner','2026-11-21T00:00:00Z','2026-11-23T00:00:00Z')`,[inviteHash('l'.repeat(43))]);
+      assert.equal((await db.query("SELECT lifetime_hours FROM shop_invites WHERE id='legacy_writer'")).rows[0].lifetime_hours,48);
+      await db.query(`INSERT INTO shop_invites(id,shop_id,kind,token_hash,created_by,created_at,expires_at,lifetime_hours)
+        VALUES ('new','owner','link',$1,'owner','2026-11-21T00:00:00Z','2026-11-22T00:00:00Z',24)`,[inviteHash('n'.repeat(43))]);
       assert.equal((await db.query("SELECT lifetime_hours FROM shop_invites WHERE id='new'")).rows[0].lifetime_hours,24);
       await db.query('SAVEPOINT immutable_invite');
       await assert.rejects(db.query("UPDATE shop_invites SET lifetime_hours=24,expires_at=created_at+interval '24 hours' WHERE id='old'"),/immutable/);
       await db.query('ROLLBACK TO SAVEPOINT immutable_invite');
+    } catch (error) {
+      await db.query('ROLLBACK TO SAVEPOINT migration_fixture');
+      throw error;
     } finally {await db.query('SET LOCAL search_path TO public');await db.query('DROP SCHEMA shop_team_migration_test CASCADE');}
   });
 });
