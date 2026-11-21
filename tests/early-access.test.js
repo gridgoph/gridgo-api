@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { createDatabase } from '../src/database.js';
 import { emptyStore, saveStore } from '../src/postgres-store.js';
 import { defaultOperationalSettings } from '../src/operational-model.js';
@@ -11,6 +12,17 @@ import { apiForTest } from './fixtures/reschedule-http.js';
 import { resetDatabase } from './fixtures/reset-database.js';
 
 const DB = process.env.DATABASE_URL;
+// Immutable pre-app consumers, with only their relative imports resolved locally.
+const LEGACY_SHA = 'f6caaed4d25aa2a3dca15b147f082104ed40b8f7';
+async function legacyEarlyAccess() {
+  const load = async file => {
+    const source = execFileSync('git', ['show', `${LEGACY_SHA}:src/${file}`], { encoding: 'utf8' })
+      .replace(/from '(\.\/[^']+)'/g, (_, path) => `from '${new URL(path, new URL('../src/', import.meta.url)).href}'`);
+    return import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+  };
+  return { ...await load('early-access.js'), ...await load('early-access-email.js') };
+}
+
 const input = { email: 'tester@gmail.com', consent: true, platform: 'android', source: 'booth' };
 const checked = (res, status = 200) => { assert.equal(res.status, status, JSON.stringify(res.body)); return res.body; };
 
@@ -329,6 +341,41 @@ test('early access HTTP and PostgreSQL contract with durable notifications and m
     assert.equal((await database.query("SELECT count(*)::int AS n FROM early_access_email_outbox WHERE kind='team' AND status='pending'")).rows[0].n, 0);
   });
 
+
+  await t.test('activation off protects exact legacy signup, grant and mail consumers on the migrated schema', async () => {
+    await database.transaction(() => database.query("UPDATE platform_settings SET settings=settings-'shopEarlyAccessEnabled' WHERE singleton"));
+    const before = checked(await api('admin', 'GET', '/settings'));
+    assert.equal(before.settings.shopEarlyAccessEnabled, false);
+    for (const platform of ['android', 'iphone']) {
+      assert.deepEqual(checked(await post({ ...input, email: 'rollout@example.invalid', app: 'shop', platform }), 409), { error: 'shop_early_access_disabled' });
+    }
+    await assert.rejects(createEarlyAccessSignup(database, { ...input, app: 'shop' }), { status: 409, code: 'shop_early_access_disabled' });
+    assert.equal((await database.query("SELECT count(*)::int AS n FROM early_access_signups WHERE app='shop'")).rows[0].n, 0);
+    const legacy = await legacyEarlyAccess();
+    const old = await legacy.createEarlyAccessSignup(database, { ...input, email: 'rollout@example.invalid' });
+    const recovered = checked(await post({ ...input, email: 'rollout@example.invalid' }));
+    assert.equal(recovered.app, 'customer'); assert.equal(recovered.token, old.token); assert.equal(recovered.duplicate, true);
+    const row = (await database.query('SELECT * FROM early_access_signups WHERE token=$1', [old.token])).rows[0];
+    assert.equal(row.app, 'customer');
+    await legacy.grantEarlyAccess(database, row.id, { id: 'ops', role: 'ops_admin' });
+    const sent = [];
+    await legacy.createEarlyAccessEmailWorker({ database, env: { EARLY_ACCESS_TEAM_EMAIL: 'team@example.invalid' },
+      mailer: { configured: true, async sendEarlyAccessEmail(mail) { sent.push(mail); return { sent: true }; } } })();
+    const invite = sent.find(mail => mail.to === row.email);
+    assert.equal(invite.subject, "You're in — GRIDGO Google Play Early Access");
+    assert.match(invite.text, /ph\.gridgo\.next/);
+    assert.equal((await database.query("SELECT count(*)::int AS n FROM early_access_signups WHERE app='shop'")).rows[0].n, 0);
+    for (const role of ['ops', 'client']) checked(await api(role, 'PATCH', '/settings', {
+      expectedVersion: before.version, reason: 'Confirm deployment', shopEarlyAccessEnabled: true,
+    }), 403);
+    checked(await api('desk', 'PATCH', '/settings', { expectedVersion: before.version, reason: 'Confirm deployment', shopEarlyAccessEnabled: true }), 401);
+    checked(await api('admin', 'PATCH', '/settings', { expectedVersion: before.version, reason: 'Confirm deployment', shopEarlyAccessEnabled: 'true' }), 400);
+    checked(await api('admin', 'PATCH', '/settings', { expectedVersion: before.version, shopEarlyAccessEnabled: true }), 400);
+    checked(await api('admin', 'PATCH', '/settings', { expectedVersion: -1, reason: 'Confirm deployment', shopEarlyAccessEnabled: true }), 409);
+    checked(await api('admin', 'PATCH', '/settings', { expectedVersion: before.version, reason: 'All API consumers replaced', shopEarlyAccessEnabled: true }));
+    assert.equal(checked(await api('admin', 'GET', '/settings')).settings.shopEarlyAccessEnabled, true);
+  });
+
   await t.test('same email can join both apps; shop duplicates preserve first consent and shop name', async () => {
     const shop = checked(await post({ ...input, app: 'shop', shopName: '  Example printing  ' }));
     assert.equal(shop.app, 'shop'); assert.equal(shop.duplicate, false);
@@ -405,6 +452,47 @@ test('early access HTTP and PostgreSQL contract with durable notifications and m
     await createEarlyAccessEmailWorker({ database, mailer, env: { EARLY_ACCESS_TEAM_EMAIL: 'team@example.test' } })();
     assert.match(sent.find(mail => mail.to === 'manual-shop@example.test').subject, /shop/i);
     assert.equal((await database.query("SELECT count(*)::int AS n FROM early_access_email_outbox WHERE status='pending'")).rows[0].n, 0);
+  });
+
+  await t.test('current retry repairs an unscoped legacy shop grant and resends a distinct supplier invite once', async () => {
+    const legacy = await legacyEarlyAccess();
+    const signup = checked(await post({ ...input, email: 'repair@example.invalid', app: 'shop' }));
+    const row = (await database.query('SELECT * FROM early_access_signups WHERE token=$1', [signup.token])).rows[0];
+    const oldGrant = await legacy.grantEarlyAccess(database, row.id, { id: 'ops', role: 'ops_admin' });
+    const oldMail = [];
+    const capture = sent => ({ configured: true, async sendEarlyAccessEmail(mail) { sent.push(mail); return { sent: true }; } });
+    await legacy.createEarlyAccessEmailWorker({ database, mailer: capture(oldMail), env: { EARLY_ACCESS_TEAM_EMAIL: 'team@example.invalid' } })();
+    const wrongInvite = oldMail.find(mail => mail.to === row.email);
+    assert.match(wrongInvite.text, /ph\.gridgo\.next/);
+    const oldOutbox = (await database.query("SELECT * FROM early_access_email_outbox WHERE signup_id=$1 AND kind='access'", [row.id])).rows[0];
+    await database.transaction(() => database.query("UPDATE tester_program_settings SET opt_in_url='https://play.google.com/apps/testing/ph.gridgo.client_rotated' WHERE app='client'"));
+    await assert.rejects(grantEarlyAccess(database, row.id, { id: 'ops', role: 'ops_admin' }, {
+      groups: { configured: () => true, async addMember() { throw new Error('mock provider failure'); } },
+    }), { status: 503, code: 'google_group_unavailable' });
+    assert.equal((await database.query('SELECT opt_in_url FROM early_access_signups WHERE id=$1', [row.id])).rows[0].opt_in_url, 'https://play.google.com/apps/testing/ph.gridgo.next');
+    const grant = checked(await api('ops', 'POST', `/ops/early-access/${row.id}/grant`, {}));
+    assert.equal(grant.status, 'granted');
+    const status = checked(await api(null, 'GET', `/early-access/status?token=${signup.token}`));
+    assert.equal(status.optInUrl, 'https://play.google.com/apps/testing/ph.gridgo.changed');
+    const fixedOutbox = (await database.query("SELECT * FROM early_access_email_outbox WHERE signup_id=$1 AND kind='access'", [row.id])).rows[0];
+    assert.notEqual(fixedOutbox.id, oldOutbox.id); assert.equal(fixedOutbox.status, 'pending'); assert.equal(fixedOutbox.attempts, 0);
+    assert.equal((await database.query("SELECT count(*)::int AS n FROM audit_log WHERE action='early_access.grant_repaired' AND entity_id=$1", [row.id])).rows[0].n, 1);
+    const notices = (await database.query("SELECT user_id FROM notifications WHERE data->>'occurrenceKey' LIKE $1 ORDER BY user_id", [`${row.id}:grant-repaired:%`])).rows;
+    assert.deepEqual(notices.map(row => row.user_id), ['admin', 'ops']);
+    await database.transaction(() => database.query("UPDATE tester_program_settings SET opt_in_url='https://play.google.com/apps/testing/ph.gridgo.supplier_rotated' WHERE app='supplier'"));
+    assert.deepEqual(checked(await api('ops', 'POST', `/ops/early-access/${row.id}/grant`, {})), grant);
+    assert.equal(checked(await api(null, 'GET', `/early-access/status?token=${signup.token}`)).optInUrl, status.optInUrl);
+    const corrected = [];
+    await createEarlyAccessEmailWorker({ database, mailer: capture(corrected), env: { EARLY_ACCESS_TEAM_EMAIL: 'team@example.invalid' } })();
+    const invite = corrected.find(mail => mail.to === row.email);
+    assert.match(invite.subject, /shop/i); assert.ok(invite.text.includes(status.optInUrl)); assert.notEqual(invite.messageId, wrongInvite.messageId);
+    assert.equal(corrected.filter(mail => mail.to === row.email).length, 1);
+    const settings = checked(await api('admin', 'GET', '/settings'));
+    checked(await api('admin', 'PATCH', '/settings', { expectedVersion: settings.version, reason: 'Disable enrollment', shopEarlyAccessEnabled: false }));
+    checked(await post({ ...input, email: row.email, app: 'shop' }), 409);
+    checked(await api('ops', 'POST', `/ops/early-access/${row.id}/grant`, {}), 409);
+    checked(await post({ ...input, email: 'still-customer@example.invalid' }));
+    await createEarlyAccessEmailWorker({ database, mailer: capture([]), env: { EARLY_ACCESS_TEAM_EMAIL: 'team@example.invalid' } })();
   });
 });
 

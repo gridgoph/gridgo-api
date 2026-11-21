@@ -40,14 +40,20 @@ export function validateEarlyAccess(body) {
 async function queueMail(database, signupId, kind) {
   await database.query('INSERT INTO early_access_email_outbox(id,signup_id,kind) VALUES($1,$2,$3)', [randomUUID(), signupId, kind]);
 }
-async function audit(database, actor, action, row, at) {
+async function requireShopActivation(database, app) {
+  if (app !== 'shop') return;
+  const { rows: [row] } = await database.query("SELECT settings->'shopEarlyAccessEnabled' = 'true'::jsonb AS enabled FROM platform_settings WHERE singleton");
+  if (row?.enabled !== true) fail(409, 'shop_early_access_disabled');
+}
+async function audit(database, actor, action, row, at, detail = {}) {
   await appendTesterProgramAudit(database, { actor, action, entityType: 'early_access_signup', entityId: row.id,
-    detail: { status: row.status, platform: row.platform, app: row.app } }, at);
+    detail: { status: row.status, platform: row.platform, app: row.app, ...detail } }, at);
 }
 
 export async function createEarlyAccessSignup(database, body, { notifyStaff, kickMail = () => {} } = {}) {
   const input = validateEarlyAccess(body);
   return database.transaction(async () => {
+    await requireShopActivation(database, input.app);
     let row = (await database.query('SELECT * FROM early_access_signups WHERE email=$1 AND app=$2', [input.email, input.app])).rows[0];
     const duplicate = Boolean(row);
     if (!row) {
@@ -70,8 +76,17 @@ export async function grantEarlyAccess(database, signupId, actor, { notifyStaff,
   return database.transaction(async () => {
     let row = (await database.query('SELECT * FROM early_access_signups WHERE id=$1 FOR UPDATE', [signupId])).rows[0];
     if (!row) fail(404, 'not_found');
+    await requireShopActivation(database, row.app);
     if (row.app === 'shop' && row.platform === 'iphone') fail(409, 'shop_android_only');
-    if (row.status !== 'granted') {
+    // An immutable, timestamp-bound app-aware grant audit proves the stored
+    // snapshot came from this implementation. Legacy grants have no app detail;
+    // repair them once even if the client Play URL has changed since that grant.
+    const repair = row.app === 'shop' && row.status === 'granted' && !(await database.query(`
+      SELECT 1 FROM audit_log WHERE entity_type='early_access_signup' AND entity_id=$1
+        AND action IN ('early_access.granted','early_access.grant_repaired') AND at=$2::timestamptz
+        AND data #>> '{detail,app}'='shop' LIMIT 1`, [row.id, row.granted_at])).rowCount;
+    if (row.status !== 'granted' || repair) {
+      const previous = repair ? { previousOptInUrl: row.opt_in_url, previousGrantedAt: iso(row.granted_at), previousGrantedBy: row.granted_by } : {};
       // Customer enrollment stays manual. An unset supplier Group safely uses
       // the same staff-managed enrollment; configured provider failures may retry.
       if (row.app === 'shop' && groups.configured('supplier')) {
@@ -81,10 +96,15 @@ export async function grantEarlyAccess(database, signupId, actor, { notifyStaff,
       const at = new Date().toISOString();
       row = (await database.query(`UPDATE early_access_signups SET status='granted',granted_at=$2,granted_by=$3,opt_in_url=$4
         WHERE id=$1 RETURNING *`, [signupId, at, actor.id, optInUrl])).rows[0];
-      await audit(database, actor, 'early_access.granted', row, at);
-      if (row.platform === 'android') await queueMail(database, row.id, 'access');
-      await notifyStaff?.({ type: 'ops_early_access_granted', title: `${row.platform === 'iphone' ? 'iPhone' : 'Android'}${row.app === 'shop' ? ' shop' : ''} tester early access was granted`,
-        occurrenceKey: row.id, resource: 'early-access', id: row.id });
+      await audit(database, actor, repair ? 'early_access.grant_repaired' : 'early_access.granted', row, at, previous);
+      if (repair) {
+        // A distinct Message-ID allows a corrective invite after an old worker
+        // already sent the wrong one, and invalidates the previous mail lease.
+        await database.query(`INSERT INTO early_access_email_outbox(id,signup_id,kind) VALUES($1,$2,'access')
+          ON CONFLICT(signup_id,kind) DO UPDATE SET id=EXCLUDED.id,status='pending',attempts=0,next_at=now(),created_at=now()`, [randomUUID(), row.id]);
+      } else if (row.platform === 'android') await queueMail(database, row.id, 'access');
+      await notifyStaff?.({ type: 'ops_early_access_granted', title: `${row.platform === 'iphone' ? 'iPhone' : 'Android'}${row.app === 'shop' ? ' shop' : ''} tester early access ${repair ? 'invite was corrected' : 'was granted'}`,
+        occurrenceKey: repair ? `${row.id}:grant-repaired:${at}` : row.id, resource: 'early-access', id: row.id });
       if (row.platform === 'android') database.afterCommit(kickMail);
     }
     return staffRow(row);

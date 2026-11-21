@@ -19,6 +19,92 @@ existing Play settings apps `client` and `supplier`, respectively.
 Existing in-app enrollment and Google Play target measurements are unchanged;
 see [Play opt-in](PLAY_OPTIN_API.md).
 
+## Activation and mixed-version rollout
+
+`shopEarlyAccessEnabled` is an operational setting, default **false** (including
+existing settings rows that omit it). New-code shop signups and grants return
+`409 shop_early_access_disabled` until it is exactly boolean true. The check reads
+PostgreSQL inside the same domain-locked mutation as signup/grant, so a disable
+cannot race a new signup. Customer signup, recovery, grants and mail stay enabled.
+
+Only Super Admin can change it, using the existing settings handshake:
+
+```json
+{ "expectedVersion": 4, "reason": "Confirmed all API and mail consumers replaced", "shopEarlyAccessEnabled": true }
+```
+
+Read the current `version` from authenticated `GET /settings`, then send the body
+to `PATCH /settings`. Operations cannot enable it (including alongside their
+countdown exception); the support desk has no settings authority. A non-boolean
+value returns `400 invalid_shop_early_access_enabled`; the existing reason and
+version-conflict errors still apply. Missing/false keeps both Android and iPhone
+shop requests closed; existing customer builds need no update.
+
+Production's checked-in compose defines one stable `gridgo-api` container,
+with migration/seed one-shots and no separate mail-worker service. The email
+worker is created in `src/server.js` and called by that process's startup/lifecycle
+work and after-commit kicks. Replacing/stopping that container stops its worker.
+The old API may remain alive while migrations run: the single-container topology
+alone does not close the migration interval. No live server process inventory was
+performed by this repository change.
+
+Roll out in this order:
+
+1. Keep the setting absent/false; apply migrations and deploy the new API.
+2. Confirm the running API's `/health.commit` is the reviewed release and the
+   intended single API container was replaced. Confirm no old API replica,
+   standalone mail worker or ad-hoc old Node process still uses this database.
+   The normal compose layout has no independent early-access worker to replace.
+3. Only then let Super Admin enable the setting with the version/reason handshake.
+   Enable the website shop form after that. Never run a pre-app API/worker against
+   shop records after activation.
+
+Rollback below this release requires the setting disabled and **no ungranted
+shop rows**. This is necessary but not sufficient: granted shop rows also match
+old email-only customer lookups. Therefore an old binary is safe only when there
+are **no shop rows or shop mail intents at all**. Check before rollback; never
+purge consent/grant/audit history to make this pass. Once shop data exists, keep
+an app-aware binary and roll forward, or retain a compatibility release that
+scopes its old customer readers/workers. A shop iPhone notify-only row is pending
+and also prevents old-binary rollback. Disabling enrollment does not cancel
+already queued shop mail; keep the new worker until it drains.
+
+Read-only rollback preflight against the intended deployment database:
+
+```sql
+SELECT COALESCE(settings->'shopEarlyAccessEnabled','false'::jsonb) AS enabled
+FROM platform_settings WHERE singleton;
+SELECT count(*) AS shop_rows,
+       count(*) FILTER (WHERE status<>'granted') AS ungranted_shop_rows
+FROM early_access_signups WHERE app='shop';
+SELECT count(*) AS shop_mail_intents
+FROM early_access_email_outbox o JOIN early_access_signups s ON s.id=o.signup_id
+WHERE s.app='shop';
+```
+
+The flag must be false and all three counts zero for a pre-app binary. Nonzero
+counts mean keep app-aware code, not a destructive database cleanup.
+
+### Repairing an unscoped legacy shop grant
+
+A retry through the current grant endpoint recognizes an unscoped legacy shop
+grant from the absence of a timestamp-bound `early_access.granted` or
+`early_access.grant_repaired` audit whose detail identifies `app=shop`. It reruns
+configured supplier Group enrollment, snapshots the current supplier link,
+records the correcting actor/time plus the previous grant facts in a new immutable
+`early_access.grant_repaired` audit, and notifies current ops/super memberships.
+This works even if the client link has rotated since the bad grant.
+
+The access outbox intent is requeued with a fresh ID/Message-ID and reset retry
+budget, so a correct shop invite can follow one already delivered with customer
+copy. A provider failure rolls back all local repair facts/mail intent and returns
+`503 google_group_unavailable`. A successful external Group add remains safely
+repeatable. Once the app-aware grant audit exists, retries remain idempotent and
+keep the repaired snapshot even if Play settings later change. Existing app-aware
+shop grants and every customer grant retain their snapshots unchanged. Repair is
+available only while shop early access is enabled and old consumers are gone;
+it cannot recall an incorrectly delivered email.
+
 ## Public routes
 
 The existing exact-origin `CORS_ALLOWED_ORIGINS` policy applies, as for issue
@@ -163,11 +249,12 @@ Use `app` for the app column/filter, `shopName` for the optional shop name,
 `createdAt` for date, `email`, `platform` (labels **Android**/**iPhone**),
 `source` for the referral code, and `status` for **Pending**/**Added**. The API
 keeps the existing `pending|granted` vocabulary; **Added** maps to `granted`.
+Shop signup/grant activation errors are `409 shop_early_access_disabled`.
 Grant needs no JSON fields. It returns `200` with the single staff row above,
 updated to `granted`. `grantedBy` is the GRIDGO actor ID for ops/super or the
 verified Clerk subject for desk operators. Unknown/malformed IDs return
-`404 not_found`. A repeated grant returns the original decision without a second
-audit event or email. For Android, the matching client/supplier `optInUrl` from
+`404 not_found`. A repeated app-aware grant returns the original decision without a second
+audit event or email. Unscoped legacy shop grants use the one-time repair above. For Android, the matching client/supplier `optInUrl` from
 `/ops/testers/settings` is snapshotted at grant, so the status page and invite email agree after settings
 changes. Granting neither starts nor proves Google's 14-day testing clock.
 Customer iPhone grants do not read Play settings, store a Play link, or queue a Play
