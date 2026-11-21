@@ -130,7 +130,7 @@ export function recordVerificationRecovery(store,order,ctx) {
   if(order.cash||order.reviewData||supplierVerified(store,order.supplierId))return false;
   const key=`recovery:${order.id}`;
   if(ledgerFor(store,order.supplierId).some(e=>e.payoutKey===key))return false;
-  const amountMinor=sum(paidEvents(store,order.supplierId).filter(e=>e.orderId===order.id).map(e=>e.data?.netAmountMinor??e.amountMinor));
+  const amountMinor=sum(paidEvents(store,order.supplierId).filter(e=>e.orderId===order.id).map(e=>e.amountMinor));
   if(!amountMinor)return false;
   append(store,{supplierId:order.supplierId,orderId:order.id,key,kind:'recovery_due',amountMinor},ctx);return true;
 }

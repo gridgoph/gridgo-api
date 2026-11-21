@@ -176,3 +176,12 @@ test('ledger decode uses canonical money columns and stable positions when Postg
   assert.equal(verificationSummary(s,'shop',when(2)).remainingCapMinor,100000);
   assert.equal(prepare(s,order(s,'after-decode',100000)).status,'ready');
 });
+
+test('cancelling a stage paid by recovery offset restores its full value instead of erasing older debt',()=>{
+  const s=fixture(),a=order(s,'debt-source',100000);pay(s,a);a.state='cancelled';
+  recordVerificationRecovery(s,a,{at:when(2),actor,id});
+  const b=order(s,'offset-job',100000);assert.equal(pay(s,b).netAmountMinor,0);
+  assert.equal(verificationSummary(s,'shop',when(2)).recoveryDueMinor,0);
+  b.state='cancelled';recordVerificationRecovery(s,b,{at:when(2),actor,id});
+  assert.equal(verificationSummary(s,'shop',when(2)).recoveryDueMinor,100000);
+});
