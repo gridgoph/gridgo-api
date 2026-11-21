@@ -20,13 +20,14 @@ export const OWNER_ROUTES = [
   ['GET','/me/payout-account'], ['PUT','/me/payout-account'], ['PATCH','/me/payout-account'],
   ['DELETE','/me/payout-account'], ['GET','/users/supplier/payout-account'], ['PATCH','/users/supplier/shop'], ['GET','/users/supplier/verification-documents'],
   ['GET','/me/availability'], ['PUT','/me/availability'], ['GET','/payouts'], ['GET','/me/earnings'], ['GET','/me/reports'], ['GET','/me/shop-failures'],
-  ['GET','/me/shop-team'], ['POST','/me/shop-team/invites'], ['PATCH','/me/shop-team/members/supplier'],
+  ['POST','/me/shop-team/invites'], ['PATCH','/me/shop-team/members/supplier'],
   ['DELETE','/me/shop-team/members/supplier'], ['DELETE','/me/shop-team/invites/x'],
   ['GET','/me/supplier-invoices'], ['GET','/me'], ['PATCH','/me'], ['GET','/users/supplier'],
   ['GET','/orders/order/invoice'], ['GET','/orders/order/audit'], ['POST','/orders/order/milestones/printing/release'],
   ['POST','/orders/order/shop-cancel'], ['POST','/orders/order/reschedule-request'], ['POST','/orders/order/payments/initial/confirm'],
 ];
 export const STAFF_ROUTES = [
+  ['GET','/me/shop-team'],
   ['GET','/orders'], ['GET','/orders/order'], ['GET','/jobs'], ['POST','/orders/order/transition'],
   ['POST','/orders/order/decline'], ['POST','/orders/order/production-finished'],
   ['GET','/orders/order/client-shop-chat'], ['POST','/orders/order/client-shop-chat/messages'],

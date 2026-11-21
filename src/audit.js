@@ -10,7 +10,7 @@ export function setAuditActor(actor) { if (context.getStore()) context.getStore(
 
 // Audit evidence is a business projection, never a copy of request bodies or files.
 // Defense in depth also applies to the legacy detail objects supplied by writers.
-const PRIVATE_KEY = /token|secret|password|authorization|cookie|clerkUserId|sessionId|objectKey|downloadUrl|uploadUrl|signedUrl|otp|credential|qrPayload|qrToken|inviteCode|codeHash|email|phone|address|documents?|permit|license|licence|birth|guardian|signature|artworkLinks|artworkAttachments|bankAccount|accountNumber|^text$|^resolution$|^details$|^bytes$|^base64$/i;
+const PRIVATE_KEY = /token|secret|password|^pin$|pinHash|authorization|cookie|clerkUserId|sessionId|objectKey|downloadUrl|uploadUrl|signedUrl|otp|credential|qrPayload|qrToken|inviteCode|codeHash|email|phone|address|documents?|permit|license|licence|birth|guardian|signature|artworkLinks|artworkAttachments|bankAccount|accountNumber|^text$|^resolution$|^details$|^bytes$|^base64$/i;
 export function safeAuditValue(value, depth = 0) {
   if (depth > 12) return '[omitted]';
   if (value == null) return null;
@@ -69,7 +69,7 @@ function sourceContext() {
 }
 export function appendAudit(store, { actor, action, entityType, entityId, orderId, detail, reason, before, after }, { id = () => `aud_${randomUUID()}`, at = new Date().toISOString() } = {}) {
   const entry = { id: id('aud'), at, actorId: actor?.role === 'system' ? null : actor?.actorUserId || actor?.id || null,
-    actorRole: actor?.role || 'system', ...(actor?.shopRole ? { actorShopRole: actor.shopRole } : {}), actorName: actor?.actorName || actor?.name || (actor?.role === 'system' || !actor ? 'System' : null),
+    actorRole: actor?.role || 'system', ...(actor?.actorPinStaffId ? {actorPinStaffId:actor.actorPinStaffId} : {}), ...(actor?.shopRole ? { actorShopRole: actor.shopRole } : {}), actorName: actor?.actorName || actor?.name || (actor?.role === 'system' || !actor ? 'System' : null),
     action, entityType: entityType || null, entityId: entityId || null, orderId: orderId || null,
     detail: detail ?? null, reason: reason ?? null, ...(before !== undefined ? { before } : {}), ...(after !== undefined ? { after } : {}), ...sourceContext() };
   (store.auditLog ||= []).push(entry);
@@ -88,6 +88,7 @@ export function finalizeAuditEntries(store, baseline) {
       entry.actorName = active.actorName || active.name;
       entry.actorRole = active.role;
       if (active.shopRole) entry.actorShopRole = active.shopRole;
+      if(active.actorPinStaffId) entry.actorPinStaffId=active.actorPinStaffId;
     }
 
     entry.actorName ||= actor?.name || (entry.actorId ? null : 'System');

@@ -1,3 +1,4 @@
+import { teamPhotoReadable } from './shop-team-work.js';
 import { activeAcknowledgementHandover } from './acknowledgement-receipts.js';
 import { assignmentTime } from './rider-tracking.js';
 import { assertStaffFile, isShopStaff, actorUserId } from './shop-team.js';
@@ -43,6 +44,7 @@ const KINDS = new Set([
   "supplier_invoice",
   "service_image",
   "catalog_item_photo",
+  "shop_team_photo",
   "supplier_shop_image",
   "announcement_image",
   "payment_qr",
@@ -108,6 +110,7 @@ export const PURPOSE_POLICIES = Object.freeze({
     maxBytes: 20 * 1024 * 1024,
     contentTypes: ["image/jpeg", "image/png", "image/webp"],
   },
+  shop_team_photo: {roles:['supplier'],maxBytes:5*1024*1024,contentTypes:['image/jpeg','image/png','image/webp']},
   catalog_item_photo: {
     roles: ["supplier"],
     maxBytes: 15 * 1024 * 1024,
@@ -856,6 +859,7 @@ export function resolveFileTarget(store, purpose, body, user = null) {
       "A pick-up chat photo is bound when the message is sent: send its fileId in attachmentFileIds to POST /orders/:id/pickup-chat/messages.",
     );
   }
+  if (purpose==='shop_team_photo') fail(400,'shop_team_photo_not_attachable','Save this photo through the shop team member route.');
   if (!KINDS.has(purpose)) {
     fail(400, "invalid_file_purpose", "Choose one supported file purpose and try again.");
   }
@@ -1388,6 +1392,10 @@ export function authorizeFileRead(user, store, file) {
     fail(404, "file_not_found", "That ready file no longer exists. Refresh the record and try again.");
   }
   if (!user) forbidden();
+  if (file.purpose==='shop_team_photo') {
+    if(user.role==='supplier' && teamPhotoReadable(store,file,user,user.id))return;
+    forbidden();
+  }
   if (file.purpose.startsWith('cash_')) {
     if (['ops_admin','super_admin'].includes(user.role) || file.ownerId===user.id) return;
     if (file.purpose==='cash_remedy_receipt' && user.role==='client' && (file.references||[]).some(r=>r.type==='cash' && r.clientId===user.id)) return;
