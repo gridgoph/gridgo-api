@@ -178,3 +178,18 @@ test('legacy handover cannot close an Express counter order without its verified
  assert.throws(()=>completeHandover(store,order,{actor:{id:'ops'},at:AT,id:p=>p}),e=>e.code==='express_pickup_code_required');
  assert.equal(order.state,'awaiting_collection');
 });
+
+
+test('shop-wide Express pause excludes new drafts and replacement matching without rewriting listing preferences',async()=>{
+ const {store,client}=setup();
+ const profile=store.supplierProfiles.find(p=>p.userId==='shop_a');
+ const listingFlags=store.catalogItems.map(item=>item.express);
+ profile.expressEnabled=false;
+ assert.equal(expressShopList(store,client,{location:{lat:7.064,lng:125.6085}},AT).some(row=>row.supplierId==='shop_a'),false);
+ const {caller}=await import('./fixtures/scheduling.js');
+ const call=caller(store,client,AT);
+ await assert.rejects(call('POST','/express/drafts',{supplierId:'shop_a',location:{lat:7.064,lng:125.6085},fulfillmentMode:'pickup',files:[{fileId:'file_art',copies:1,colour:'bw',paper:'a4',sides:'one',layout:'fit_to_paper'}]}),error=>error.code==='express_shop_unavailable');
+ profile.expressEnabled=true;
+ assert.equal(expressShopList(store,client,{location:{lat:7.064,lng:125.6085}},AT).some(row=>row.supplierId==='shop_a'),true);
+ assert.deepEqual(store.catalogItems.map(item=>item.express),listingFlags);
+});

@@ -1,3 +1,4 @@
+import { expressOfferCopy } from './express-offers.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { clerkClientProfile } from './auth.js';
 import { identityHasMembership, selectActorRole } from './authorization-context.js';
@@ -57,7 +58,7 @@ export function staffRouteAllowed(method, path) {
   if (['POST', 'PATCH', 'DELETE'].includes(method) && /^\/notifications\/[^/]+(?:\/read)?$/.test(path)) return true;
   if (method === 'GET' && /^\/orders\/[^/]+$/.test(path)) return true;
   if (method === 'GET' && /^\/dispatch\/[^/]+\/location$/.test(path)) return true;
-  if (method === 'POST' && /^\/orders\/[^/]+\/(transition|decline|production-finished)$/.test(path)) return true;
+  if (method === 'POST' && /^\/orders\/[^/]+\/(transition|decline|production-finished|express\/(accept|decline|pickup)|files\/[^/]+\/access)$/.test(path)) return true;
   if (['GET', 'POST'].includes(method) && /^\/orders\/[^/]+\/(client-shop-chat|pickup-chat)(?:\/messages(?:\/[^/]+\/reports)?)?$/.test(path)) return true;
   if (method === 'POST' && path === '/files') return true;
   if (method === 'GET' && /^\/files\/[^/]+(?:\/(download-url|preview-url))?$/.test(path)) return true;
@@ -273,11 +274,30 @@ export async function routeShopTeam({ req, url, store, user, readBody, id, now, 
 export function notifyShopStaff(store, baseline, { id }) {
   const previous = new Set((baseline?.notifications || []).map(row => row.id));
   for (const notification of [...store.notifications]) {
-    if (previous.has(notification.id) || notification.type !== 'shop_job_assigned' || notification.shopTeamCopy) continue;
-    for (const member of store.shopMemberships || []) {
-      if (member.shopId !== notification.userId || member.userId === member.shopId || member.status !== 'active') continue;
-      store.notifications.push({ ...notification, id: id('ntf'), userId: member.userId, shopId: member.shopId, shopTeamCopy: true,
-        occurrenceKey: `${notification.occurrenceKey || notification.id}:${member.userId}` });
+    if (previous.has(notification.id) || !['shop_job_assigned', 'shop_express_offer'].includes(notification.type) || notification.shopTeamCopy) continue;
+    const shopId = notification.shopId || notification.userId;
+    if (notification.type === 'shop_express_offer') notification.shopId = shopId;
+    const source = structuredClone(notification);
+    const members = (store.shopMemberships || []).filter(member => member.shopId === shopId && member.status === 'active');
+    const copyFor = member => {
+      const copy = structuredClone(source);
+      if (member.role === 'staff' && copy.expressOffer) {
+        delete copy.expressOffer.earningsMinor;
+        Object.assign(copy, expressOfferCopy(copy.expressOffer, copy.at));
+      }
+      return copy;
+    };
+    // Keep the original inbox ID, but derive its Express copy from the person's
+    // current role. Other Owners still need the original earnings-bearing source.
+    const original = members.find(member => member.userId === notification.userId);
+    if (notification.type === 'shop_express_offer' && original?.role === 'staff') {
+      Object.assign(notification, copyFor(original));
+    }
+    for (const member of members) {
+      if (member.userId === notification.userId) continue;
+      const occurrenceKey = `${source.occurrenceKey || source.id}:${member.userId}`;
+      if (store.notifications.some(row => row.shopTeamCopy && row.shopId === shopId && row.userId === member.userId && row.occurrenceKey === occurrenceKey)) continue;
+      store.notifications.push({ ...copyFor(member), id: id('ntf'), userId: member.userId, shopId, shopTeamCopy: true, occurrenceKey });
     }
   }
 }

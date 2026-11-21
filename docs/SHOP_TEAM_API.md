@@ -255,12 +255,14 @@ inspection and handover guards still apply.
 | Work | Allowed routes |
 | --- | --- |
 | Order list/details/specs | `GET /jobs`, `GET /orders`, `GET /orders/:id` |
+| Accept/decline/collect Express | `POST /orders/:id/express/accept`, `/decline`, `/pickup` (same work and counter-code guards) |
 | Accept a paid matched order | `POST /orders/:id/transition` with `{"state":"payment_authorized"}` |
 | Decline a new order | `POST /orders/:id/decline` with the existing reason body |
 | Production / mark ready | `POST /orders/:id/transition` for permitted production/readiness states; `POST /orders/:id/production-finished` |
 | Client conversation | `GET /orders/:id/client-shop-chat`, `POST /orders/:id/client-shop-chat/messages`, existing message-report subroute |
 | Rider handoff conversation | `GET /orders/:id/pickup-chat`, `POST /orders/:id/pickup-chat/messages` |
 | Assigned pickup rider location | `GET /dispatch/:id/location` under existing state/privacy rules |
+| File access observations | `POST /orders/:id/files/:fileId/access`; job reads expose shop-scoped `fileAccesses` |
 | Order files | `POST /files`; `GET /files/:id`, `/download-url`, `/preview-url`; `POST /files/:id/attach`, `/preview`, `/preview-failure` |
 | Personal notification transport | Existing `/notifications`, `/notifications/stream`, read/delete routes, `/devices`, `/devices/unregister`, `/web-push/public-key`, `/web-push/subscribe`, `/web-push/unsubscribe`, `/auth/logout` |
 
@@ -268,7 +270,7 @@ Staff transition JSON accepts only `state`, `note`, `reason`,
 `specialInstructionsRead`. Price edits, quote negotiation (`supplier_accepted`),
 promises, reassignment and payment changes remain Owner-only. Legacy unpriced
 orders need an Owner to quote; current paid matching uses `payment_authorized`.
-Staff may hand work to the rider after the same QA/readiness checks as the Owner;
+Staff may hand work to the rider after the same readiness checks as the Owner (Express document readiness omits shop photos/product QA; `EXPRESS_API.md`);
 inspection, packed-photo evidence and signed pickup remain the assigned rider's
 existing routes. Staff cannot sign or confirm on the rider's behalf.
 
@@ -291,7 +293,7 @@ Per-day `schedule.weekdayOverrides` editing remains Owner-only on
 and feedback also require active Owner access; personal client/rider tester
 memberships retain their existing authorization. `POST /ops/orders/:id/remove`
 remains Super Admin-only, including when a shop Owner holds other roles.
-Staff order projections allow only work fields and remove nested prices,
+Staff order projections include Express work and a bounded `paymentMethod` label, allow only work fields and remove nested prices,
 payouts, earnings, payment/settlement snapshots and raw financial timeline notes.
 
 ## Actor history
@@ -324,8 +326,8 @@ The existing SSE stream also emits `event: access_revoked` with
 membership check at most every 25 seconds closes a stream even if a realtime
 invalidation is missed. A normal `identity` invalidation refreshes approval and
 role changes. Queued notifications recheck current access before delivery.
-Only existing `shop_job_assigned` notifications are additionally copied to
-active teammates; Owner payout/finance notifications are not copied. Push data
+New `shop_job_assigned` and `shop_express_offer` notifications are additionally copied to
+active teammates; Express Staff copies omit earnings; Owner payout/finance notifications are not copied. Push data
 and all existing Owner/client/rider notification behavior remain unchanged.
 
 ## Errors

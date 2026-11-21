@@ -1,4 +1,6 @@
-import { actorUserId } from './shop-team.js';
+import { notifyAdmins } from './domain-events.js';
+import { queueInvalidate } from './notifications.js';
+import { actorUserId, isShopStaff } from './shop-team.js';
 import { createInviteCode, publicTesterInvites } from './tester-invites.js';
 import { timingSafeEqual } from 'node:crypto';
 import { expressFail as fail, publicExpress, declineExpress, expressEvent, startExpressAcceptance } from './express-orders.js';
@@ -10,7 +12,24 @@ import { claimBlocksHandover } from './shop-handover.js';
 import { acknowledgeInstructions } from './special-instructions.js';
 import { isReviewData } from './review-data.js';
 
-export async function routeExpressOrders({req,url,store,user,readBody,id,now}) {
+export async function routeExpressOrders({req,url,store,user,readBody,id,now,audit}) {
+ if(url.pathname==='/me/express-settings' && ['GET','PATCH'].includes(req.method)) {
+   if(user?.role!=='supplier' || isShopStaff(user))fail(403,'shop_owner_required');
+   const profile=store.supplierProfiles.find(profile=>profile.userId===user.id);
+   if(!profile)fail(404,'shop_not_found');
+   const response=()=>({expressEnabled:profile.expressEnabled!==false,version:profile.version||1});
+   if(req.method==='GET')return {status:200,body:response()};
+   const body=await readBody(req);
+   if(!body||typeof body!=='object'||Array.isArray(body)||Object.keys(body).some(key=>!['expressEnabled','expectedVersion'].includes(key))
+     ||typeof body.expressEnabled!=='boolean'||!Number.isSafeInteger(body.expectedVersion))fail(400,'invalid_express_settings');
+   if(body.expectedVersion!==(profile.version||1))fail(409,'shop_profile_stale');
+   const before=response();profile.expressEnabled=body.expressEnabled;profile.version=(profile.version||1)+1;profile.updatedAt=now();
+   audit(store,{actor:user,action:'shop.express_settings_updated',entityType:'supplier_profile',entityId:user.id,before,after:response()});
+   notifyAdmins(store,'ops_express_settings_updated','Shop Express availability changed',null,`${user.id}:${profile.version}`,{createId:id,at:profile.updatedAt});
+   queueInvalidate(store,{resource:'catalog',userIds:[user.id]});
+   return {status:200,body:response(),mutated:true};
+ }
+
  if(url.pathname==='/me/express-friend-pass' && ['GET','POST'].includes(req.method)) {
    if(!store.userRoleMemberships.some(m=>m.userId===user?.id&&m.role==='client'))fail(403,'forbidden');
    if(req.method==='POST')createInviteCode(store,user.id,{at:now()});
