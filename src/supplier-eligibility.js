@@ -1,3 +1,4 @@
+import { shopPaused } from './shop-availability.js';
 import { supplierVerified, supplierCanWork, verificationSummary } from "./supplier-verification.js";
 /** Missing standing retains the legacy active-account default. */
 export function supplierAccountIsActive(accountStatus) {
@@ -5,7 +6,8 @@ export function supplierAccountIsActive(accountStatus) {
 }
 
 /** Shop gates shared by matching and the supplier's operational diagnostics. */
-export function supplierMatchBlockersFor(store, {at = new Date().toISOString()} = {}) {
+export function supplierMatchBlockersFor(store, clock = new Date().toISOString()) {
+  const at = typeof clock === "string" ? clock : clock?.at ?? new Date().toISOString();
   const accountStatuses = new Map((store.users || []).map(row => [row.id, row.accountStatus]));
   const members = new Set((store.userRoleMemberships || []).filter(row => row.role === "supplier").map(row => row.userId));
   return (supplierId, profile) => {
@@ -13,7 +15,7 @@ export function supplierMatchBlockersFor(store, {at = new Date().toISOString()} 
     if (!supplierAccountIsActive(accountStatuses.get(supplierId))) missing.push("account_inactive");
     if (!profile) missing.push("supplier_profile");
     else {
-      if (profile.isClosed === true) missing.push("shop_closed");
+      if (profile.isClosed === true || shopPaused(profile, at)) missing.push("shop_closed");
       if (!profile.shop) missing.push("shop_location");
     }
     if (!members.has(supplierId)) {

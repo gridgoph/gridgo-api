@@ -528,6 +528,11 @@ export function pushMessageFor(notification, env = process.env, { at = notificat
       category: "gridgo_express_offer", expiresAt: notification.expressOffer.acceptBy,
     };
   }
+  if (notification.type === 'printer_demand') return {
+    title: reviewPrefix + notification.title, body: notification.body, data, ...presentation,
+    ttlSeconds: Math.max(0, Math.floor((Date.parse(notification.expiresAt) - Date.parse(at)) / 1000)),
+    expiresAt: notification.expiresAt,
+  };
   // Fixed offer copy carries no customer, address, or money fields.
   if (notification.type === "dispatch_available") return {
     title: `${reviewPrefix}New delivery job`,

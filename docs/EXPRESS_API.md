@@ -429,3 +429,124 @@ Migration `1795069200000_express_reward_funding` retains the existing voucher
 money guard and adds one narrow exception for a verified delivery-reward wallet:
 exactly 5% delivery, zero service-fee/principal discount, delivery fulfillment
 only. It does not loosen ordinary voucher allocation or payout rules.
+
+## My shop status and night documents
+
+`GET /me/shop-status` is the compact My shop/status-sheet read. Use the Clerk
+bearer, `X-GRIDGO-Role: supplier` and the selected `X-GRIDGO-Shop-Id`. Active
+Owners and Staff may read; **Owners alone may write in this release**. Manager
+team permissions are a separate release; this does not grant a new role.
+
+The response is `{supplierId,shopName,version,hours,todayHours,isOpenNow,
+nextOpeningAt,expressEnabled,nightJobs,nightWindow,printerDemandPings,pausedUntil}`.
+`hours` is the existing shop-hours projection; `todayHours` contains today's
+Manila opening-minute windows (including a dated extension). `isOpenNow` also
+includes an enabled night window; a pause or temporary closure closes both.
+`nextOpeningAt` is null for a manually closed shop whose reopening is unknown.
+`nightWindow` is the current configured night interval `{night,startsAt,endsAt}`
+or null; actual availability additionally requires Express on, no pause/closure,
+approval, account standing and an eligible document listing. `pausedUntil` is null
+when a pause has expired. Reads never need a timer or a write to resume a shop.
+
+`PATCH /me/shop-status` takes `expectedVersion` plus any of:
+
+```json
+{
+  "expectedVersion": 1,
+  "temporarilyClosed": false,
+  "expressEnabled": true,
+  "nightJobs": "until_23",
+  "printerDemandPings": true,
+  "pause": "one_hour"
+}
+```
+
+`nightJobs` is `off` (default), `until_21`, `until_23`, or `all_night` and recurs
+on scheduled shop days. Night windows begin at the final effective closing time
+(after any weekday override or dated extension). They end exclusively at 21:00,
+23:00, or the following day's first scheduled opening for all night (08:00 if
+that following day has no scheduled opening). All night is a separate window
+that can cross midnight; existing production schedules still use daytime windows.
+Dated closures suppress night work on the closed date, including an overnight
+spill. A closing time at or after the chosen end produces no night window.
+All times use Asia/Manila. `pause` is `one_hour`, `today` (until the next Manila
+midnight), or null (resume). Pause never changes the separate manual closure,
+Express/listing preferences, prices, orders, or accepted promises. Pauses block
+new matching and checkout; existing work can finish.
+
+This shares the supplier-profile version with `/me/shop-hours`,
+`/me/supplier-profile` and `/me/express-settings`; refresh after `409
+shop_profile_stale`. Invalid fields are `400 invalid_shop_status`. The old
+Express switch and temporary-closure routes remain supported and synchronized.
+Changes audit the signed-in actor and enqueue durable admin notices atomically.
+
+Night matching accepts only enabled `document_printing`, `per_page` Express
+listings. It bypasses GRIDGO's daytime staff review calendar, because document
+Express already uses automatic file checks and skips staff readiness review.
+Queue and listing turnaround must fit in the remaining night window; oversized
+work returns `409 express_night_capacity`. Accepted night promises/window facts
+are snapshotted, and ordinary/custom scheduling is unchanged. The snapshot also
+allows rider dispatch during that night window when a shop's daytime override
+would otherwise forbid it.
+
+`GET /express/shops?lat=...&lng=...&fulfillmentMode=pickup|delivery` adds
+`nightWindow` and `deliveryAvailable` to each shop. Omitted mode defaults to
+pickup for compatibility. Pickup at night goes directly to the shop, with the
+existing Express pickup code. **Delivery is offered only while GRIDGO's rider
+operating schedule is open**, and its estimated readiness must also fall in
+that schedule. Draft creation and checkout recheck the selected mode and actual
+listings' combined queue/turnaround projection, independently of the shop card's
+fastest listing. Replacement selection applies the same check to listings that
+actually support every accepted print setting. Dispatch still refuses new rider assignment outside that schedule; existing trips retain
+their custody-completion rules. No night staff or off-duty riders are required.
+
+### Opt-in demand pings
+
+The client app calls `POST /express/demand` with
+`{location:{lat,lng},fulfillmentMode:"pickup"}` when a signed-in client actively
+looks for document printing. Default mode is pickup. It always returns
+`{ok:true}` without recipient identities/counts. Suppliers cannot invoke it.
+There is no scheduled broadcast and no pings from a passive catalogue GET.
+
+Only approved, active, unpaused, open-for-night-Express shops with
+`printerDemandPings:true` and an eligible document listing within **5 km** of
+the requested location qualify. This includes home printers enrolled as shops;
+no new account type or approval bypass is introduced. Each shop gets at most
+**three pings per night**, with at most one per client per night. The night key
+is the Manila date the night began, so midnight does not reset the budget. New
+night = new budget; changing preferences or pausing does not reset it. Both the
+current and prior Manila night histories are retained, so editing
+hours across midnight and restoring them cannot reset either budget; older
+histories are pruned only after they are no longer reachable.
+
+`printer_demand` inbox rows go to current active Owners via the ordinary
+notification/save/outbox service. Push carries only the existing allowlisted
+notification ID/type/time, without client identity or location. Delivery rechecks
+opt-in, pause/closure, night window and recipient ownership; queued retries are
+suppressed after the deadline. Each send uses the earlier of the issued
+deadline and the current matching night window end for mobile expiry and
+browser TTL; shorter hours shorten retries, and later extensions never extend
+an already-issued notice. All implemented demand events also create current Operations/Super Admin inbox rows.
+
+### Supplier app and supplier web calls
+
+- My shop card/status sheet: `GET/PATCH /me/shop-status` as above. Staff get the
+  read-only status; disable all edits for Staff. Refresh on stale versions.
+- Hours pencil: existing `GET/PATCH /me/shop-hours`.
+- Products row/search: `GET /me/catalog-items` (existing pagination/search),
+  `POST /me/catalog-items` to add; `PATCH /me/catalog-items/:id` with
+  `expectedVersion` and `active:false|true` to hide/show. Hiding retains prices,
+  options and ready-time settings; it does not reopen price review.
+- Price/ready-time edits: the same PATCH with `basePriceMinor` and the existing
+  production-time fields, or the existing price-tier/option routes. Price edits
+  keep the governed listing-review contract.
+- Remove: `DELETE /me/catalog-items/:id` with `expectedVersion`; referenced
+  listings are archived and their accepted order-line snapshots still finish.
+- Team: existing `/me/shop-team` contract. This API change has no UI screens;
+  supplier app/web and client demand-call releases are companion work.
+
+Apply `1795290000000_shop_availability` before API deployment. Its nullable
+JSONB column is additive; old profile upserts omit it and preserve settings and
+ping budgets, without new CHECK constraints. During rolling deployment, enable
+the companion night/pause controls only after every API process runs this
+version: older binaries remain schema-compatible but cannot enforce new gates.

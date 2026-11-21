@@ -2,6 +2,8 @@ import { supplierCanWork, verificationSettings, verificationSummary,
   prepareVerificationPayout, completeVerificationPayout, recordVerificationRecovery, cancelVerificationReservation, reconcileVerificationHolds, remindSupplierVerification } from "./supplier-verification.js";
 import { supplierMatchBlockersFor } from "./supplier-eligibility.js";
 import { changePaymentsFor, changePayoutsFor } from "./order-change-policy.js";
+import { shopPaused } from './shop-availability.js';
+import { routeShopStatus } from './shop-status.js';
 import { routeShopFileAccess, recordShopFileAccess, fileAccessJobs } from './shop-file-access.js';
 import { isExpressDocumentOrder } from './express-offers.js';
 import { awardExpressFriendPass } from './express-rewards.js';
@@ -2220,7 +2222,7 @@ function eligibleSuppliersForOrder(store, order) {
   const results = [];
 
   for (const supplier of suppliers) {
-    if ((store.supplierProfiles || []).find(profile => profile.userId === supplier.id)?.isClosed) {
+    if ((store.supplierProfiles || []).find(profile => profile.userId === supplier.id)?.isClosed || shopPaused((store.supplierProfiles || []).find(profile => profile.userId === supplier.id), now())) {
       results.push({ supplier: publicUser(supplier), eligible: false, reasons: ['shop_closed'], matchingServiceIds: [], services: [] });
       continue;
     }
@@ -3564,6 +3566,11 @@ async function handleAuditedRequest(req, res) {
     if (fileAccessResponse) {
       await save(store);
       return send(res,fileAccessResponse.status,fileAccessResponse.body);
+    }
+    const shopStatusResponse = await routeShopStatus({req,url,store,user,readBody,id,now,audit});
+    if (shopStatusResponse) {
+      if (shopStatusResponse.mutated) await save(store);
+      return send(res, shopStatusResponse.status, shopStatusResponse.body);
     }
     const expressResponse=await routeExpressOrders({req,url,store,user,readBody,id,now,audit});
     if(expressResponse) {

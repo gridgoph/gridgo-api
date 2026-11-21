@@ -93,3 +93,24 @@ test('Express plan 4 persists independently of frozen regular plans', {skip:!pro
     await assert.rejects(db.transaction(()=>db.query("UPDATE payout_milestones SET amount_minor=9999 WHERE order_id='order'")),/invalid Express payout plan/);
   } finally {await db.close();}
 });
+
+test('pending shop demand delivery reloads setup eligibility and retains the shared pause gate', {skip:!process.env.DATABASE_URL},async()=>{
+  const {loadDeliveryStore}=await import('../src/postgres-store.js');
+  const {deviceAcceptsNotification}=await import('../src/push-outbox.js');
+  const db=createDatabase(process.env),at='2026-11-23T19:00:00+08:00';
+  try {
+    await setup(db);
+    await db.transaction(async()=>{const s=await loadStore(db),profile=s.supplierProfiles.find(p=>p.userId==='supplier');
+      s.userRoleMemberships.find(m=>m.userId==='supplier').createdAt='2026-11-22T00:00:00.000Z';
+      profile.availability={nightJobs:'until_21',printerDemandPings:true};
+      s.files.push({fileId:'demand-qr',ownerId:'supplier',purpose:'supplier_payout_qr',state:'ready',objectKey:'private/demand-qr',originalFilename:'qr.png',size:100,
+        declaredContentType:'image/png',detectedContentType:'image/png',createdAt:AT,references:[{type:'supplier_payout_account',id:'supplier',field:'qr'}]});
+      s.supplierPayoutAccounts.push({supplierId:'supplier',provider:'other',accountName:'Shop',qrFileId:'demand-qr',version:1,updatedAt:AT});
+      s.notifications.push({id:'pending-demand',userId:'supplier',shopId:'supplier',appRole:'supplier',type:'printer_demand',night:'2026-11-23',expiresAt:'2026-11-23T21:00:00+08:00',at,title:'Printing demand',body:'Nearby demand'});
+      await saveStore(db,s);});
+    const loaded=await loadDeliveryStore(db,{userIds:['supplier'],notificationIds:['pending-demand']}),device={userId:'supplier',appRole:'supplier',platform:'android'};
+    assert.equal(deviceAcceptsNotification(loaded,device,loaded.notifications[0],at),true);
+    loaded.supplierProfiles[0].availability.pausedUntil=new Date(Date.parse(at)+3600000).toISOString();
+    assert.equal(deviceAcceptsNotification(loaded,device,loaded.notifications[0],at),false);
+  }finally{await db.close();}
+});

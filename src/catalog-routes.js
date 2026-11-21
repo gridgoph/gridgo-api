@@ -597,8 +597,9 @@ function itemReferenced(store, itemId) {
 // Phone and email live on the account, not the shop record, but the app shows
 // them on one details screen, so both reads answer with the joined view.
 function privateSupplierProfile(store, profile, owner) {
+  const { availability, ...visibleProfile } = profile;
   return {
-    ...profile,
+    ...visibleProfile,
     phone: owner?.phone ?? null,
     email: owner?.email ?? null,
     media: (store.supplierShopMedia || []).filter((media) => media.supplierId === profile.userId),

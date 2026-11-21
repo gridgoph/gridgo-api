@@ -14,7 +14,7 @@ export function dispatchWorkHeld(store, order) {
 
 /** The shared pool has no distance, zone, or vehicle restriction. */
 export function availableDispatch(order, store, at = new Date().toISOString()) {
-  return Boolean(order && !(order.orderType === "express" && order.fulfillmentMode === "pickup") && shopDispatchOpen(order, at) && (!order.operatingClock || isOpenAt(operatingHours(store.settings).schedule, at)) && order.state === "ready_for_dispatch" && !order.riderId
+  return Boolean(order && !(order.orderType === "express" && order.fulfillmentMode === "pickup") && shopDispatchOpen(order, at) && (!(order.operatingClock || order.orderType === 'express') || isOpenAt(operatingHours(store.settings).schedule, at)) && order.state === "ready_for_dispatch" && !order.riderId
     && !isContainedPickup(order) && !dispatchWorkHeld(store, order));
 }
 
