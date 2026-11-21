@@ -402,6 +402,9 @@ test('early access HTTP and PostgreSQL contract with durable notifications and m
     const unconfigured = checked(await post({ ...input, email: 'manual-shop@example.test', app: 'shop' }));
     const manualRow = (await database.query('SELECT id FROM early_access_signups WHERE token=$1', [unconfigured.token])).rows[0];
     assert.equal(checked(await api('ops', 'POST', `/ops/early-access/${manualRow.id}/grant`, {})).status, 'granted');
+    await createEarlyAccessEmailWorker({ database, mailer, env: { EARLY_ACCESS_TEAM_EMAIL: 'team@example.test' } })();
+    assert.match(sent.find(mail => mail.to === 'manual-shop@example.test').subject, /shop/i);
+    assert.equal((await database.query("SELECT count(*)::int AS n FROM early_access_email_outbox WHERE status='pending'")).rows[0].n, 0);
   });
 });
 
