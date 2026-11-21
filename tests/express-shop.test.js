@@ -1,3 +1,4 @@
+import { ensureShopOwners } from '../src/shop-team-store.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fixture, AT } from './fixtures/reschedule.js';
@@ -7,6 +8,7 @@ import { pushMessageFor, fcmRequestBody } from '../src/push.js';
 import { staffRouteAllowed, notifyShopStaff } from '../src/shop-team.js';
 import { publicOrderFor } from '../src/operational-model.js';
 function express(store) {
+ ensureShopOwners(store);
  const order=store.orders[0];
  Object.assign(order,{orderType:'express',expressOrder:{version:1,events:[],printSettings:[{pages:{printed:4},copies:2}]},shopHandoverVersion:2,fileCheck:{status:'passed'},shopAcceptance:{status:'accepted'}});
  return order;
@@ -149,4 +151,52 @@ test('file-open observations infer their authorized job from the order file with
   now:()=>AT,audit:()=>{},authorizeFileRead:()=>{}});
  assert.equal(result.status,200);assert.equal(result.body.fileAccesses[0].jobId,'job');
  assert.equal(result.body.fileAccesses[0].userId,'other');
+});
+
+test('Express offers require active membership in their own shop, including the original shop account',async()=>{
+ const {notificationVisible}=await import('../src/notifications.js');
+ const {deviceAcceptsNotification}=await import('../src/push-outbox.js');
+ const store=fixture(),order=express(store);order.state='supplier_assigned';order.updatedAt=AT;
+ order.shopAcceptance={status:'pending',deadlineAt:'2026-10-05T00:05:00.000Z'};
+ const notice={...shopNotificationDraft(order),id:'removed_owner_offer',at:AT};
+ store.shopMemberships=[
+  {shopId:'supplier',userId:'supplier',role:'owner',status:'removed'},
+  {shopId:'supplier',userId:'replacement',role:'owner',status:'active'},
+  {shopId:'replacement',userId:'supplier',role:'staff',status:'active'},
+  {shopId:'replacement',userId:'replacement',role:'owner',status:'active'},
+ ];
+ const device={userId:'supplier',appRole:'supplier'};
+ assert.equal(notificationVisible(store,notice,'supplier','supplier'),false);
+ assert.equal(deviceAcceptsNotification(store,device,notice,AT),false);
+ const ownerCopy={...notice,userId:'replacement',shopId:'supplier'};
+ assert.equal(notificationVisible(store,ownerCopy,'replacement','supplier'),true);
+ assert.equal(notificationVisible(store,{...ownerCopy,shopId:'replacement'},'replacement','supplier'),false);
+ const unscopedCopy={...ownerCopy,shopTeamCopy:true};delete unscopedCopy.shopId;
+ assert.equal(notificationVisible(store,unscopedCopy,'replacement','supplier'),false);
+ assert.equal(notificationVisible(store,ownerCopy,'replacement','supplier',{shopId:'replacement'}),false);
+ assert.equal(deviceAcceptsNotification(store,device,{userId:'supplier',type:'role_changed'},AT),true);
+});
+
+test('original-account and invited Staff each receive one safe Express offer while active Owners keep earnings',async()=>{
+ const {notificationVisible}=await import('../src/notifications.js');
+ const {deviceAcceptsNotification}=await import('../src/push-outbox.js');
+ const store=fixture(),order=express(store);order.state='supplier_assigned';order.updatedAt=AT;
+ order.shopAcceptance={status:'pending',deadlineAt:'2026-10-05T00:05:00.000Z'};
+ store.notifications=[{...shopNotificationDraft(order),id:'demoted_offer',at:AT}];
+ store.shopMemberships=[
+  {shopId:'supplier',userId:'supplier',role:'staff',status:'active'},
+  {shopId:'supplier',userId:'other',role:'staff',status:'active'},
+  {shopId:'supplier',userId:'replacement',role:'owner',status:'active'},
+ ];
+ let serial=0;const options={id:()=>`team_offer_${++serial}`};
+ notifyShopStaff(store,{notifications:[]},options);
+ notifyShopStaff(store,{notifications:[]},options);
+ for(const userId of ['supplier','other','replacement']) {
+  const visible=store.notifications.filter(n=>notificationVisible(store,n,userId,'supplier'));
+  assert.equal(visible.length,1,userId);
+  assert.equal(deviceAcceptsNotification(store,{userId,appRole:'supplier'},visible[0],AT),true);
+  const message=pushMessageFor(visible[0]);
+  if(userId==='replacement')assert.match(message.title,/PHP 100\.00/);
+  else assert.doesNotMatch(JSON.stringify(visible[0]),/earningsMinor|10000|100\.00/);
+ }
 });

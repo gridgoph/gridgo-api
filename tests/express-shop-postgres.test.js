@@ -131,3 +131,98 @@ test('active Staff can decline with normal ownership, notes, timer and work-stop
  const after=await loadStore(db);
  assert.ok(after.auditLog.some(entry=>entry.action==='express.cancelled'&&entry.actorId==='other'));
 });
+
+test('removed original Owner with another shop membership cannot enqueue or receive an Express offer',{skip:!DATABASE_URL},async t=>{
+ const {loadDeliveryStore,loadPushDeliveryStore}=await import('../src/postgres-store.js');
+ const {shopNotificationDraft}=await import('../src/client-order-notifications.js');
+ const {notificationVisible}=await import('../src/notifications.js');
+ const {deviceAcceptsNotification,enqueueNotificationPushes,createOutboxWorker}=await import('../src/push-outbox.js');
+ const {db,api}=await setup(t);
+ let store=await loadStore(db);
+ store.shopMemberships.push({shopId:'replacement',userId:'supplier',role:'staff',status:'active',createdAt:AT,updatedAt:AT});
+ const at=new Date().toISOString();
+ const device={id:'original_offer_device',userId:'supplier',platform:'android',appRole:'supplier',token:'original_offer_test_token',createdAt:at,updatedAt:at};
+ store.deviceTokens.push(device);
+ const notice={...shopNotificationDraft(store.orders[0]),id:'before_owner_removal',at};
+ store.notifications.push(notice);
+ await db.transaction(async()=>{
+  await saveStore(db,store);
+  assert.equal(await enqueueNotificationPushes(db,store,[notice]),1);
+ });
+ const removed=await api('replacement','DELETE','/me/shop-team/members/supplier',null,{headers});
+ assert.equal(removed.status,200,JSON.stringify(removed.body));
+ const denied=await api('supplier','GET','/orders/order',null,{headers});
+ assert.equal(denied.status,403);assert.equal(denied.body.error,'shop_access_removed');
+ const deliveryStore=await loadDeliveryStore(db,{userIds:['supplier'],notificationIds:[notice.id]});
+ const currentNotice=deliveryStore.notifications.find(row=>row.id===notice.id);
+ assert.equal(deliveryStore.shopMemberships.find(row=>row.shopId==='supplier'&&row.userId==='supplier').status,'removed');
+ assert.equal(notificationVisible(deliveryStore,currentNotice,'supplier','supplier'),false);
+ assert.equal(deviceAcceptsNotification(deliveryStore,device,currentNotice,at),false);
+ const legacyNotice={...currentNotice};delete legacyNotice.shopId;
+ assert.equal(notificationVisible(deliveryStore,legacyNotice,'supplier','supplier'),false);
+ store=await loadStore(db);
+ const blocked={...notice,id:'after_owner_removal'};store.notifications.push(blocked);
+ await db.transaction(async()=>{
+  await saveStore(db,store);
+  assert.equal(await enqueueNotificationPushes(db,store,[blocked]),0);
+ });
+ assert.equal((await db.query('SELECT count(*)::int AS count FROM notification_push_outbox WHERE notification_id=$1',[blocked.id])).rows[0].count,0);
+ const sent=[];
+ await createOutboxWorker({database:db,loadStore:loadPushDeliveryStore,delivery:{configured:true,send:async(message,devices)=>{
+  sent.push(message.data.type);return devices.map(d=>({deviceId:d.id,ok:true,prune:false}));
+ }}})();
+ assert.equal(sent.includes('shop_express_offer'),false);
+ assert.equal((await db.query('SELECT status FROM notification_push_outbox WHERE notification_id=$1',[notice.id])).rows[0].status,'suppressed');
+ assert.equal(deviceAcceptsNotification(deliveryStore,device,{userId:'supplier',type:'role_changed'},at),true);
+});
+
+test('demoted original account and invited Staff get safe deliverable Express offers with no duplicate rows',{skip:!DATABASE_URL},async t=>{
+ const {shopNotificationDraft}=await import('../src/client-order-notifications.js');
+ const {notifyShopStaff}=await import('../src/shop-team.js');
+ const {loadPushDeliveryStore}=await import('../src/postgres-store.js');
+ const {enqueueNotificationPushes,createOutboxWorker}=await import('../src/push-outbox.js');
+ const {db,api}=await setup(t);
+ const demoted=await api('replacement','PATCH','/me/shop-team/members/supplier',{role:'staff'},{headers});
+ assert.equal(demoted.status,200,JSON.stringify(demoted.body));
+ const store=await loadStore(db),at=new Date().toISOString();
+ const baseline=structuredClone(store);const notice={...shopNotificationDraft(store.orders[0]),id:'demoted_original_offer',at};
+ store.notifications.push(notice);
+ for(const userId of ['supplier','other','replacement'])store.deviceTokens.push({id:`offer_${userId}`,userId,platform:'android',appRole:'supplier',token:`offer_test_${userId}`,createdAt:at,updatedAt:at});
+ let serial=0;const options={id:()=>`demoted_copy_${++serial}`};
+ notifyShopStaff(store,baseline,options);notifyShopStaff(store,baseline,options);
+ const offers=store.notifications.filter(n=>n.type==='shop_express_offer');assert.equal(offers.length,3);
+ await db.transaction(async()=>{
+  await saveStore(db,store);assert.equal(await enqueueNotificationPushes(db,store,offers),3);
+ });
+ for(const userId of ['supplier','other','replacement']) {
+  const inbox=await api(userId,'GET','/notifications',null,{headers});
+  assert.equal(inbox.status,200,JSON.stringify(inbox.body));
+  const visible=inbox.body.notifications.filter(n=>n.type==='shop_express_offer');
+  assert.equal(visible.length,1,userId);
+  if(userId==='replacement')assert.match(visible[0].title,/PHP 100\.00/);
+  else assert.doesNotMatch(JSON.stringify(visible[0]),/PHP|100\.00|earningsMinor/);
+ }
+ const deliveries=[];
+ await createOutboxWorker({database:db,loadStore:loadPushDeliveryStore,delivery:{configured:true,send:async(message,devices)=>{
+  for(const d of devices)deliveries.push({userId:d.userId,...message});
+  return devices.map(d=>({deviceId:d.id,ok:true,prune:false}));
+ }}})();
+ const delivered=deliveries.filter(message=>message.data.type==='shop_express_offer');assert.equal(delivered.length,3);
+ for(const message of delivered)if(message.userId==='replacement')assert.match(message.title,/PHP 100\.00/);else assert.doesNotMatch(message.title,/PHP|100\.00/);
+});
+
+test('reopened Express production projects photo-free readiness to Owners and Staff without changing rider handover',{skip:!DATABASE_URL},async t=>{
+ const {api}=await setup(t,'delivery');
+ assert.equal((await api('other','POST','/orders/order/express/accept',{}, {headers})).status,200);
+ assert.equal((await api('other','POST','/orders/order/transition',{state:'production'}, {headers})).status,200);
+ for(const userId of ['supplier','other']) {
+  const read=await api(userId,'GET','/orders/order',null,{headers});assert.equal(read.status,200,JSON.stringify(read.body));
+  const order=read.body.order;
+  assert.equal(order.orderType,'express');assert.equal(order.state,'production');
+  assert.equal(order.expressOrder.status,'printing');assert.equal(order.handoverFlow,'rider_packs');
+  assert.equal(order.transitionReadiness.ready_for_dispatch.allowed,true);
+  assert.deepEqual(order.transitionReadiness.ready_for_dispatch.missing,[]);
+  assert.equal(order.transitionReadiness.ready_for_dispatch.receiptScan.required,false);
+  assert.equal(order.shopHandover.finished,undefined);
+ }
+});

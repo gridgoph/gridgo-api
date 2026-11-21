@@ -346,7 +346,7 @@ export function shopNotificationDraft(order) {
     orderId: order.id,
     title: copy.title,
     body: copy.body,
-    ...(expressOffer ? { expressOffer } : {}),
+    ...(expressOffer ? { expressOffer, shopId: order.supplierId } : {}),
     read: false,
   };
 }

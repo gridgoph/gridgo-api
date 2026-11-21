@@ -185,6 +185,19 @@ Only the assigned, approved supplier may call:
   holds and claim holds still apply. Payout amounts/releases do not change.
   Operations forced corrections still require the existing reason code and note.
 
+**Reopened/interrupted production (Owner and Staff):** use
+`order.orderType === "express"` together with
+`order.transitionReadiness.ready_for_dispatch` from `GET /orders/:id` (or the
+shop's order list). In `production` and `supplier_self_qc`, an unheld Express job
+projects `allowed:true`, `missing:[]`, and `receiptScan.required:false`, even when
+`shopHandover.finished` is absent. Offer **It's ready** and post the ordinary
+ready transition; do not infer a finished-photo requirement from the empty
+handover object. A false `allowed` and its `missing[]` entries still describe the
+independent work/claim holds and state refusals. The write rechecks all guards.
+`handoverFlow:"rider_packs"` continues to describe the rider's inspection,
+packing-photo and signature contract for delivery; it does not reintroduce shop
+production photos or product QA for Express. No new handover flag is needed.
+
 At three refusals (timeouts count), or when no eligible same-price replacement
 remains, the order/jobs become cancelled. No reassignment is allowed after a shop
 payout release. Paid cancellations expose `refundRequired`; use the existing
@@ -230,9 +243,14 @@ only; replacing rider evidence/authority needs a separate handover contract.
 Released Express assignments and replacements create `shop_express_offer`
 inbox rows instead of `shop_job_assigned`. The owner copy shows shop principal
 (earnings), printed pages including copies, client pickup/rider delivery and
-minutes left in its title/body. Staff copies omit earnings. Removed/demoted
-members never receive an earnings-bearing copy; accepted, expired or moved
-offers are suppressed again before delivery. Retry copy uses the remaining
+minutes left in its title/body. Staff copies omit earnings, including the
+original shop account after demotion; each current recipient gets one copy.
+Every Express recipient must have an active membership in the notification's own
+shop, including the original account. An earnings-bearing copy additionally
+requires current Owner access. This is checked both at enqueue and delivery;
+access to a different shop never substitutes for membership in the offering shop.
+The generic account role-change notice retains its separate delivery exception.
+Accepted, expired or moved offers are suppressed again before delivery. Retry copy uses the remaining
 server time, and the message expires at the acceptance deadline.
 
 The supplier app already registers category `gridgo_express_offer`, channel

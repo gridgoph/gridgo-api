@@ -366,6 +366,16 @@ export function canAccessOrder(store, userId, order, {role, location = false, of
 }
 export function notificationVisible(store, notification, userId, role, { shopId = null } = {}) {
   if (!notification || notification.userId !== userId || notification.deletedAt != null) return false;
+  if (notification.type === 'shop_express_offer') {
+    // The domain shop ID is also the original account ID. It is not proof of
+    // current membership after removal, even when another shop grants app access.
+    const offerShopId = notification.shopId || notification.userId;
+    const member = (store.shopMemberships || []).find(row => row.shopId === offerShopId && row.userId === userId);
+    if (orderFromNotification(store, notification)?.supplierId !== offerShopId
+      || (shopId && shopId !== offerShopId) || member?.status !== 'active'
+      || !['owner', 'staff'].includes(member.role)
+      || (notification.expressOffer?.earningsMinor != null && member.role !== 'owner')) return false;
+  }
   // Test operations receive staff inbox rows only about review orders and accounts.
   if (isTestOperationsUser(store, userId) && !reviewSubject(store, notification)) return false;
   if (role && !(role === 'supplier' ? hasSupplierAppAccess(store, userId) : hasRole(store,userId,role))) return false;
