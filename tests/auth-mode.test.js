@@ -208,19 +208,19 @@ test("session token with a listed azp still authenticates and activates", async 
   assert.equal(activated.user.id, "user_listed_azp");
 });
 
-test("client email availability never names the other role", () => {
+test("client email availability permits existing identities without revealing their roles", () => {
   const store = {
     users: [
       { id: "user_client", email: "client@gridgo.ph", role: "client" },
-      { id: "user_rider", email: "mddprado00290@usep.edu.ph", role: "rider" },
+      { id: "user_rider", email: "rider@example.invalid", role: "rider" },
       { id: "user_supplier", email: "shop@gridgo.ph", role: "supplier" },
     ],
   };
   assert.equal(clientEmailAvailable(store, "client@gridgo.ph"), true);
   assert.equal(clientEmailAvailable(store, "CLIENT@gridgo.ph"), true);
   assert.equal(clientEmailAvailable(store, "new.client@gridgo.ph"), true);
-  assert.equal(clientEmailAvailable(store, "mddprado00290@usep.edu.ph"), false);
-  assert.equal(clientEmailAvailable(store, "shop@gridgo.ph"), false);
+  assert.equal(clientEmailAvailable(store, "rider@example.invalid"), true);
+  assert.equal(clientEmailAvailable(store, "shop@gridgo.ph"), true);
   assert.equal(clientEmailAvailable(store, "not-an-email"), false);
 });
 

@@ -80,6 +80,7 @@ export function publicNotification(notification, order) {
     at: notification.at,
   };
   if (notification.type) item.type = notification.type;
+  if (notification.type === 'shop_invite_claimed') item.shopId = notification.shopId;
   if (notification.type === "support_message" && notification.threadId) item.threadId = notification.threadId;
   if (notification.voucherId) item.voucherId = notification.voucherId;
   if (notification.organizationUserId) item.organizationUserId = notification.organizationUserId;
@@ -389,6 +390,9 @@ export function notificationVisible(store, notification, userId, role, { shopId 
     if (!legacySuperSeesOps) return false;
   }
   if (requiredRole && !(requiredRole === 'supplier' ? hasSupplierAppAccess(store, userId) : hasRole(store,userId,requiredRole)) && !(requiredRole==='ops_admin'&&hasRole(store,userId,'super_admin'))) return false;
+  if (notification.type === 'shop_invite_claimed' && requiredRole === 'supplier'
+    && ((shopId && shopId !== notification.shopId) || !(store.shopMemberships || []).some(member =>
+      member.userId === userId && member.shopId === notification.shopId && member.role === 'owner' && member.status === 'active'))) return false;
   if (notification.audienceRoles && !(role ? notification.audienceRoles.includes(role) && hasRole(store,userId,role) : notification.audienceRoles.some(r=>hasRole(store,userId,r)))) return false;
   if (notification.approvalCaseId) {
     const c = (store.approvalCases || []).find(c => c.id === notification.approvalCaseId);
