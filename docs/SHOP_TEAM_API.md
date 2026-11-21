@@ -371,6 +371,12 @@ staff sign-in, Clerk subject, membership status, or order snapshot is rewritten.
 The database default remains 48 hours for API processes running the previous
 release during deployment; this release always explicitly writes a 24-hour
 lifetime for new and replacement invites.
+Apply forward migration `1795272100000` before the version overlap or rollback.
+Its insert trigger derives the lifetime snapshot from the unchanged issued
+timestamps before PostgreSQL checks an upsert. Previous API processes can then
+claim, revoke or replace existing 24-hour invitations despite omitting the new
+column. The 24/48-hour check and update immutability/consumption guards remain
+in force; this migration does not rewrite existing invitations.
 Manager registration while the owner is away, owner SMS confirmation/dispute,
 and PIN-only staff are separate product work; this change retains the published
 owner/staff permissions and approval flow.

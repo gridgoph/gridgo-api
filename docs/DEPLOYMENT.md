@@ -1,5 +1,11 @@
 # GRIDGO API production deployment
 
+Apply both shop-selection/invite migrations (`1795272000000` and
+`1795272100000`) before deploying the shared-account shop release. The second
+is required for older API processes to claim, revoke or replace newly issued
+24-hour invites during a mixed-version deploy or rollback; issued deadlines and
+consumption guards are preserved. See [Shop teams](SHOP_TEAM_API.md#validation-and-rollout).
+
 After applying the session-observation migration, run
 `npm run backfill:last-sign-ins` with the intended deployment database to recover
 historical observations from GRIDGO's `staff.sign_in` audit evidence. The command
