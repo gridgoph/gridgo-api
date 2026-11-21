@@ -779,6 +779,13 @@ Default `GET /settings` response:
 
 `shopReceiptScanRequired` (Finance, default `false`, Super Admin editable through the same handshake) makes the shop attach its invoice/receipt scan before Ready for rider pickup; see [SHOP_RECEIPT_SCAN_API.md](SHOP_RECEIPT_SCAN_API.md).
 
+`shopEarlyAccessEnabled` (default `false`, including older rows that omit it) is
+Super Admin only through the same version/reason handshake. False refuses new
+shop early-access signups/grants with `409 shop_early_access_disabled`; customer
+early access stays open. Enable only after all old API/mail consumers are gone.
+[Early access](EARLY_ACCESS_API.md#activation-and-mixed-version-rollout) defines
+the deployment order, legacy grant repair and stricter old-binary rollback guard.
+
 `sampleBatchHoldDays` (default `14`, whole days 1–90, Super Admin editable through the same handshake) is how long a sampled batch price is held after the sample is delivered; see [SAMPLE_FIRST_API.md](SAMPLE_FIRST_API.md).
 
 `artworkGuidance` (the recommended resolution and colour per product type, Super Admin editable through the same `PATCH /settings` handshake) is described in [ARTWORK_GUIDANCE_API.md](ARTWORK_GUIDANCE_API.md).

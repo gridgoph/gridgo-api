@@ -21,7 +21,7 @@ export function createEarlyAccessEmailWorker({ database, mailer, env = process.e
                     WHERE budget_day=(SELECT budget_day FROM budget_clock)),0) < 100))
                 ORDER BY CASE WHEN kind='access' THEN 0 ELSE 1 END,created_at,id LIMIT 1)
               RETURNING *
-            ) SELECT c.*,s.email,s.platform,s.opt_in_url,(SELECT budget_day FROM budget_clock) AS budget_day
+            ) SELECT c.*,s.email,s.app,s.shop_name,s.platform,s.opt_in_url,(SELECT budget_day FROM budget_clock) AS budget_day
               FROM claimed c JOIN early_access_signups s ON s.id=c.signup_id`,
           [Boolean(String(env.EARLY_ACCESS_TEAM_EMAIL || '').trim())])).rows[0];
           if (claimed?.kind === 'team') await database.query(`
@@ -32,15 +32,21 @@ export function createEarlyAccessEmailWorker({ database, mailer, env = process.e
         if (!row) break;
         const team = row.kind === 'team';
         const platformName = row.platform === 'iphone' ? 'iPhone' : 'Android';
-        const teamSteps = row.platform === 'iphone'
+        const shop = row.app === 'shop';
+        const teamSteps = shop
+          ? row.platform === 'iphone'
+            ? 'Notify my shop: record this availability request only. The shop app is Android-only; do not send an invite or add this address to TestFlight.'
+            : 'Review their supplier app Google Play tester-group membership, then grant shop access in the GRIDGO early-access list. Configured supplier Group enrollment runs at grant.'
+          : row.platform === 'iphone'
           ? 'Add their Apple ID email in App Store Connect under TestFlight external testers, then mark them added in the GRIDGO early-access list. Apple sends the TestFlight invite.'
           : 'Review their Google Play tester-group membership, then grant access in the GRIDGO early-access list.';
         let sent = false;
         try {
           sent = Boolean((await mailer.sendEarlyAccessEmail({
             to: team ? env.EARLY_ACCESS_TEAM_EMAIL.trim() : row.email,
-            subject: team ? `New ${platformName} tester: ${row.email}` : "You're in — GRIDGO Google Play Early Access",
-            text: team ? `New tester: ${row.email}\n\n${teamSteps}`
+            subject: team ? `New ${platformName}${shop ? ' shop' : ''} tester: ${row.email}` : shop ? "You're in — GRIDGO Shop Google Play Early Access" : "You're in — GRIDGO Google Play Early Access",
+            text: team ? `New ${shop ? 'shop ' : ''}tester: ${row.email}${shop && row.shop_name ? `\nShop name: ${row.shop_name}` : ''}\n\n${teamSteps}`
+              : shop ? `You're in!\n\nYour GRIDGO shop app Google Play invite is ready. Open this link with the Google account you signed up with:\n${row.opt_in_url}\n\nInstall the shop app and set up your shop. Owners and staff can both join. Keep the app for 14 days and take test jobs. Thank you for helping GRIDGO launch!`
               : `You're in!\n\nYour Google Play invite is ready. Open this link with the Google account you signed up with:\n${row.opt_in_url}\n\nKeep the app for 14 days. Thank you for helping GRIDGO launch!`,
             messageId: `<${row.id}@gridgo.early-access>`,
           })).sent);

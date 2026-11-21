@@ -143,7 +143,7 @@ Staff list pagination is an opt-in, compatible rollout: [parameters, route cover
 
 Home partner cards, staff CRUD, private media and Manila daily reporting: [Home promotions](docs/HOME_PROMOTIONS_API.md).
 
-Public Android/iPhone tester sign-ups, staff grants and private email delivery: [Early access](docs/EARLY_ACCESS_API.md).
+Public customer/shop tester sign-ups, per-app staff grants and private email delivery: [Early access](docs/EARLY_ACCESS_API.md).
 
 ## Main route groups
 

@@ -954,6 +954,7 @@ function publicOperationalSettings(settings, store = null, user = null) {
     operatingHours: operatingHours(settings),
     riderCommissionBps: rest.riderCommissionBps ?? 8_500,
     riderOfferTimeoutSeconds: offerTimeoutSeconds(rest),
+    shopEarlyAccessEnabled: rest.shopEarlyAccessEnabled === true,
     clientRiderLocationRevealDistanceMeters: rest.clientRiderLocationRevealDistanceMeters ?? 1_000,
     riderLocationRefreshIntervalSeconds: trackingSettings(rest).refreshIntervalSeconds,
     riderLocationStaleAfterSeconds: trackingSettings(rest).staleAfterSeconds,
@@ -4402,7 +4403,7 @@ async function handleAuditedRequest(req, res) {
       }
       const reason = String(body.reason || "").trim();
       if (!reason) return send(res, 400, { error: "settings_reason_required" });
-      if ((Object.hasOwn(body, "productionPenalty") || Object.hasOwn(body, "hubPickup"))
+      if ((Object.hasOwn(body, "productionPenalty") || Object.hasOwn(body, "hubPickup") || Object.hasOwn(body, "shopEarlyAccessEnabled"))
           && !identityHasMembership(user, "super_admin")) {
         return send(res, 403, { error: "forbidden" });
       }
@@ -4451,6 +4452,7 @@ async function handleAuditedRequest(req, res) {
           body.physicalInvoiceRequestsEnabled ?? store.settings.physicalInvoiceRequestsEnabled ?? false,
         approvalProofRequired: Object.hasOwn(body, "approvalProofRequired") ? body.approvalProofRequired : store.settings.approvalProofRequired === true,
         coverSpineRequired: Object.hasOwn(body, "coverSpineRequired") ? body.coverSpineRequired : store.settings.coverSpineRequired === true,
+        shopEarlyAccessEnabled: Object.hasOwn(body, "shopEarlyAccessEnabled") ? body.shopEarlyAccessEnabled : store.settings.shopEarlyAccessEnabled === true,
         // Applies at the next Ready-for-rider-pickup transition only; orders already ready are unaffected.
         shopReceiptScanRequired: Object.hasOwn(body, "shopReceiptScanRequired") ? body.shopReceiptScanRequired : store.settings.shopReceiptScanRequired === true,
         // New publications only: a published quote keeps the validity it was given.
