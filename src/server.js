@@ -2677,15 +2677,6 @@ async function handleAuditedRequest(req, res) {
     await hydrateCashWallets(database,store);
     if (clientSaveScope(store)) {
       const maintenance = saveMaintenanceView(store);
-  if (!scope) {
-    const before=originalDomainStore(store);
-    for(const order of store.orders||[]) {
-      const previous=before?.orders?.find(o=>o.id===order.id);
-      if(order.state==='cancelled' && previous && previous.state!=='cancelled'
-        && order.cancelledBy===order.supplierId)recordVerificationRecovery(store,order,{at:now(),actor:{id:order.cancelledBy,role:'supplier'},id});
-    }
-    reconcileVerificationHolds(store,{at:now(),actor:{role:'system'},id});
-  }
       const pending = new Set(maintenance.orders.filter(order => order.state === 'issue_window_open').map(order => order.id));
       const at = now();
       if (expireIssueWindows(maintenance, at)) {
@@ -6238,7 +6229,8 @@ async function handleAuditedRequest(req, res) {
         queueOrderInvalidate(store,order,['payouts']);await save(store);
         return send(res,verificationHold?202:200,{payout:{status:verificationHold?'held':'ready',netAmountMinor,items:prepared}});
       }
-      if(prepared.some(p=>p.recoveryMinor>0) && body.amountMinor!==netAmountMinor) return send(res,409,{error:'verification_net_payout_amount_required',netAmountMinor});
+      const amountRequired=extra.length>0||prepared.some(p=>p.beforeVerification||p.recoveryMinor>0)||body.amountMinor!==undefined;
+      if(amountRequired && body.amountMinor!==netAmountMinor) return send(res,409,{error:extra.length && !prepared.some(p=>p.recoveryMinor>0)?'supplement_payout_amount_mismatch':'verification_net_payout_amount_required',netAmountMinor});
       // The wallet receipt and its reference are read before the share moves,
       // so a refused screenshot never leaves a released share with no proof.
       const reference = paymentReferenceValue(body.reference);

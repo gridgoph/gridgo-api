@@ -392,7 +392,7 @@ export function catalogItemBlockers(store, item, { publicOnly = false, at } = {}
       (row) => row.userId === item.supplierId && row.role === "supplier",
     );
     if (!membership) blockers.push("supplier_membership");
-    if (verificationSummary(store,item.supplierId,at).recoveryDueMinor>0) blockers.push("verification_recovery");
+    if (!supplierVerified(store,item.supplierId) && verificationSummary(store,item.supplierId,at).recoveryDueMinor>0) blockers.push("verification_recovery");
     const approval = (store.approvalCases || []).find(
       (candidate) => candidate.userId === item.supplierId && candidate.kind === "supplier",
     );

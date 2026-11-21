@@ -90,7 +90,7 @@ export function verificationSummary(store,supplierId,at=new Date().toISOString()
     capReached:!verified&&paidBeforeVerificationMinor>=policy.payoutCapMinor,
     remainingCapMinor:Math.max(0,policy.payoutCapMinor-paidBeforeVerificationMinor-sum(reservations(store,supplierId).map(e=>e.data.netAmountMinor))),
     heldMinor:sum(held.map(e=>e.amountMinor)),recoveryDueMinor,paidOpenRegularJobs:openJobs.size,
-    newOrdersPaused:!supplierCanWork(store,supplierId)||recoveryDueMinor>0||(!verified&&(!deadlineAt||Date.parse(at)>=Date.parse(deadlineAt)))};
+    newOrdersPaused:!supplierCanWork(store,supplierId)||(!verified&&recoveryDueMinor>0)||(!verified&&(!deadlineAt||Date.parse(at)>=Date.parse(deadlineAt)))};
 }
 export function assertVerifiedCashShop(store,supplierId) {if(!supplierVerified(store,supplierId))fail('cash_supplier_verification_required');}
 /** Reserve before a manual transfer. A retry returns the same frozen amount. */
@@ -110,7 +110,7 @@ export function prepareVerificationPayout(store,order,{key,amountMinor,at,actor,
   const occupies=paidEvents(store,order.supplierId).some(e=>e.orderId===order.id)
     ||reservations(store,order.supplierId).some(e=>e.orderId===order.id);
   const reason=!summary.verified && netAmountMinor>summary.remainingCapMinor?'verification_payout_cap'
-    :!summary.verified&&order.orderType!=='express'&&!CLOSED.has(order.state)&&!occupies&&summary.paidOpenRegularJobs>=2?'verification_open_jobs':null;
+    :!summary.verified&&order.orderType!=='express'&&!CLOSED.has(order.state)&&(summary.paidOpenRegularJobs>2||!occupies&&summary.paidOpenRegularJobs>=2)?'verification_open_jobs':null;
   const data={netAmountMinor,recoveryMinor,beforeVerification:!summary.verified,...(reason?{reason}:{})};
   if(reason) {
     if(previous?.kind!=='held')append(store,{supplierId:order.supplierId,orderId:order.id,key,kind:'held',amountMinor,data},{at,actor,id});
@@ -160,7 +160,7 @@ export function remindSupplierVerification(store,{at,id}) {
     append(store,{supplierId:member.userId,key,kind:'reminder',data:{day:reminderDay}},{at,id});
     const recipients=[{userId:member.userId,role:'supplier'},...(store.userRoleMemberships||[]).filter(m=>['ops_admin','super_admin'].includes(m.role))];
     for(const r of recipients)(store.notifications||=[]).push({id:id('ntf'),userId:r.userId,appRole:r.role,at,type:'supplier_verification_reminder',partyUserId:member.userId,approvalCaseId:(store.approvalCases||[]).find(c=>c.userId===member.userId&&c.kind==='supplier')?.id,
-      title:'Complete shop verification',body:reminderDay===27?'Upload your verification documents. New orders pause in 3 days until verification.':'Upload your ID with selfie and business permit to complete shop verification.',read:false});
+      title:'Complete shop verification',body:summary.countdownDays!==null?`Upload your verification documents. New orders pause in ${summary.countdownDays} day${summary.countdownDays===1?'':'s'} until verification.`:'Upload your ID with selfie and business permit to complete shop verification.',read:false});
     changed=true;
   }
   return changed;

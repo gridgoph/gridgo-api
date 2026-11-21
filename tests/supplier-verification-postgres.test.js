@@ -8,7 +8,7 @@ import {apiForTest} from './fixtures/reschedule-http.js';
 import {prepareVerificationPayout,completeVerificationPayout,recordVerificationRecovery,verificationSummary} from '../src/supplier-verification.js';
 
 async function setup(db) {
-  await resetDatabase(db,'TRUNCATE users, platform_settings RESTART IDENTITY CASCADE');
+  await resetDatabase(db,'TRUNCATE users, platform_settings, taxonomy_categories RESTART IDENTITY CASCADE');
   const store=fixture(),now=new Date().toISOString();
   store.settings.supplierVerification={payoutCapMinor:4000,windowDays:30};
   store.userRoleMemberships.find(m=>m.userId==='supplier').createdAt=now;
@@ -41,7 +41,8 @@ test('HTTP reservation/release retries pay once; cap hold persists and verificat
   const cancelled=await call('ops','POST',`${base}/cancel-reservation`,{noFundsSentConfirmed:true,reason:'No funds were sent; prepare again'});
   assert.equal(cancelled.status,200,JSON.stringify(cancelled.body));
   assert.equal((await call('ops','POST',`${base}/prepare`,{})).status,200);
-  const [one,two]=await Promise.all([call('ops','POST',`${base}/release`,{}),call('ops','POST',`${base}/release`,{})]);
+  assert.equal((await call('ops','POST',`${base}/release`,{amountMinor:3999})).body.error,'verification_net_payout_amount_required');
+  const [one,two]=await Promise.all([call('ops','POST',`${base}/release`,{amountMinor:4000}),call('ops','POST',`${base}/release`,{amountMinor:4000})]);
   assert.equal(one.status,200,JSON.stringify(one.body));assert.equal(two.status,200,JSON.stringify(two.body));
   assert.equal((await db.query("SELECT count(*)::int n FROM supplier_verification_ledger WHERE kind='released'")).rows[0].n,1);
   await db.transaction(async()=>{const s=await loadStore(db);const o=s.orders[0];o.state='delivered';o.payoutMilestones.find(m=>m.code==='delivered').pofFileIds=['proof'];await saveStore(db,s);});
@@ -82,7 +83,7 @@ test('ledger persists recovery offsets and cap reserves under the transaction lo
 test('Express plan 4 persists independently of frozen regular plans', {skip:!process.env.DATABASE_URL},async()=>{
   const db=createDatabase(process.env);
   try {
-    await resetDatabase(db,'TRUNCATE users, platform_settings RESTART IDENTITY CASCADE');
+    await resetDatabase(db,'TRUNCATE users, platform_settings, taxonomy_categories RESTART IDENTITY CASCADE');
     const s=fixture(),o=s.orders[0];o.orderType='express';o.expressOrder={version:1,originalSupplierId:'supplier',pickupCode:'123456',printSettings:[]};
     const {snapshotPayoutPlan}=await import('../src/operational-model.js');snapshotPayoutPlan(o);
     await db.transaction(()=>saveStore(db,s));

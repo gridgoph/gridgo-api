@@ -66,6 +66,9 @@ test('cancellation creates one recoverable debt; future payout offsets it once w
   a.state='cancelled';recordVerificationRecovery(s,a,{at:when(2),actor,id});recordVerificationRecovery(s,a,{at:when(2),actor,id});
   assert.equal(verificationSummary(s,'shop',when(2)).recoveryDueMinor,100000);
   assert.ok(supplierMatchBlockersFor(s,{at:when(2)})('shop',s.supplierProfiles[0]).includes('verification_recovery'));
+  s.approvalCases[0].status='approved';
+  assert.equal(verificationSummary(s,'shop',when(2)).newOrdersPaused,false);
+  assert.equal(verificationSummary(s,'shop',when(2)).recoveryDueMinor,100000);
   const b=order(s,'b',150000),result=pay(s,b);
   assert.equal(result.netAmountMinor,50000);assert.equal(b.payoutMilestones[0].amountMinor,150000);
   completeVerificationPayout(s,b,result,{at:when(2),actor,id});
@@ -148,4 +151,10 @@ test('a shop failure cannot free cap reserved for a transfer whose outcome is no
   prepareVerificationPayout(s,o,{key:'stage:order:production_started',amountMinor:4000,at,actor:s.users.find(u=>u.id==='ops'),id});
   recordShopFailure(s,o,{kind:'cancelled',reason:'Cannot finish this job',at,createId:id,actorId:'supplier',actorRole:'supplier'});
   assert.equal(o.shopRecovery.status,'ops_review');assert.equal(hasVerificationReservation(s,o),true);
+});
+
+
+test('reminder wording follows the configured window without showing an early countdown',()=>{
+  const s=fixture();s.settings.supplierVerification.windowDays=60;remindSupplierVerification(s,{at:when(27),id});
+  assert.doesNotMatch(s.notifications[0].body,/3 days/);
 });

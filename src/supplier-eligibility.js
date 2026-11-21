@@ -30,7 +30,7 @@ export function supplierMatchBlockersFor(store, {at = new Date().toISOString()} 
       const summary=verificationSummary(store,supplierId,at);
       if (!summary.deadlineAt || Date.parse(at)>=Date.parse(summary.deadlineAt)) missing.push("verification_deadline");
     }
-    if (verificationSummary(store,supplierId,at).recoveryDueMinor>0) missing.push("verification_recovery");
+    if (!supplierVerified(store,supplierId) && verificationSummary(store,supplierId,at).recoveryDueMinor>0) missing.push("verification_recovery");
     return missing;
   };
 }
