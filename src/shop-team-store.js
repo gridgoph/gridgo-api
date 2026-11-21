@@ -1,6 +1,6 @@
 const mappings = [
-  ['shop_memberships', 'shopMemberships', ['shop_id', 'user_id'], { shop_id: 'shopId', user_id: 'userId', role: 'role', status: 'status', created_at: 'createdAt', updated_at: 'updatedAt', decided_by: 'decidedBy' }],
-  ['shop_invites', 'shopInvites', ['id'], { id: 'id', shop_id: 'shopId', kind: 'kind', identity: 'identity', token_hash: 'tokenHash', created_by: 'createdBy', created_at: 'createdAt', expires_at: 'expiresAt', claimed_by: 'claimedBy', claimed_at: 'claimedAt', revoked_at: 'revokedAt' }],
+  ['shop_memberships', 'shopMemberships', ['shop_id', 'user_id'], { shop_id: 'shopId', user_id: 'userId', role: 'role', status: 'status', created_at: 'createdAt', updated_at: 'updatedAt', decided_by: 'decidedBy', last_used_at: 'lastUsedAt' }],
+  ['shop_invites', 'shopInvites', ['id'], { id: 'id', shop_id: 'shopId', kind: 'kind', identity: 'identity', token_hash: 'tokenHash', created_by: 'createdBy', created_at: 'createdAt', expires_at: 'expiresAt', claimed_by: 'claimedBy', claimed_at: 'claimedAt', revoked_at: 'revokedAt', lifetime_hours: 'lifetimeHours' }],
   ['order_actions', 'orderActions', ['id'], { id: 'id', order_id: 'orderId', actor_user_id: 'actorUserId', actor_name: 'actorName', actor_role: 'actorRole', action: 'action', at: 'at' }],
 ];
 export const shopTeamTables = mappings.map(([name, , keys, fields]) => ({ name, keys, columns: Object.keys(fields), ...(name === 'order_actions' ? { appendOnly: true } : {}) }));

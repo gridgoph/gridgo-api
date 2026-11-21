@@ -1,3 +1,4 @@
+import { isExpressDocumentOrder } from './express-offers.js';
 import { riderPackingFlow, handoverRequirements, forcedStepError } from './shop-handover.js';
 import { productionPhotoFiles } from './production-progress.js';
 import { packingPhotoFiles } from './packing-progress.js';
@@ -26,7 +27,8 @@ export const RECEIPT_SCAN_REQUIRED_MESSAGE = 'Scan or upload this order\'s shop 
  */
 export function productionTransitionReadiness(store, order, next, { operations = false, reason = '', reasonCode } = {}) {
   const missing = [];
-  const fromAllowed = order.state === 'production'
+  const express = isExpressDocumentOrder(order);
+  const fromAllowed = (express && order.state === 'payment_authorized' && next === 'ready_for_dispatch') || order.state === 'production'
     || (order.state === 'supplier_self_qc' && next === 'ready_for_dispatch');
   if (!fromAllowed) missing.push(requirement('transition_not_allowed',
     'This order cannot move to the requested state from its current step. Refresh the order and use an available action.'));
@@ -42,6 +44,8 @@ export function productionTransitionReadiness(store, order, next, { operations =
   if (operations) {
     const code = forcedStepError({ reason, reasonCode });
     if (code) missing.push(requirement(code, 'Explain why GRIDGO is forcing this step: choose a reason code and add a note of at most 2000 characters.'));
+  } else if (express) {
+    // Express document production has no photo or GRIDGO product-review step.
   } else if (riderPackingFlow(order)) {
     missing.push(...handoverRequirements(store, order, next));
   } else {
@@ -51,7 +55,7 @@ export function productionTransitionReadiness(store, order, next, { operations =
       'Add a photo of the finished prints packed and ready before marking Ready for dispatch.'));
   }
   const receiptAttached = receiptScanFiles(store, order).length > 0;
-  const required = receiptScanRequired(store, next);
+  const required = !express && receiptScanRequired(store, next);
   if (required && !receiptAttached && !operations) missing.push(requirement('receipt_scan_required', RECEIPT_SCAN_REQUIRED_MESSAGE));
   return { allowed: missing.length === 0, missing, receiptScan: { required, attached: receiptAttached } };
 }

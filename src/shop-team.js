@@ -1,8 +1,9 @@
+import { expressOfferCopy } from './express-offers.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { clerkClientProfile } from './auth.js';
 import { identityHasMembership, selectActorRole } from './authorization-context.js';
 import { ensureShopOwners } from './shop-team-store.js';
-import { queueInvalidate } from './notifications.js';
+import { queueInvalidate, privilegedAdminMemberships } from './notifications.js';
 import { canReadOrderArtwork } from './order-file-access.js';
 
 export const shopTeamError = (status, code) => { throw Object.assign(new Error(code), { status, code }); };
@@ -28,6 +29,9 @@ export function selectedShop(store, user, shopId) {
     if (!row) shopTeamError(403, 'shop_membership_required');
     return row;
   }
+  const lastUsed = rows.filter(row => row.status === 'active' && row.lastUsedAt)
+    .sort((a, b) => b.lastUsedAt.localeCompare(a.lastUsedAt) || a.shopId.localeCompare(b.shopId))[0];
+  if (lastUsed) return lastUsed;
   const own = rows.find(row => row.shopId === user.id);
   if (own) return own;
   const usable = rows.filter(row => row.status !== 'removed');
@@ -47,13 +51,14 @@ export function shopSummary(store, member) {
 // Every unlisted supplier route is Owner-only, including future routes. The
 // existing handler still checks ownership, approval, artwork release and state.
 export function staffRouteAllowed(method, path) {
+  if (method === 'PATCH' && path === '/me/shop-memberships/selected') return true;
   if (method === 'GET' && ['/auth/me', '/auth/me/supplier', '/me/shop-memberships', '/notifications', '/notifications/stream', '/web-push/public-key', '/orders', '/jobs'].includes(path)) return true;
   if (method === 'POST' && ['/auth/logout', '/devices', '/web-push/subscribe', '/web-push/unsubscribe', '/notifications/read-all'].includes(path)) return true;
   if (['POST', 'DELETE'].includes(method) && /^\/devices(?:\/[^/]+)?$/.test(path)) return true;
   if (['POST', 'PATCH', 'DELETE'].includes(method) && /^\/notifications\/[^/]+(?:\/read)?$/.test(path)) return true;
   if (method === 'GET' && /^\/orders\/[^/]+$/.test(path)) return true;
   if (method === 'GET' && /^\/dispatch\/[^/]+\/location$/.test(path)) return true;
-  if (method === 'POST' && /^\/orders\/[^/]+\/(transition|decline|production-finished)$/.test(path)) return true;
+  if (method === 'POST' && /^\/orders\/[^/]+\/(transition|decline|production-finished|express\/(accept|decline|pickup)|files\/[^/]+\/access)$/.test(path)) return true;
   if (['GET', 'POST'].includes(method) && /^\/orders\/[^/]+\/(client-shop-chat|pickup-chat)(?:\/messages(?:\/[^/]+\/reports)?)?$/.test(path)) return true;
   if (method === 'POST' && path === '/files') return true;
   if (method === 'GET' && /^\/files\/[^/]+(?:\/(download-url|preview-url))?$/.test(path)) return true;
@@ -122,7 +127,7 @@ function publicMember(store, member) {
 function issueShopInvite({ store, user, shopId, kind, identity, at, id, audit }) {
   const token = randomBytes(32).toString('base64url');
   const invite = { id: id('shi'), shopId, kind, identity, tokenHash: inviteHash(token), createdBy: user.id,
-    createdAt: at, expiresAt: new Date(Date.parse(at) + 48 * 3600000).toISOString() };
+    createdAt: at, lifetimeHours: 24, expiresAt: new Date(Date.parse(at) + 24 * 3600000).toISOString() };
   store.shopInvites.push(invite);
   audit(store, { actor: user, action: 'shop_team.invite_created', entityType: 'shop_invite', entityId: invite.id, detail: { shopId, kind } });
   return { status: 201, mutated: true, body: { invite: publicInvite(invite, at), token, delivery: 'share_link' } };
@@ -161,6 +166,16 @@ export function claimShopInvite({ store, claims, clerkUser, body, id, at, audit 
   if (!existing) store.shopMemberships.push(member);
   invite.claimedAt = at; invite.claimedBy = user.id;
   audit(store, { actor: user, action: 'shop_team.invite_claimed', entityType: 'shop_invite', entityId: invite.id, detail: { shopId: invite.shopId } });
+  const recipients = [
+    ...store.shopMemberships.filter(row => row.shopId === invite.shopId && row.role === 'owner' && row.status === 'active')
+      .map(row => ({ userId: row.userId, appRole: 'supplier' })),
+    ...privilegedAdminMemberships(store).map(row => ({ userId: row.userId, appRole: row.role })),
+  ];
+  for (const recipient of recipients) store.notifications.push({
+    id: id('ntf'), ...recipient, type: 'shop_invite_claimed', shopId: invite.shopId,
+    title: 'Shop invitation claimed', body: 'A teammate is waiting for owner approval in the shop team.',
+    occurrenceKey: `shop-invite-claimed:${invite.id}:${recipient.userId}:${recipient.appRole}`, at, read: false,
+  });
   queueInvalidate(store, { resource: 'identity', userIds: [invite.shopId, user.id] });
   return { member: publicMember(store, member), shop: shopSummary(store, member) };
 }
@@ -170,12 +185,31 @@ export async function routeShopTeam({ req, url, store, user, readBody, id, now, 
   const operations = /^\/ops\/shops\/([^/]+)\/team(?:\/([^/]+))?$/.exec(path);
   const own = /^\/me\/shop-team(?:\/(invites|members)(?:\/([^/]+))?)?$/.exec(path)
     || /^\/me\/shop-team\/(invites)\/([^/]+)\/(replace)$/.exec(path);
-  if (path !== '/me/shop-memberships' && !operations && !own) return null;
+  if (!['/me/shop-memberships', '/me/shop-memberships/selected'].includes(path) && !operations && !own) return null;
   if (!user) shopTeamError(401, 'unauthorized');
   if ((user.accountStatus || 'active') !== 'active') shopTeamError(403, 'forbidden');
   const at = now();
-  if (path === '/me/shop-memberships' && req.method === 'GET') return { status: 200, body: { shops: shopMembershipsFor(store, user.id).map(row => shopSummary(store, row)) } };
+  if (path === '/me/shop-memberships' && req.method === 'GET') {
+    const members = shopMembershipsFor(store, user.id);
+    const lastUsed = members.filter(row => row.status === 'active' && row.lastUsedAt)
+      .sort((a, b) => b.lastUsedAt.localeCompare(a.lastUsedAt) || a.shopId.localeCompare(b.shopId))[0];
+    return { status: 200, body: { shops: members.map(row => shopSummary(store, row)),
+      lastUsedShopId: lastUsed?.shopId || null, onboardingRequired: !members.some(row => row.status !== 'removed') } };
+  }
   ensureShopOwners(store);
+  if (path === '/me/shop-memberships/selected') {
+    if (req.method !== 'PATCH') shopTeamError(405, 'method_not_allowed');
+    const body = await readBody(req);
+    if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => key !== 'shopId')
+      || typeof body.shopId !== 'string' || !body.shopId) shopTeamError(400, 'invalid_shop_selection');
+    const member = selectedShop(store, user, body.shopId);
+    assertActiveShop(member);
+    supplierShopActor(store, user, member);
+    for (const row of store.shopMemberships.filter(row => row.userId === user.id)) row.lastUsedAt = row === member ? at : null;
+    audit(store, { actor: user, action: 'shop_team.shop_selected', entityType: 'shop_membership', entityId: user.id, detail: { shopId: member.shopId } });
+    queueInvalidate(store, { resource: 'identity', userIds: [user.id] });
+    return { status: 200, mutated: true, body: { shop: shopSummary(store, member), lastUsedShopId: member.shopId } };
+  }
   const member = operations ? null : selectedShop(store, user, req.headers['x-gridgo-shop-id']);
   if (operations) {
     const role = req.headers['x-gridgo-role'];
@@ -240,11 +274,30 @@ export async function routeShopTeam({ req, url, store, user, readBody, id, now, 
 export function notifyShopStaff(store, baseline, { id }) {
   const previous = new Set((baseline?.notifications || []).map(row => row.id));
   for (const notification of [...store.notifications]) {
-    if (previous.has(notification.id) || notification.type !== 'shop_job_assigned' || notification.shopTeamCopy) continue;
-    for (const member of store.shopMemberships || []) {
-      if (member.shopId !== notification.userId || member.userId === member.shopId || member.status !== 'active') continue;
-      store.notifications.push({ ...notification, id: id('ntf'), userId: member.userId, shopId: member.shopId, shopTeamCopy: true,
-        occurrenceKey: `${notification.occurrenceKey || notification.id}:${member.userId}` });
+    if (previous.has(notification.id) || !['shop_job_assigned', 'shop_express_offer'].includes(notification.type) || notification.shopTeamCopy) continue;
+    const shopId = notification.shopId || notification.userId;
+    if (notification.type === 'shop_express_offer') notification.shopId = shopId;
+    const source = structuredClone(notification);
+    const members = (store.shopMemberships || []).filter(member => member.shopId === shopId && member.status === 'active');
+    const copyFor = member => {
+      const copy = structuredClone(source);
+      if (member.role === 'staff' && copy.expressOffer) {
+        delete copy.expressOffer.earningsMinor;
+        Object.assign(copy, expressOfferCopy(copy.expressOffer, copy.at));
+      }
+      return copy;
+    };
+    // Keep the original inbox ID, but derive its Express copy from the person's
+    // current role. Other Owners still need the original earnings-bearing source.
+    const original = members.find(member => member.userId === notification.userId);
+    if (notification.type === 'shop_express_offer' && original?.role === 'staff') {
+      Object.assign(notification, copyFor(original));
+    }
+    for (const member of members) {
+      if (member.userId === notification.userId) continue;
+      const occurrenceKey = `${source.occurrenceKey || source.id}:${member.userId}`;
+      if (store.notifications.some(row => row.shopTeamCopy && row.shopId === shopId && row.userId === member.userId && row.occurrenceKey === occurrenceKey)) continue;
+      store.notifications.push({ ...copyFor(member), id: id('ntf'), userId: member.userId, shopId, shopTeamCopy: true, occurrenceKey });
     }
   }
 }

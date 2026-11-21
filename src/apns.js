@@ -16,6 +16,7 @@ export function apnsPayload(message) {
     aps: {
       alert: { title: message.title, body: message.body },
       sound: message.sound || "default",
+      ...(message.category === "gridgo_express_offer" ? { category: message.category } : {}),
     },
     ...message.data,
   };
@@ -127,7 +128,8 @@ export function createApnsDelivery(env = process.env, options = {}) {
               "apns-topic": topic,
               "apns-push-type": "alert",
               "apns-priority": "10",
-              ...(message.transient ? { "apns-expiration": "0" } : {}),
+              ...(message.transient ? { "apns-expiration": "0" } : Number.isFinite(Date.parse(message.expiresAt))
+                ? { "apns-expiration": String(Math.floor(Date.parse(message.expiresAt) / 1000)) } : {}),
             });
           } catch {
             done({ ok: false, prune: false, code: "apns_transport_error" });

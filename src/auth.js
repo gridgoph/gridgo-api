@@ -243,18 +243,13 @@ function invitationRequired(message) {
 /**
  * Whether this email may continue as a GRIDGO client.
  *
- * Unknown emails are allowed (new clients). An existing non-client identity
- * is not — the Client app must refuse before Clerk emails a device-trust code.
- * The answer never names the other role.
+ * This legacy preflight must not block an existing person's other roles.
+ * Clerk owns sign-in; only the verified subject can activate client access.
  */
 export function clientEmailAvailable(store, email) {
   const normalized = String(email || "").trim().toLowerCase();
   if (!normalized.includes("@")) return false;
-  const matches = (store.users || []).filter(
-    (candidate) => String(candidate.email || "").toLowerCase() === normalized,
-  );
-  if (matches.length === 0) return true;
-  return matches.every((candidate) => candidate.role === "client");
+  return true;
 }
 
 function ensureClientMembership(store, user, now) {

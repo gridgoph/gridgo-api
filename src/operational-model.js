@@ -1,3 +1,4 @@
+import { publicShopFileAccesses } from './shop-file-access.js';
 import { expressRates, validateExpressRates, publicExpress, expressClientProjection } from './express-orders.js';
 import { validateCashSettings, cashAmounts } from './cash-policy.js';
 import { staffOrderProjection } from './shop-staff-order.js';
@@ -310,6 +311,8 @@ export function defaultOperationalSettings() {
      * Off until Super Admin turns it on. Never an official GRIDGO receipt.
      */
     shopReceiptScanRequired: false,
+    /** Enable only after every API/mail consumer supports per-app early access. */
+    shopEarlyAccessEnabled: false,
     /** Days a published quote's options stay acceptable (docs/QUOTE_REQUESTS_API.md). */
     quoteValidityDays: 7,
     clientShopChatContactThreshold: 3,
@@ -414,6 +417,9 @@ export function validateOperationalSettings(settings) {
   }
   if (settings?.shopReceiptScanRequired !== undefined && typeof settings.shopReceiptScanRequired !== "boolean") {
     fail(400, "invalid_shop_receipt_scan_required", "shopReceiptScanRequired must be a JSON boolean.", { field: "shopReceiptScanRequired" });
+  }
+  if (settings?.shopEarlyAccessEnabled !== undefined && typeof settings.shopEarlyAccessEnabled !== 'boolean') {
+    fail(400, 'invalid_shop_early_access_enabled', 'shopEarlyAccessEnabled must be a JSON boolean.', { field: 'shopEarlyAccessEnabled' });
   }
   const quoteValidity = settings?.quoteValidityDays;
   if (quoteValidity !== undefined && (!Number.isSafeInteger(quoteValidity) || quoteValidity < 1 || quoteValidity > 90)) {
@@ -1365,6 +1371,12 @@ export function publicOrderFor(order, user, store = null) {
     .map(fileId => (store?.files || []).find(file => file.fileId === fileId))
     .filter(file => publicArtworkPreview(file))
     .map(file => ({ fileId: file.fileId, ...publicArtworkPreview(file) }));
+  delete publicRecord.fileAccesses;
+  if (user?.role === 'supplier' && supplierArtworkReleased(order)) {
+    const accesses = publicShopFileAccesses(store, order, user);
+    // Empty regular-job reads retain their released projection.
+    if (order.orderType === 'express' || accesses.length) publicRecord.fileAccesses = accesses;
+  }
   /*
     Whether this order has been rated, so a client is asked once.
 

@@ -9,7 +9,9 @@ import { apiForTest } from './fixtures/reschedule-http.js';
 import { OWNER_ROUTES, STAFF_ROUTES } from './fixtures/shop-team-routes.js';
 import { PICKUP_CHECK_CODES } from '../src/operational-model.js';
 import { up } from '../migrations/1794192200000_shop_teams.js';
+import { up as selectionMigration } from '../migrations/1795272000000_shop_selection_and_invite_lifetime.js';
 import { notificationVisible } from '../src/notifications.js';
+import { defaultShopSchedule } from '../src/availability.js';
 import { inviteHash } from '../src/shop-team.js';
 const skip = !process.env.DATABASE_URL;
 const supplier = { headers: { 'X-GRIDGO-Role': 'supplier' } };
@@ -48,6 +50,78 @@ async function invite(api,kind='link',identity) {
   assert.equal(r.status,201,bodyOf(r)); return r.body;
 }
 
+test('HTTP one client identity enrolls a shop, switches roles, claims an invite and survives removal', {skip}, async t => {
+  const {db,api} = await setup(t,store => {
+    store.orders[0].performanceClock = {version:1,supplierId:'supplier',schedule:defaultShopSchedule()};
+  });
+  const before = await loadStore(db);
+  const originalUser = before.users.find(row => row.id === 'client');
+  const choices = await api('client','GET','/me/shop-memberships',null,supplier);
+  assert.equal(choices.status,200);
+  assert.equal(choices.body.onboardingRequired,true);
+  const application = { profile: { shopName:'Shop',contactName:'Contact',phone:'+639170000001',
+    location:{lat:7.06,lng:125.6,label:'Pickup'} },serviceCategories:['marketing_collateral'] };
+  const enrollment = await api('client','POST','/auth/clerk/enroll/supplier',application,{key:'one-person-shop'});
+  assert.equal(enrollment.status,201,bodyOf(enrollment));
+  assert.equal(enrollment.body.user.id,'client');
+  assert.equal((await api('client','POST','/auth/clerk/enroll/supplier',application,{key:'one-person-shop'})).status,200);
+  const created = await invite(api,'link');
+  const claim = await api('client','POST','/auth/shop-invites/claim',{token:created.token});
+  assert.equal(claim.status,200,bodyOf(claim));
+  assert.equal(claim.body.member.userId,'client');
+  assert.equal(claim.body.member.status,'pending');
+  const ownerInbox = await api('supplier','GET','/notifications',null,supplier);
+  assert.ok(ownerInbox.body.notifications.some(row => row.type === 'shop_invite_claimed' && row.shopId === 'supplier'));
+  assert.equal((await api('supplier','PATCH','/me/shop-team/members/client',{status:'active'},supplier)).status,200);
+  const selected = await api('client','PATCH','/me/shop-memberships/selected',{shopId:'supplier'},supplier);
+  assert.equal(selected.status,200,bodyOf(selected));
+  assert.equal(selected.body.shop.role,'staff');
+  const me = await api('client','GET','/auth/me/supplier',null,supplier);
+  assert.equal(me.body.user.id,'client');
+  assert.equal(me.body.shop.id,'supplier');
+  assert.equal(me.body.shop.role,'staff');
+  assert.equal((await api('client','GET','/jobs',null,supplier)).status,200);
+  assert.equal((await api('client','GET','/payouts',null,supplier)).body.error,'shop_owner_required');
+  assert.equal((await api('client','GET','/me/supplier-profile',null,supplier)).body.error,'shop_owner_required');
+  const own = {headers:{'X-GRIDGO-Role':'supplier','X-GRIDGO-Shop-Id':'client'}};
+  assert.equal((await api('client','GET','/me/supplier-profile',null,own)).status,200);
+  assert.equal((await api('client','GET','/me/shop-memberships')).body.lastUsedShopId,'supplier');
+  assert.equal((await api('client','PATCH','/me/shop-memberships/selected',{shopId:'replacement'},supplier)).body.error,'shop_membership_required');
+  const clientContext = {headers:{'X-GRIDGO-Role':'client'}};
+  assert.equal((await api('client','GET','/orders/order',null,clientContext)).status,200);
+  assert.equal((await api('supplier','DELETE','/me/shop-team/members/client',null,supplier)).status,200);
+  assert.equal((await api('client','GET','/jobs',null,{headers:{'X-GRIDGO-Role':'supplier','X-GRIDGO-Shop-Id':'supplier'}})).body.error,'shop_access_removed');
+  assert.equal((await api('client','GET','/auth/me/supplier',null,supplier)).body.shop.id,'client');
+  assert.equal((await api('client','GET','/me/shop-memberships')).body.lastUsedShopId,null);
+  assert.equal((await api('client','GET','/orders/order',null,clientContext)).status,200);
+  const after = await loadStore(db);
+  assert.equal(after.users.filter(row => row.clerkUserId === originalUser.clerkUserId).length,1);
+  assert.equal(after.users.find(row => row.id === 'client').role,'client');
+  assert.deepEqual(after.clientProfiles,before.clientProfiles);
+  assert.deepEqual(after.orders,before.orders);
+  assert.deepEqual(after.orderJobs,before.orderJobs);
+});
+
+test('HTTP selected shop persists across API processes and pending or removed access cannot be selected', {skip}, async t => {
+  const {db,api,env} = await setup(t,store => {
+    store.shopMemberships.push({shopId:'replacement',userId:'other',role:'owner',status:'active',createdAt:AT,updatedAt:AT});
+  });
+  const selected = await api('other','PATCH','/me/shop-memberships/selected',{shopId:'replacement'},supplier);
+  assert.equal(selected.status,200,bodyOf(selected));
+  const secondApi = await apiForTest(t,env);
+  assert.equal((await secondApi('other','GET','/auth/me/supplier',null,supplier)).body.shop.id,'replacement');
+  assert.equal((await secondApi('other','GET','/me/supplier-profile',null,supplier)).status,200);
+  assert.equal((await api('other','PATCH','/me/shop-memberships/selected',{shopId:'supplier'},supplier)).status,200);
+  assert.equal((await secondApi('other','GET','/me/supplier-profile',null,supplier)).body.error,'shop_owner_required');
+  for (const status of ['pending','removed']) {
+    await mutate(db,store => { store.shopMemberships.find(row => row.userId === 'other' && row.shopId === 'replacement').status = status; });
+    assert.equal((await api('other','PATCH','/me/shop-memberships/selected',{shopId:'replacement'},supplier)).body.error,
+      status === 'pending' ? 'shop_approval_pending' : 'shop_access_removed');
+  }
+  assert.equal((await api(null,'PATCH','/me/shop-memberships/selected',{shopId:'supplier'})).status,401);
+  assert.equal((await api('other','PATCH','/me/shop-memberships/selected',{shopId:'supplier',role:'owner'},supplier)).status,400);
+});
+
 test('HTTP replace keeps recipient, delivery and unrelated invites; old links and QR fail without leaking secrets', {skip}, async t => {
   let output = '';
   const {db,api} = await setup(t,()=>{},chunk=>{output+=chunk;});
@@ -65,7 +139,7 @@ test('HTTP replace keeps recipient, delivery and unrelated invites; old links an
     assert.notEqual(replaced.body.invite.id,original.invite.id);
     assert.match(replaced.body.token,/^[A-Za-z0-9_-]{43}$/);
     assert.notEqual(replaced.body.token,original.token);
-    assert.equal(Date.parse(replaced.body.invite.expiresAt)-Date.parse(replaced.body.invite.createdAt),172800000);
+    assert.equal(Date.parse(replaced.body.invite.expiresAt)-Date.parse(replaced.body.invite.createdAt),86400000);
     const old = await api('new','POST','/auth/shop-invites/claim',{token:original.token});
     assert.equal(old.status,409); assert.equal(old.body.error,'shop_invite_revoked');
     if (['email','phone'].includes(kind)) {
@@ -110,8 +184,8 @@ test('HTTP replacement refuses Staff, non-members, other shops and consumed or e
   }
   assert.equal((await api(null,'POST',path,{},supplier)).status,401);
   assert.deepEqual((await db.query('SELECT * FROM shop_invites ORDER BY id')).rows,before.rows);
-  await db.query(`INSERT INTO shop_invites(id,shop_id,kind,token_hash,created_by,created_at,expires_at)
-    VALUES ('expired','supplier','qr',$1,'supplier',now()-interval '48 hours',now())`,[inviteHash('z'.repeat(43))]);
+  await db.query(`INSERT INTO shop_invites(id,shop_id,kind,token_hash,created_by,created_at,expires_at,lifetime_hours)
+    VALUES ('expired','supplier','qr',$1,'supplier',now()-interval '24 hours',now(),24)`,[inviteHash('z'.repeat(43))]);
   assert.equal((await api('supplier','POST','/me/shop-team/invites/expired/replace',{},supplier)).body.error,'shop_invite_expired');
   assert.equal((await api('client','POST','/auth/shop-invites/claim',{token:original.token})).status,200);
   assert.equal((await api('supplier','POST',path,{},supplier)).body.error,'shop_invite_used');
@@ -286,7 +360,7 @@ test('HTTP all invite kinds use verified identities, expire, revoke, claim once,
   assert.equal((await api('other','POST','/me/shop-team/invites',{kind:'link'},supplier)).status,403);
   for(const [kind,identity,account] of [['email','new@example.invalid','new'],['phone','+639171234567','phone'],['qr',undefined,'qr'],['link',undefined,'link']]) {
     const created=await invite(api,kind,identity);
-    assert.equal(Date.parse(created.invite.expiresAt)-Date.parse(created.invite.createdAt),48*3600000);
+    assert.equal(Date.parse(created.invite.expiresAt)-Date.parse(created.invite.createdAt),24*3600000);
     assert.match(created.token,/^[\w-]{43}$/); assert.equal(created.delivery,'share_link');
     if(identity) {
       const wrong=await api('client','POST','/auth/shop-invites/claim',{token:created.token});
@@ -310,8 +384,8 @@ test('HTTP all invite kinds use verified identities, expire, revoke, claim once,
   // Build a genuinely expired invite at insertion; immutable issued timestamps cannot be edited.
   const expiredToken='z'.repeat(43);
   const {inviteHash}=await import('../src/shop-team.js');
-  await db.query(`INSERT INTO shop_invites(id,shop_id,kind,token_hash,created_by,created_at,expires_at)
-    VALUES ('expired','supplier','qr',$1,'supplier',now()-interval '49 hours',now()-interval '1 hour')`,[inviteHash(expiredToken)]);
+  await db.query(`INSERT INTO shop_invites(id,shop_id,kind,token_hash,created_by,created_at,expires_at,lifetime_hours)
+    VALUES ('expired','supplier','qr',$1,'supplier',now()-interval '25 hours',now()-interval '1 hour',24)`,[inviteHash(expiredToken)]);
   assert.equal((await api('other','POST','/auth/shop-invites/claim',{token:expiredToken})).body.error,'shop_invite_expired');
   const concurrent=await invite(api);
   const results=await Promise.all(['other','client'].map(account=>api(account,'POST','/auth/shop-invites/claim',{token:concurrent.token})));
@@ -387,6 +461,7 @@ test('additive migration backfills every existing supplier owner and retains Cle
   const db=createDatabase(process.env);t.after(()=>db.close());
   await db.transaction(async()=>{
     await db.query('CREATE SCHEMA shop_team_migration_test');
+    await db.query('SAVEPOINT migration_fixture');
     try {
       await db.query('SET LOCAL search_path TO shop_team_migration_test');
       await db.query(`CREATE TABLE users(id text PRIMARY KEY,name text,clerk_user_id text);
@@ -399,6 +474,26 @@ test('additive migration backfills every existing supplier owner and retains Cle
       const rows=(await db.query('SELECT * FROM shop_memberships')).rows;
       assert.equal(rows.length,1);assert.equal(rows[0].role,'owner');assert.equal(rows[0].status,'active');
       assert.equal((await db.query("SELECT clerk_user_id FROM users WHERE id='owner'")).rows[0].clerk_user_id,'same_clerk_subject');
+      await db.query(`INSERT INTO shop_invites(id,shop_id,kind,token_hash,created_by,created_at,expires_at)
+        VALUES ('old','owner','link',$1,'owner','2026-11-20T00:00:00Z','2026-11-22T00:00:00Z')`,[inviteHash('o'.repeat(43))]);
+      const oldInvite=(await db.query("SELECT * FROM shop_invites WHERE id='old'")).rows[0];
+      await selectionMigration({sql:sql=>db.query(sql)});
+      const migrated=(await db.query("SELECT * FROM shop_invites WHERE id='old'")).rows[0];
+      assert.deepEqual(migrated,{...oldInvite,lifetime_hours:48});
+      assert.deepEqual((await db.query('SELECT * FROM shop_memberships')).rows,rows.map(row=>({...row,last_used_at:null})));
+      // A process from before deployment omits the new column and still issues 48 hours.
+      await db.query(`INSERT INTO shop_invites(id,shop_id,kind,token_hash,created_by,created_at,expires_at)
+        VALUES ('legacy_writer','owner','link',$1,'owner','2026-11-21T00:00:00Z','2026-11-23T00:00:00Z')`,[inviteHash('l'.repeat(43))]);
+      assert.equal((await db.query("SELECT lifetime_hours FROM shop_invites WHERE id='legacy_writer'")).rows[0].lifetime_hours,48);
+      await db.query(`INSERT INTO shop_invites(id,shop_id,kind,token_hash,created_by,created_at,expires_at,lifetime_hours)
+        VALUES ('new','owner','link',$1,'owner','2026-11-21T00:00:00Z','2026-11-22T00:00:00Z',24)`,[inviteHash('n'.repeat(43))]);
+      assert.equal((await db.query("SELECT lifetime_hours FROM shop_invites WHERE id='new'")).rows[0].lifetime_hours,24);
+      await db.query('SAVEPOINT immutable_invite');
+      await assert.rejects(db.query("UPDATE shop_invites SET lifetime_hours=24,expires_at=created_at+interval '24 hours' WHERE id='old'"),/immutable/);
+      await db.query('ROLLBACK TO SAVEPOINT immutable_invite');
+    } catch (error) {
+      await db.query('ROLLBACK TO SAVEPOINT migration_fixture');
+      throw error;
     } finally {await db.query('SET LOCAL search_path TO public');await db.query('DROP SCHEMA shop_team_migration_test CASCADE');}
   });
 });

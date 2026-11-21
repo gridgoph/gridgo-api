@@ -80,6 +80,7 @@ export function publicNotification(notification, order) {
     at: notification.at,
   };
   if (notification.type) item.type = notification.type;
+  if (notification.type === 'shop_invite_claimed') item.shopId = notification.shopId;
   if (notification.type === "support_message" && notification.threadId) item.threadId = notification.threadId;
   if (notification.voucherId) item.voucherId = notification.voucherId;
   if (notification.organizationUserId) item.organizationUserId = notification.organizationUserId;
@@ -366,6 +367,16 @@ export function canAccessOrder(store, userId, order, {role, location = false, of
 }
 export function notificationVisible(store, notification, userId, role, { shopId = null } = {}) {
   if (!notification || notification.userId !== userId || notification.deletedAt != null) return false;
+  if (notification.type === 'shop_express_offer') {
+    // The domain shop ID is also the original account ID. It is not proof of
+    // current membership after removal, even when another shop grants app access.
+    const offerShopId = notification.shopId || notification.userId;
+    const member = (store.shopMemberships || []).find(row => row.shopId === offerShopId && row.userId === userId);
+    if (orderFromNotification(store, notification)?.supplierId !== offerShopId
+      || (shopId && shopId !== offerShopId) || member?.status !== 'active'
+      || !['owner', 'staff'].includes(member.role)
+      || (notification.expressOffer?.earningsMinor != null && member.role !== 'owner')) return false;
+  }
   // Test operations receive staff inbox rows only about review orders and accounts.
   if (isTestOperationsUser(store, userId) && !reviewSubject(store, notification)) return false;
   if (role && !(role === 'supplier' ? hasSupplierAppAccess(store, userId) : hasRole(store,userId,role))) return false;
@@ -373,9 +384,9 @@ export function notificationVisible(store, notification, userId, role, { shopId 
   // A former Owner keeps the business user ID; role demotion must also hide
   // their historical money notifications. Selected Staff context never mixes
   // in notices for another shop the same person happens to own.
-  const staffContext = (store.shopMemberships || []).find(m => m.userId === userId && m.shopId === (shopId || userId) && m.role === 'staff');
+  const staffContext = (store.shopMemberships || []).find(m => m.userId === userId && m.shopId === (shopId || notification.shopId || userId) && m.role === 'staff');
   if (staffContext && (!requiredRole || requiredRole === 'supplier') && (!role || role === 'supplier')) {
-    if (staffContext.status !== 'active' || notification.type !== 'shop_job_assigned'
+    if (staffContext.status !== 'active' || notification.expressOffer?.earningsMinor != null || !['shop_job_assigned', 'shop_express_offer'].includes(notification.type)
       || (notification.shopId || orderFromNotification(store, notification)?.supplierId) !== staffContext.shopId) return false;
   }
 
@@ -389,6 +400,9 @@ export function notificationVisible(store, notification, userId, role, { shopId 
     if (!legacySuperSeesOps) return false;
   }
   if (requiredRole && !(requiredRole === 'supplier' ? hasSupplierAppAccess(store, userId) : hasRole(store,userId,requiredRole)) && !(requiredRole==='ops_admin'&&hasRole(store,userId,'super_admin'))) return false;
+  if (notification.type === 'shop_invite_claimed' && requiredRole === 'supplier'
+    && ((shopId && shopId !== notification.shopId) || !(store.shopMemberships || []).some(member =>
+      member.userId === userId && member.shopId === notification.shopId && member.role === 'owner' && member.status === 'active'))) return false;
   if (notification.audienceRoles && !(role ? notification.audienceRoles.includes(role) && hasRole(store,userId,role) : notification.audienceRoles.some(r=>hasRole(store,userId,r)))) return false;
   if (notification.approvalCaseId) {
     const c = (store.approvalCases || []).find(c => c.id === notification.approvalCaseId);

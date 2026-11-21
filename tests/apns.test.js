@@ -249,3 +249,14 @@ test("APNs stream timeouts and errors leave other deliveries and the session usa
   assert.equal((await h.send(["5"]))[0].ok, true);
   assert.equal(h.clients.length, 2);
 });
+
+test('native APNs Express carries the registered category and exact offer expiry',async t=>{
+ const {pushMessageFor}=await import('../src/push.js');
+ const at='2026-11-21T09:00:00.000Z',acceptBy='2026-11-21T09:05:00.000Z';
+ const message=pushMessageFor({id:'express_offer',type:'shop_express_offer',orderId:'order',at,
+  expressOffer:{pages:8,fulfillmentMode:'pickup',earningsMinor:10000,acceptBy}});
+ assert.equal(apnsPayload(message).aps.category,'gridgo_express_offer');
+ const h=await apnsHarness(t,stream=>{stream.respond({':status':200});stream.end();});
+ assert.equal((await h.delivery.send(message,[{id:'express',userId:'shop',appRole:'supplier',token:'a'.repeat(64)}]))[0].ok,true);
+ assert.equal(h.received[0]['apns-expiration'],String(Date.parse(acceptBy)/1000));
+});

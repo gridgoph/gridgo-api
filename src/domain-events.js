@@ -3,6 +3,7 @@ import { availableDispatch } from "./dispatch-policy.js";
 import { activePayoutHold } from "./operational-model.js";
 import { formatMinorPhp, payoutStageLabel } from "./payout-copy.js";
 import {
+  shopNotificationDraft,
   writeDraft,
   notifyOrderParties,
   notifyOpsOrderProgress,
@@ -91,6 +92,11 @@ export function deriveDomainEvents(store, before, { createId, at }) {
   }
   function notify(userId, type, title, order, occurrence, appRole, extra = {}, preserveOccurrences = false) {
     if (!userId || (appRole === "supplier" && order && !supplierArtworkReleased(order))) return;
+    if (type === 'shop_job_assigned' && order?.orderType === 'express') {
+      const draft = shopNotificationDraft(order);
+      if (!draft || draft.type !== 'shop_express_offer') return;
+      type = draft.type; title = draft.title; extra = { ...extra, body: draft.body, expressOffer: draft.expressOffer, shopId: order.supplierId };
+    }
     // Existing route effect for the same recipient/purpose wins in this transaction.
     if (
       (store.notifications || []).some(

@@ -1,5 +1,11 @@
 # GRIDGO API production deployment
 
+Apply both shop-selection/invite migrations (`1795272000000` and
+`1795272100000`) before deploying the shared-account shop release. The second
+is required for older API processes to claim, revoke or replace newly issued
+24-hour invites during a mixed-version deploy or rollback; issued deadlines and
+consumption guards are preserved. See [Shop teams](SHOP_TEAM_API.md#validation-and-rollout).
+
 After applying the session-observation migration, run
 `npm run backfill:last-sign-ins` with the intended deployment database to recover
 historical observations from GRIDGO's `staff.sign_in` audit evidence. The command
@@ -158,6 +164,34 @@ Local `.env` also uses `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POS
 The support desk uses only Clerk sessions and `SUPPORT_DESK_ALLOWED_EMAILS`. Remove retired desk username/password/JWT-secret settings from deployment configuration; startup never seeds a password desk administrator. The legacy `support_admins` table remains unused for schema compatibility.
 
 There is no `AUTH_MODE`, `STORE_PATH`, demo password, `GRIDGO_*_PASSWORD`, or local session configuration. Leaving one of the required Clerk/database values out makes the process refuse before listening; errors name variable names but never values.
+
+Apply migration `1795274000000_early_access_apps` before deploying the per-app
+early-access API or website form. It defaults existing sign-ups to `customer`
+and retains consent/grant history. Shop grants use the existing supplier Play
+settings (`app=supplier`, default opt-in URL ending in `ph.gridgo.supplier`).
+Optional automatic Group enrollment reuses `PLAY_TESTER_GROUP_SUPPLIER` and the
+three `PLAY_TESTER_GOOGLE_*` credentials; empty configuration keeps manual staff
+enrollment. Shop iPhone requests are notify-only and cannot be granted.
+
+Shop early access is server-disabled by default (`shopEarlyAccessEnabled=false`,
+including a missing setting). The checked-in compose runs one stable `gridgo-api`
+container; its Node process owns the early-access mail worker. There is no separate
+worker service. The old API can still run while the migration one-shot completes.
+Deploy first, confirm `/health.commit` and replacement of that API container,
+confirm no old replica/ad-hoc API/mail process uses the database, then let Super
+Admin enable the flag with `PATCH /settings` using current `expectedVersion` and
+a reason. Customer early access stays open throughout.
+
+Before rollback below this release, disable shop early access and require no
+ungranted shop rows. Granted shop rows also break old email-only customer reads,
+so an old binary is safe only with no shop rows or shop mail intents at all.
+Never delete consent/history for rollback; once shop data exists, keep app-aware
+code and roll forward or use a customer-scoped compatibility release. Keep the
+new worker for already queued mail even after disabling the flag. Repeating a
+new-code shop grant repairs an unscoped legacy grant with an audited supplier
+link and one corrective mail; do this only after old processes are gone.
+See [Early access](EARLY_ACCESS_API.md) for the website/desk contract, activation
+handshake and repair semantics.
 
 ## 3. Clean cutover procedure
 
