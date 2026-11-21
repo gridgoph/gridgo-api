@@ -367,6 +367,10 @@ export function canAccessOrder(store, userId, order, {role, location = false, of
 }
 export function notificationVisible(store, notification, userId, role, { shopId = null } = {}) {
   if (!notification || notification.userId !== userId || notification.deletedAt != null) return false;
+  if (['shop_job_assigned','shop_express_offer'].includes(notification.type)) {
+    const shop=notification.shopId || orderFromNotification(store,notification)?.supplierId || notification.userId;
+    if ((store.shopTeamMemberSettings || []).some(m=>m.shopId===shop && m.userId===userId && m.jobAlerts===false))return false;
+  }
   if (notification.type === 'shop_express_offer') {
     // The domain shop ID is also the original account ID. It is not proof of
     // current membership after removal, even when another shop grants app access.

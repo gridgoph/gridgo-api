@@ -1838,8 +1838,8 @@ export function publicOrderFor(order, user, store = null) {
   }
   if (ops || assignedSupplier) publicRecord.actions = (store?.orderActions || []).filter(row => row.orderId === order.id)
     .sort((a, b) => a.at.localeCompare(b.at) || a.id.localeCompare(b.id))
-    .map(row => ({ id: row.id, at: row.at, action: row.action, actor: { userId: row.actorUserId, name: row.actorName, role: row.actorRole } }));
-  if (user?.shopRole === 'staff') return staffOrderProjection(publicRecord);
+    .map(row => ({ id: row.id, at: row.at, action: row.action, actor: { userId: row.actorUserId, name: row.actorName, role: row.actorRole, ...(row.actorPinStaffId ? {pinStaffId:row.actorPinStaffId} : {}) } }));
+  if (['staff','manager'].includes(user?.shopRole)) return staffOrderProjection(publicRecord);
   return owningClient && order.orderType === "express" ? expressClientProjection(publicRecord) : publicRecord;
 }
 

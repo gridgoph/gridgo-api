@@ -209,7 +209,7 @@ claimant. Refresh bootstrap/team status after an uncertain network result.
 Concurrent claims serialize under the domain transaction lock: one succeeds.
 A new invitation is required after removal/decline.
 
-### Team list, approval, removal — Owner only
+### Team list, approval, removal — base Owner contract (extensions below)
 
 | Method and route | Body | Response |
 | --- | --- | --- |
@@ -248,7 +248,7 @@ audit-read scope restrictions remain intact.
 Staff never receives the Owner's identity or memberships for authorization.
 Each request reloads membership, person standing, shop standing and the existing
 supplier approval facts. Staff receives only the following supplier endpoints;
-**every other supplier endpoint is Owner-only by default**, including future
+**every other supplier endpoint is Owner-only by default** (Managers have the explicit additions below), including future
 routes. Existing ownership, state, artwork-release, evidence, QA, refund, claim,
 inspection and handover guards still apply.
 
@@ -379,9 +379,8 @@ timestamps before PostgreSQL checks an upsert. Previous API processes can then
 claim, revoke or replace existing 24-hour invitations despite omitting the new
 column. The 24/48-hour check and update immutability/consumption guards remain
 in force; this migration does not rewrite existing invitations.
-Manager registration while the owner is away, owner SMS confirmation/dispute,
-and PIN-only staff are separate product work; this change retains the published
-owner/staff permissions and approval flow.
+Manager registration while the owner is away and owner SMS confirmation/dispute
+remain separate product work. Manager/PIN extensions below retain invite approval.
 
 Companion releases must make these changes:
 
@@ -405,3 +404,214 @@ Focused tests use a dedicated test database and `npm test -- --maxWorkers=2
  tests/shop-identity.test.js tests/shop-team.test.js tests/shop-team-postgres.test.js tests/auth-mode.test.js`. The HTTP tests use
 locally signed Clerk JWTs and a local Clerk Backend API stub, never production
 users or a live Clerk instance. The PR CI runs the full repository suite.
+
+## Extended team contract (report F315793B)
+
+The following additions apply to both supplier app and supplier web. Use the
+existing Clerk bearer, `X-GRIDGO-Role: supplier` and explicit
+`X-GRIDGO-Shop-Id` on every call. All responses are private/no-store.
+
+### Manager and team permissions
+
+`PATCH /me/shop-team/members/:userId` now accepts `role: manager` in addition
+to Owner/Staff, plus `jobAlerts: boolean` and `photoFileId: string | null`.
+Approval/removal and the last-owner guard remain unchanged. Only Owners may
+promote/demote Owners or Managers. Managers may invite, replace/revoke invites,
+approve/remove Staff and edit Staff alerts/photos. They cannot modify themselves
+or other Managers, promote anyone, or change the shop's team settings.
+
+Managers receive the Staff work routes and the same money-free order/Express
+projections. Their additional allowlist is:
+
+- `GET`/`PATCH /me/shop-hours`, including the existing version and schedule rules.
+- `GET /listing-starters`, `/me/supplier-readiness`, `/me/supplier-services`.
+- Existing `GET`/`POST`/`PATCH`/`DELETE /me/catalog-items` and `/:id`;
+  `POST /me/catalog-items/production-time`;
+  `GET /me/catalog-items/:id/production-time-preview`;
+  existing listing file-format, photo reorder, prep-step, option-group and
+  option routes under `/me/catalog-items` and `/me/catalog-option-groups`.
+- Team routes below and existing invite/Staff management routes.
+- Existing file upload/attach routes for `catalog_item_photo` and
+  `shop_team_photo`, alongside Staff's work evidence purposes.
+
+Unlisted routes remain Owner-only. Payout account, Money/earnings/payouts,
+reports, invoices, payment terms, supplier profile, supplier-service writes,
+account settings, quoting and financial order changes are refused. Listing
+prices remain editable product data; that does not grant order financial data.
+
+### Sign-up and shop settings
+
+`POST /auth/clerk/enroll/supplier` accepts optional top-level
+`jobsHandledBy: "just_me" | "me_and_staff"` (default `just_me`). This is saved
+on the shop without delaying enrollment or approval. The Owner can invite/add
+Staff immediately after enrollment and carry on with setup.
+
+`GET /me/shop-team/settings` returns
+`{settings:{jobsHandledBy,showRankingToStaff}}` to active teammates.
+`PATCH /me/shop-team/settings` is Owner-only and accepts either/both fields;
+`showRankingToStaff` is a boolean, default true. Hiding ranking removes the
+fastest badge from Staff's team/stats responses; the mission stays visible.
+Managers retain the management view. It never adds a slowest list.
+
+### Phone-free Staff and shared devices
+
+PIN Staff are independent shop records, never GRIDGO users, Clerk identities or
+platform memberships. They cannot sign in or work remotely using a PIN.
+
+| Method and route | Body | Response |
+| --- | --- | --- |
+| `POST /me/shop-team/pin-staff` | `{name,pin,role?,jobAlerts?,photoFileId?}` | `201 {member}` |
+| `PATCH /me/shop-team/pin-staff/:id` | Any of `{name,role,jobAlerts,photoFileId}` | `{member}` |
+| `POST /me/shop-team/pin-staff/:id/reset` | `{pin}` | `{member}`; revokes every old acting context |
+| `DELETE /me/shop-team/pin-staff/:id` | — | `{member}` with `status: removed`; revokes contexts |
+| `GET /me/shop-team/working` | — | `{members:[...],worker:null\|{pinStaffId,name,role}}` |
+| `POST /me/shop-team/working/select` | `{pinStaffId,pin}` | `{worker,token,expiresAt}` |
+| `POST /me/shop-team/working/lock` | `{}` | `{locked:true}` |
+
+A PIN is exactly four decimal digits sent as a **string**, preserving leading
+zeroes. Names are 1–100 trimmed characters. PIN member role is `staff` (default)
+or `manager`; only an Owner may create/promote a Manager or edit a Manager.
+`jobAlerts` defaults true. `member` contains `id,shopId,kind:"pin",name,role,status,
+jobAlerts,photoFileId,createdAt,updatedAt`; no hash, version or attempt counters.
+Removed records cannot be revived; add a new record when needed. PIN hashes use
+random salts and scrypt. Raw PINs never appear in lists, audit or logs.
+
+Selection requires an active signed-in Clerk **session with `sid`**, an active
+membership in the selected shop, and that shop's PIN. The returned opaque token
+lasts 30 minutes and is bound to the shop, signed-in person, Clerk device session
+and current PIN version. Store it in memory and send
+`X-GRIDGO-Worker-Token: <token>` on subsequent shop requests. Refreshing the Clerk
+JWT with the same `sid` keeps that binding; a different login/session cannot use
+it. A database-backed session lock prevents dropping the worker header to regain
+the signed-in person's Owner permissions, selecting another platform role or
+switching to another owned shop.
+
+`working/select` and `working/lock` remain available while locked. The picker
+list remains readable without a worker token so the next worker can select
+themselves. A successful selection replaces the prior context. Lock, expiry,
+PIN reset and removal require selection again; they **never** fall back to the
+Owner. Resume Owner management by ending that Clerk session and signing in
+again, or use the Owner's separate management device. Clear cached private
+Owner screens on selection, role change, lock and all worker errors.
+
+Five failed guesses block that PIN across all devices for 15 minutes. Five
+failures in one device session also block that device across PIN records for
+15 minutes. Failed attempts commit even though the response is a refusal;
+restarting an API process cannot clear them. Reset clears the person's attempt
+counter, while an already blocked device must still wait.
+
+The server records both the signed-in account (`actor.userId`) and the selected
+person (`actor.pinStaffId`, immutable action-time name/role) in each order action
+and timeline event. File/chat ownership continues to use a real signed-in user
+ID; the PIN context never changes order ownership, money or Clerk identity.
+PIN staff have no separate push destination. Their `jobAlerts` preference is
+available to the shared-device UI; account members' preferences additionally
+gate inbox/SSE/push delivery. Before entering shared mode the app/web must close
+its Owner SSE connection, unregister its personal push/browser subscription,
+and clear Owner notifications. Personal notification/device routes are refused
+inside a selected PIN context; the work list remains available. New selections
+also close pre-existing supplier SSE streams through identity invalidation.
+
+### Team, alerts and photos
+
+`GET /me/shop-team` is now readable by active Staff. It returns:
+
+```json
+{"shop":{"id":"shop_id","name":"Print shop"},"members":[],"pinStaff":[],"stats":{"weekStartsAt":"...","weekEndsAt":"...","fastestThisWeek":null,"mission":{}},"settings":{"jobsHandledBy":"me_and_staff","showRankingToStaff":true}}
+```
+
+Account members retain the documented fields and add `kind:"account"`,
+`jobAlerts`, and nullable `photoFileId`. PIN rows include `onShift`, true only
+while an unexpired context matches the current active record/PIN version.
+Owners/Managers also receive removed/pending rows and `invites`; Staff receive
+active people only, no invite list and no per-person stats. The working picker
+uses only active account/PIN rows. Account holders work through their own Clerk
+login; the PIN selector selects phone-free records only.
+
+`PATCH /me/shop-team/me` accepts `{jobAlerts:boolean,photoFileId:string|null}`
+(or either field). It changes the signed-in person's selected-shop preference,
+or the selected PIN person's preference, and returns `{member}`. Owners and
+Managers use the member/PIN update routes for Staff preferences. Turning off
+account job alerts suppresses new-job/Express fan-out and rechecks previously
+queued delivery and inbox visibility; it does not remove other notifications.
+
+For optional photos use the existing multipart `POST /files` with
+`purpose=shop_team_photo` and `file` (JPEG/PNG/WebP, max 5 MiB). After the normal
+ready response, send its `fileId` to the member preference/update/create route.
+Only the uploader's own ready, unattached upload for that selected shop can be
+bound. Send null to clear a photo. Do not call `/files/:id/attach` for this
+purpose: the team mutation binds the private reference atomically.
+Read metadata/signed media through `GET /files/:id` and
+`GET /files/:id/download-url`. Current active members in that shop may read
+bound team photos; outsiders and removed members cannot. New account invitees
+can add their photo after approval. Photos are optional throughout.
+
+### Weekly positive team view
+
+`GET /me/shop-team/stats` returns the same `stats` object as the team response.
+Weeks run Monday 00:00 to Monday 00:00 **Asia/Manila**. `jobsThisWeek` counts
+unique jobs the person acted on during that week. Acceptance speed uses the
+append-only `order.accepted` evidence, with exact elapsed milliseconds from the
+snapshotted offer assignment to accepted time; failed/refused/retried actions
+never add an acceptance. This release records that evidence at save alongside
+the ordinary action log. Historical actions lacking measured acceptance
+evidence contribute to handled-job counts but have no invented speed.
+
+Owners/Managers receive `stats.members`, with `userId` or `pinStaffId`, `name`,
+`jobsThisWeek`, `acceptedJobs`, and `averageAcceptSeconds` (rounded, null when
+unmeasured). Returned member order is roster order, never a slowest ranking.
+Staff do not receive this array or any person's speed/count/sample values.
+`fastestThisWeek` is null when unmeasured/hidden; otherwise it contains only
+`userId` or `pinStaffId`, `name`, `badge:"fastest_this_week"`. Ties use a stable ID
+ordering. The mission is `{code:"accept_within_five_minutes",targetJobs:10,
+acceptedJobs,quickAcceptedJobs,completed}`: ten team accepts within five minutes
+this week. It is a positive progress goal with no penalty or slowest list.
+Only actions for this shop count, including when a person works at other shops.
+
+Additional errors: `400 invalid_shop_pin`, `invalid_shop_worker_selection`,
+`invalid_shop_team_settings`, `invalid_shop_team_photo`, `invalid_shop_member_name`;
+`403 shop_device_session_required`, `shop_worker_invalid`, `shop_worker_locked`,
+`shop_pin_invalid`, `shop_mobile_verification_required`;
+`429 shop_pin_rate_limited`. Existing member/Owner/access errors still apply.
+Treat worker errors as a locked picker state; do not retry an old token silently.
+
+### Required supplier app and supplier web calls
+
+Both clients must implement these same calls and gates:
+
+1. During supplier enrollment submit `jobsHandledBy`; later read/update the
+   Owner team settings. Continue setup while invites are pending.
+2. Link/QR: create an invite, display/share the fragment-based join URL, preserve
+   the token through Clerk sign-in, then claim it using the current account.
+   For a **new GRIDGO person** joining by link/QR, collect name and use Clerk's
+   six-digit mobile verification flow before claiming. The API reads verified
+   mobile evidence from Clerk, never a submitted code/phone claim. Optional
+   claim `name` initializes only a new person; existing people retain identity.
+   Existing GRIDGO users sign in to their own account; never create duplicates.
+   Refresh pending bootstrap, then work after approval; Owner notice is unchanged.
+3. Use `GET /me/shop-team` for the team card/roster, pending invites, PIN cards,
+   role controls, weekly metrics and positive view. Owner/Manager manage Staff
+   through existing member routes; Owner alone grants Manager and hides ranking.
+4. Add phone-free Staff with `/pin-staff`; use `working` list/select/lock on the
+   signed-in shop device. Retain the returned acting token only for that device,
+   send it on every shop call, and show its worker name prominently. Lock on
+   handover/background/logout and clear cached Owner data before shared mode.
+5. Toggle own alerts/photo through `/me/shop-team/me`; manage other Staff through
+   member/PIN routes. Upload photos with the existing upload control plane and
+   resolve their private download URLs through the existing file read path.
+6. Managers show hours/products/Staff management plus work. Staff show work and
+   the positive team view. Only Owners show Money and owner settings. Use
+   bootstrap `shop.role` and worker context, never infer privileges from the
+   carrier account or legacy `users.role`. Handle every `403` and lock error.
+
+### Deployment compatibility
+
+Apply forward migrations `1795287000000` and `1795287001000` before this API.
+Manager grants/preferences and PIN/device state live in separate tables; legacy
+`shop_memberships.role` remains `owner|staff` so overlapping older writers keep
+working and treat Managers as limited Staff. Nullable action evidence columns
+permit old inserts. No existing membership/invite/order is rewritten and no new
+CHECK constraint invalidates an old-column membership upsert. Enable companion
+PIN/shared-device screens only after **every** API process serves this version;
+older binaries cannot enforce a new acting context. Frontend releases and
+production end-to-end acceptance remain separate from this API change.
