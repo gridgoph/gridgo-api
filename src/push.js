@@ -525,7 +525,7 @@ export function pushMessageFor(notification, env = process.env, { at = notificat
     return {
       ...copy, title: reviewPrefix + copy.title, data, ...presentation,
       ttlSeconds: Math.max(0, Math.floor((Date.parse(notification.expressOffer.acceptBy) - Date.parse(at)) / 1000)),
-      category: "gridgo_express_offer",
+      category: "gridgo_express_offer", expiresAt: notification.expressOffer.acceptBy,
     };
   }
   // Fixed offer copy carries no customer, address, or money fields.
@@ -632,7 +632,7 @@ export function fcmRequestBody(message, token, { validateOnly = false, platform 
     androidNotification.default_vibrate_timings = true;
   }
   const apns = {
-    headers: { "apns-priority": "10", ...(message.transient ? { "apns-expiration": "0" } : Number.isFinite(message.ttlSeconds) ? { "apns-expiration": String(Math.floor(Date.now() / 1000) + message.ttlSeconds) } : {}) },
+    headers: { "apns-priority": "10", ...(message.transient ? { "apns-expiration": "0" } : Number.isFinite(Date.parse(message.expiresAt)) ? { "apns-expiration": String(Math.floor(Date.parse(message.expiresAt) / 1000)) } : {}) },
     payload: { aps },
   };
   if (message.image) {
