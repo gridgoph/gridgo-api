@@ -158,3 +158,11 @@ test('reminder wording follows the configured window without showing an early co
   const s=fixture();s.settings.supplierVerification.windowDays=60;remindSupplierVerification(s,{at:when(27),id});
   assert.doesNotMatch(s.notifications[0].body,/3 days/);
 });
+
+test('reservation events use the durable inbox for every current Operations and Super Admin membership',async()=>{
+  const {cancelVerificationReservation}=await import('../src/supplier-verification.js');
+  const s=fixture();s.userRoleMemberships.push({userId:'ops',role:'ops_admin'},{userId:'admin',role:'super_admin'});
+  const o=order(s,'notice',100);prepare(s,o);
+  cancelVerificationReservation(s,o,'stage:notice:production',{at:when(1),actor,id,reason:'No funds sent'});
+  for(const userId of ['shop','ops','admin'])assert.equal(s.notifications.filter(n=>n.userId===userId&&n.type==='supplier_verification_update').length,2);
+});

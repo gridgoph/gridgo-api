@@ -35,11 +35,11 @@ function append(store,{supplierId,orderId=null,key,kind,amountMinor=0,data={}},{
   store.supplierVerificationLedger||=[];store.auditLog||=[];
   const entry={id:id('svl'),supplierId,orderId,payoutKey:key,kind,amountMinor,at,actorId:(store.users||[]).some(u=>u.id===actor.id)?actor.id:null,data};
   store.supplierVerificationLedger.push(entry);
-  if(['held','available','recovery_due','recovered'].includes(kind)) {
+  if(['held','available','recovery_due','recovered','reserved','reservation_cancelled'].includes(kind)) {
     const recipients=[{userId:supplierId,role:'supplier'},...(store.userRoleMemberships||[]).filter(m=>['ops_admin','super_admin'].includes(m.role))];
     for(const recipient of recipients)(store.notifications||=[]).push({id:id('ntf'),userId:recipient.userId,appRole:recipient.role,at,
       type:'supplier_verification_update',partyUserId:supplierId,approvalCaseId:(store.approvalCases||[]).find(c=>c.userId===supplierId&&c.kind==='supplier')?.id,title:'Shop verification and payouts',
-      body:kind==='held'?'A payout is waiting. Open Money for the verification requirement.':kind==='available'?'A verification payout hold was lifted. Operations will review the transfer.':kind==='recovery_due'?'New orders are paused while a paid-stage recovery is outstanding. Open Money or contact Operations.':'A recovery amount was applied to a payout.',read:false});
+      body:kind==='reserved'?'Operations prepared a payout. Open Money for its status.':kind==='reservation_cancelled'?'An unsent payout preparation was cancelled. Open Money for its status.':kind==='held'?'A payout is waiting. Open Money for the verification requirement.':kind==='available'?'A verification payout hold was lifted. Operations will review the transfer.':kind==='recovery_due'?'New orders are paused while a paid-stage recovery is outstanding. Open Money or contact Operations.':'A recovery amount was applied to a payout.',read:false});
   }
   store.auditLog.push({id:id('aud'),at,actorId:(store.users||[]).some(u=>u.id===actor.id)?actor.id:null,actorRole:actor.role||'system',action:`supplier_verification.${kind}`,
     entityType:'user',entityId:supplierId,...(orderId?{orderId}:{}),detail:entry});
