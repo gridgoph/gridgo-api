@@ -159,6 +159,15 @@ The support desk uses only Clerk sessions and `SUPPORT_DESK_ALLOWED_EMAILS`. Rem
 
 There is no `AUTH_MODE`, `STORE_PATH`, demo password, `GRIDGO_*_PASSWORD`, or local session configuration. Leaving one of the required Clerk/database values out makes the process refuse before listening; errors name variable names but never values.
 
+Apply migration `1795274000000_early_access_apps` before deploying the per-app
+early-access API or website form. It defaults existing sign-ups to `customer`
+and retains consent/grant history. Shop grants use the existing supplier Play
+settings (`app=supplier`, default opt-in URL ending in `ph.gridgo.supplier`).
+Optional automatic Group enrollment reuses `PLAY_TESTER_GROUP_SUPPLIER` and the
+three `PLAY_TESTER_GOOGLE_*` credentials; empty configuration keeps manual staff
+enrollment. Shop iPhone requests are notify-only and cannot be granted.
+See [Early access](EARLY_ACCESS_API.md) for the website/desk contract and rollout.
+
 ## 3. Clean cutover procedure
 
 Firstmate supplies production values and performs these steps during the cutover window. This repository task does not execute them.
