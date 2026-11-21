@@ -79,7 +79,7 @@ const TABLES = [
   { name: "client_match_selections", keys: ["token_hash"], columns: ["token_hash", "client_id", "request_id", "expires_at", "selection"] },
   { name: "client_match_preferences", keys: ["client_id"], columns: ["client_id", "ranking", "version", "updated_at"] },
   { name: "client_saved_addresses", keys: ["id"], columns: ["id", "client_id", "label", "address_line", "lat", "lng", "is_default", "version", "created_at", "updated_at", "deleted_at"] },
-  { name: "supplier_profiles", keys: ["user_id"], columns: ["user_id", "shop_name", "contact_name", "shop_lat", "shop_lng", "shop_label", "pickup_available", "is_closed", "express_enabled", "schedule", "version", "updated_at"] },
+  { name: "supplier_profiles", keys: ["user_id"], columns: ["user_id", "shop_name", "contact_name", "shop_lat", "shop_lng", "shop_label", "pickup_available", "is_closed", "express_enabled", "availability", "schedule", "version", "updated_at"] },
   { name: "shop_reviews", keys: ["id"], columns: ["id", "order_id", "supplier_id", "client_id", "quality_stars", "speed_stars", "value_stars", "comment", "created_at"] },
   { name: "supplier_payment_terms", keys: ["supplier_id"], columns: ["supplier_id", "delivery_downpayment_rate_bps", "pickup_full_online_enabled", "pickup_downpayment_store_enabled", "pickup_downpayment_rate_bps", "version", "updated_at"] },
   { name: "rider_profiles", keys: ["user_id"], columns: ["user_id", "vehicle_type", "plate_number", "license_number", "version", "updated_at"] },
@@ -335,7 +335,7 @@ function rowsFromStore(store) {
     });
   }
   for (const profile of (store.supplierProfiles || [])) {
-    rows.supplier_profiles.push({ user_id: profile.userId, shop_name: profile.shopName, contact_name: profile.contactName, shop_lat: profile.shop.lat, shop_lng: profile.shop.lng, shop_label: profile.shop.label, pickup_available: Boolean(profile.pickupAvailable), is_closed: Boolean(profile.isClosed), express_enabled: profile.expressEnabled !== false, schedule: profile.schedule ?? null, version: profile.version || 1, updated_at: profile.updatedAt });
+    rows.supplier_profiles.push({ user_id: profile.userId, shop_name: profile.shopName, contact_name: profile.contactName, shop_lat: profile.shop.lat, shop_lng: profile.shop.lng, shop_label: profile.shop.label, pickup_available: Boolean(profile.pickupAvailable), is_closed: Boolean(profile.isClosed), express_enabled: profile.expressEnabled !== false, availability: profile.availability ?? null, schedule: profile.schedule ?? null, version: profile.version || 1, updated_at: profile.updatedAt });
   }
   for (const review of (store.shopReviews || [])) {
     rows.shop_reviews.push({
@@ -988,6 +988,8 @@ export async function loadDeliveryStore(database, { userIds = [], notificationId
     await readNotificationContext(graph, { orderIds, caseIds, activeRiderIds: activeRiders ? userIds : [] });
     const ownerIds = [...new Set([...loaded.users.map(row => row.id), ...loaded.supplier_catalog_items.map(row => row.supplier_id), ...loaded.supplier_services.map(row => row.supplier_id)])];
     await read('users', 'WHERE id = ANY($1::text[])', [ownerIds]);
+    const demandShops = loaded.notifications.filter(row => row.type === 'printer_demand').map(row => row.data?.shopId || row.user_id);
+    if (demandShops.length) await read('supplier_profiles', 'WHERE user_id = ANY($1::text[])', [demandShops]);
     const seasonIds = loaded.notifications.map(row => row.data?.seasonWindowId).filter(Boolean);
     if (seasonIds.length) await read('season_windows', 'WHERE id = ANY($1::text[])', [seasonIds]);
     const store = graph.finish();
@@ -2353,6 +2355,7 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
   store.supplierProfiles = orderedBy(loaded.supplier_profiles, "user_id").map((row) => {
     const item = { userId: row.user_id, shopName: row.shop_name, contactName: row.contact_name, shop: { lat: row.shop_lat, lng: row.shop_lng, label: row.shop_label }, pickupAvailable: row.pickup_available, expressEnabled: row.express_enabled !== false, version: row.version || 1, updatedAt: row.updated_at };
     if (row.is_closed) item.isClosed = true;
+    if (row.availability) item.availability = row.availability;
     // Absent means the shop has not set its own hours and is scheduled against
     // the platform default -- never "open at all times".
     if (row.schedule) item.schedule = row.schedule;

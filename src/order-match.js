@@ -15,6 +15,7 @@ import { itemTurnaroundHours, listingFitsPrinterCap, publicCatalogItem } from ".
 import { AvailabilityError, defaultShopSchedule, fitsDeadline, projectFinish } from "./availability.js";
 import { listingExpress } from "./express.js";
 import { supplierMatchBlockersFor } from "./supplier-eligibility.js";
+import { nightWindow } from './shop-availability.js';
 import { shopRating, publicShopRating, MIN_REVIEWS_FOR_RATING } from "./shop-rating.js";
 export { shopRating, MIN_REVIEWS_FOR_RATING } from "./shop-rating.js";
 
@@ -197,8 +198,8 @@ function normalizedInverse(value, best) {
   return Math.max(0, Math.min(100, (best / value) * 100));
 }
 
-function approvedOpenSuppliers(store) {
-  const blockersFor = supplierMatchBlockersFor(store);
+function approvedOpenSuppliers(store, at) {
+  const blockersFor = supplierMatchBlockersFor(store, at);
   const profiles = new Map();
   for (const profile of (store.supplierProfiles || [])) {
     if (blockersFor(profile.userId, profile).length) continue;
@@ -319,9 +320,29 @@ export function listingTiming(store, item, line = {}) {
     minimum: tier?.turnaroundHours ?? listing.minimumTurnaroundHours ?? listing.turnaroundHours, tier };
 }
 
+export function projectExpressNightFinish(store, supplierId, hours, now, units = 1) {
+  const profile = store.supplierProfiles.find(p => p.userId === supplierId), window = nightWindow(profile, now);
+  if (!window) return null;
+  const queue = queueMinutesFor(store, supplierId, hours);
+  const readyBy = new Date(Date.parse(now) + (queue.minutes + hours * 60) * 60000).toISOString();
+  const capacity = (store.supplierServices || []).filter(s => s.supplierId === supplierId && s.state === 'live' && s.capacityDaily > 0)
+    .reduce((max, s) => Math.max(max, s.capacityDaily), 0);
+  if (Date.parse(readyBy) > Date.parse(window.endsAt) || (capacity && units > capacity)) {
+    throw new MatchError(409, 'express_night_capacity', 'This document job cannot finish in the remaining night window.');
+  }
+  return { queue, projection: { startsAt: now, readyBy, promiseBy: readyBy, express: false, queueMinutes: queue.minutes,
+    review: null, nightWindow: window, scheduling: { version: 1, status: 'secured', reason: null, sameDay: true,
+      tightDeadline: false, earliestReadyBy: readyBy, securedReadyBy: readyBy, readyBy, rushTier: null } } };
+}
+
 export function projectListingGroup(store, lines, { now, deadline = null } = {}) {
   const items = lines.map(line => store.catalogItems.find(item => item.id === line.catalogItemId));
   const timing = items.map((item, index) => listingTiming(store, item, lines[index]));
+  if (lines.every(line => line.expressPrint)) {
+    const night = projectExpressNightFinish(store, items[0].supplierId, Math.max(...timing.map(t => t.maximum)), now,
+      lines.reduce((sum, line) => sum + line.quantity, 0));
+    if (night) return night;
+  }
   const result = projectShopFinish(store, { supplierId: items[0].supplierId, now, deadline,
     turnaroundHours: Math.max(...timing.map(row => row.maximum)), minimumTurnaroundHours: Math.max(...timing.map(row => row.minimum)),
     units: lines.reduce((sum, line) => sum + line.quantity, 0), express: items.every(listingExpress) });
@@ -336,7 +357,7 @@ export function projectListingGroup(store, lines, { now, deadline = null } = {})
 function candidateRows(store, { subcategoryCode, supplierId: onlySupplierId, dropoff, excludedSupplierIds, deadline: requestedDeadline, now, units, widthRequest, ranking = MATCH_FACTORS, delivery = {} }) {
   store = approvedCatalogView(store);
   const excluded = new Set((excludedSupplierIds || []).map(String));
-  const shops = approvedOpenSuppliers(store);
+  const shops = approvedOpenSuppliers(store, now);
   const activeSubcategories = new Set((store.taxonomy?.subcategories || []).filter(row => row.active !== false).map(row => row.code));
   const itemsBySupplier = new Map();
   for (const item of (store.catalogItems || [])) {

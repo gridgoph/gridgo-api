@@ -1,3 +1,4 @@
+import { shopPaused } from './shop-availability.js';
 import { staffPageBody } from './staff-list-pages.js';
 import { identityHasMembership } from './authorization-context.js';
 import { AvailabilityError, validateShopSchedule, defaultShopSchedule, isOpenAt, addOpeningMilliseconds, weeklyWindows } from './availability.js';
@@ -26,13 +27,13 @@ export function shopHoursStatus(profile, settings, at = new Date().toISOString()
   const todayExtension = schedule.extension?.day === today ? structuredClone(schedule.extension) : null;
   let nextOpeningAt = null;
   if (!profile?.isClosed) {
-    try { nextOpeningAt = addOpeningMilliseconds(schedule, at, 0); }
+    try { nextOpeningAt = addOpeningMilliseconds(schedule, shopPaused(profile, at) ? profile.availability.pausedUntil : at, 0); }
     catch (error) { if (error.code !== 'shop_never_open') throw error; }
   }
   const platform = operatingHours(settings).schedule;
   const extensionEnd = todayExtension && new Date(Date.parse(`${today}T00:00:00Z`) + (todayExtension.closesMinute - schedule.utcOffsetMinutes) * 60000 - 1).toISOString();
   return { timeZone: 'Asia/Manila', schedule: baseSchedule(profile), version: profile?.version || 1,
-    temporarilyClosed: Boolean(profile?.isClosed), isOpenNow: !profile?.isClosed && isOpenAt(schedule, at),
+    temporarilyClosed: Boolean(profile?.isClosed), isOpenNow: !profile?.isClosed && !shopPaused(profile, at) && isOpenAt(schedule, at),
     nextOpeningAt, todayExtension, calendarAvailable: true,
     dispatchNotice: extensionEnd && (!isOpenAt(platform, at) || !isOpenAt(platform, extensionEnd))
       ? 'review_and_dispatch_in_next_working_window' : null,
