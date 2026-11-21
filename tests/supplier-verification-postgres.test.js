@@ -52,6 +52,12 @@ test('HTTP reservation/release retries pay once; cap hold persists and verificat
   assert.equal(held.status,202,JSON.stringify(held.body));assert.equal(held.body.payout.items[0].reason,'verification_payout_cap');
   const queue=await call('admin','GET','/approval-cases?kind=supplier');
   assert.equal(queue.status,200,JSON.stringify(queue.body));assert.equal(queue.body.approvalCases[0].verification.paidBeforeVerificationMinor,4000);assert.equal(queue.body.approvalCases[0].verificationDocuments[0].fileId,'id-selfie');
+  const opsQueue=await call('ops','GET','/ops/supplier-verification');
+  assert.equal(opsQueue.status,200,JSON.stringify(opsQueue.body));assert.equal(opsQueue.body.suppliers[0].verification.paidBeforeVerificationMinor,4000);
+  assert.equal(opsQueue.body.suppliers[0].history,undefined);
+  assert.equal((await call('client','GET','/ops/supplier-verification')).status,403);
+  assert.equal((await call('ops','GET','/approval-cases')).status,403);
+  const opsDetail=await call('ops','GET','/ops/supplier-verification/supplier');assert.equal(opsDetail.status,200);assert.ok(opsDetail.body.supplier.ledger.length>0);
   const approval=await call('admin','POST','/approval-cases/case_supplier/approve',{expectedVersion:1,requestId:'verify-shop'});
   assert.equal(approval.status,200,JSON.stringify(approval.body));
   const released=await call('ops','POST','/orders/order/milestones/delivered/release',{});

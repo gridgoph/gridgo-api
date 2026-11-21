@@ -51,7 +51,9 @@ Ledger money is safe-integer centavos, persisted as PostgreSQL BIGINT. Holds, av
 
 ## Dashboard calls
 
-Super Admin reads `GET /approval-cases?kind=supplier&status=pending` and `GET /approval-cases/:id`. Supplier entries add `verification` and private `verificationDocuments` metadata. Render uploaded files, days left, paid-before-verification amount and recovery debt. Read files using the existing authorized `/files/:fileId/download-url`; no object keys or public verification bytes are exposed.
+Operations/Super Admin reads `GET /ops/supplier-verification` and `/ops/supplier-verification/:supplierId` for the supplier-only financial verification queue. The list supports the existing approval `status` and `cursor`; detail includes the financial ledger. It exposes no approval-decision history or other case kinds, and grants no decision permission.
+
+Super Admin also reads `GET /approval-cases?kind=supplier&status=pending` and `GET /approval-cases/:id`. Supplier entries add `verification` and private `verificationDocuments` metadata. Render uploaded files, days left, paid-before-verification amount and recovery debt. Read files using the existing authorized `/files/:fileId/download-url`; no object keys or public verification bytes are exposed.
 
 Use the existing versioned `/approval-cases/:id/approve` decision (`expectedVersion`, `requestId`, optional `note`). Its response includes the current verification summary; approval lifts verification holds atomically with the case decision. Existing rejection, suspension, restoration and service-review rules remain.
 

@@ -3614,6 +3614,26 @@ async function handleAuditedRequest(req, res) {
         ledger:(store.supplierVerificationLedger||[]).filter(e=>e.supplierId===user.id)});
     }
 
+    const supplierVerificationRead=/^\/ops\/supplier-verification(?:\/([^/]+))?$/.exec(pathname);
+    if(req.method==='GET' && supplierVerificationRead) {
+      if(!isOps(user))return send(res,403,{error:'forbidden'});
+      const supplierId=supplierVerificationRead[1];
+      const project=approvalCase=>({supplierId:approvalCase.userId,approvalCaseId:approvalCase.id,approvalStatus:approvalCase.status,
+        shopName:store.supplierProfiles.find(p=>p.userId===approvalCase.userId)?.shopName||null,
+        verification:verificationSummary(store,approvalCase.userId,now()),
+        verificationDocuments:verificationDocumentsFor(store,store.users.find(u=>u.id===approvalCase.userId)),
+        ...(supplierId?{ledger:(store.supplierVerificationLedger||[]).filter(e=>e.supplierId===approvalCase.userId)}:{})});
+      if(supplierId) {
+        const approvalCase=store.approvalCases.find(c=>c.kind==='supplier'&&c.userId===supplierId);
+        if(!approvalCase)return send(res,404,{error:'supplier_not_found'});
+        return send(res,200,{supplier:project(approvalCase)});
+      }
+      const queueUrl=new URL(url);queueUrl.searchParams.set('kind','supplier');
+      const queue=approvalQueue(store,queueUrl);
+      if(queue.status!==200)return send(res,queue.status,queue);
+      return send(res,200,{suppliers:queue.approvalCases.map(row=>project(store.approvalCases.find(c=>c.id===row.id))),nextCursor:queue.nextCursor});
+    }
+
     // ---- Super Admin approval queue ----
     if (req.method === "GET" && pathname === "/approval-cases") {
       if (!isSuper(user)) return send(res, 403, { error: "forbidden" });
