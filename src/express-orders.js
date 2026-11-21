@@ -4,11 +4,13 @@ import { randomInt } from 'node:crypto';
 import { approvedCatalogView } from './catalog-review-state.js';
 import { publicCatalogItem, catalogGroupsForItem, selectedCatalogPrice } from './supplier-catalog.js';
 import { supplierMatchBlockersFor } from './supplier-eligibility.js';
-import { defaultShopSchedule, isOpenAt } from './availability.js';
 import { publicShopRating } from './shop-rating.js';
 import { distanceMetersBetween, deliveryFeeForDistance } from './operational-model.js';
 import { sameReviewData } from './review-data.js';
-import { projectShopFinish } from './order-match.js';
+import { expressAvailability } from './shop-availability.js';
+import { isOpenAt } from './availability.js';
+import { operatingHours } from './operating-hours.js';
+import { projectExpressNightFinish, projectShopFinish } from './order-match.js';
 import { testerProgress } from './founding-testers.js';
 import { privilegedAdminMemberships, queueOrderInvalidate } from './notifications.js';
 
@@ -31,24 +33,29 @@ export function expressPoint(point) {
   if(!point || !Number.isFinite(point.lat)||!Number.isFinite(point.lng)||Math.abs(point.lat)>90||Math.abs(point.lng)>180) expressFail(400,'invalid_express_location');
   return {lat:point.lat,lng:point.lng,...(typeof point.label==='string'?{label:point.label.slice(0,500)}:{})};
 }
-export function expressShopList(source,user,{location,sort='nearest'}={},at) {
+export function expressShopList(source,user,{location,sort='nearest',fulfillmentMode='pickup'}={},at) {
   location=expressPoint(location);
+  if(!['pickup','delivery'].includes(fulfillmentMode)) expressFail(400,'invalid_fulfillment_mode');
   if(!['nearest','top_rated','fewest_jobs'].includes(sort)) expressFail(400,'invalid_express_sort');
-  const store=approvedCatalogView(source), blockers=supplierMatchBlockersFor(store);
+  const store=approvedCatalogView(source), blockers=supplierMatchBlockersFor(store,at);
   const rows=[];
   for(const profile of store.supplierProfiles||[]) {
     const supplierId=profile.userId, supplier=store.users.find(u=>u.id===supplierId);
-    if(profile.expressEnabled === false || !supplier || !sameReviewData(user,supplier) || blockers(supplierId,profile).length || !isOpenAt(profile.schedule||defaultShopSchedule(),at)) continue;
+    const availability=expressAvailability(profile,store.settings,at,fulfillmentMode);
+    if(!availability || !supplier || !sameReviewData(user,supplier) || blockers(supplierId,profile).length) continue;
     const listings=(store.catalogItems||[]).filter(item=>item.supplierId===supplierId && item.express===true
       && item.pricingUnit==='per_page' && item.subcategoryCode==='document_printing' && publicCatalogItem(store,item));
     if(!listings.length) continue;
     const jobsAhead=(store.orders||[]).filter(o=>o.supplierId===supplierId && ['supplier_assigned','payment_authorized','production','supplier_self_qc'].includes(o.state)).length;
     const hours=Math.min(...listings.map(item=>publicCatalogItem(store,item).turnaroundHours||1));
-    const projection=projectShopFinish(store,{supplierId,turnaroundHours:hours,units:1,now:at}).projection;
+    let projection;
+    try { projection=(projectExpressNightFinish(store,supplierId,hours,at) || projectShopFinish(store,{supplierId,turnaroundHours:hours,units:1,now:at})).projection; }
+    catch(error) { if(error.code==='express_night_capacity')continue;throw error; }
+    if(availability.nightWindow && fulfillmentMode==='delivery' && !isOpenAt(operatingHours(store.settings).schedule,projection.promiseBy))continue;
     const createdAt=(store.approvalCases||[]).find(c=>c.userId===supplierId&&c.kind==='supplier'&&c.status==='approved')?.decidedAt||supplier.createdAt, age=Date.parse(at)-Date.parse(createdAt);
     rows.push({supplierId,catalogItemIds:listings.map(item=>item.id),name:profile.shopName||supplier.name||'Shop',address:profile.shop.label||'',
       location:structuredClone(profile.shop),distanceMeters:distanceMetersBetween(location,profile.shop),rating:publicShopRating(store,supplierId),jobsAhead,
-      readyAt:projection.promiseBy,busy:jobsAhead>=3,isNew:Number.isFinite(age)&&age>=0&&age<7*86400000});
+      readyAt:projection.promiseBy,deliveryAvailable:availability.deliveryAvailable,nightWindow:availability.nightWindow,busy:jobsAhead>=3,isNew:Number.isFinite(age)&&age>=0&&age<7*86400000});
   }
   rows.sort((a,b)=>(sort==='top_rated'?(b.rating?.average||0)-(a.rating?.average||0):sort==='fewest_jobs'?a.jobsAhead-b.jobsAhead:0)
     ||a.distanceMeters-b.distanceMeters||a.supplierId.localeCompare(b.supplierId));
@@ -97,11 +104,13 @@ export function declineExpress(store,order,{at,id,kind='declined',actorId=null,r
   order.shopAcceptance.status=kind;
   e.events.push({state:kind,at,supplierId:previous,reason:kind==='timed_out'?'No response within five minutes.':reason});
   const client=store.users.find(u=>u.id===order.clientId);
-  const replacement=e.declines<3 && expressShopList(store,client,{location:e.location},at).find(shop=>!e.declinedSupplierIds.includes(shop.supplierId)
+  const replacement=e.declines<3 && expressShopList(store,client,{location:e.location,fulfillmentMode:order.fulfillmentMode},at).find(shop=>!e.declinedSupplierIds.includes(shop.supplierId)
     && expressReplacementSupports(store,shop,e.printSettings||[])
     && (order.fulfillmentMode==='pickup'||deliveryFeeForDistance(distanceMetersBetween(shop.location,order.dropoff),store.settings)===order.deliveryFeeMinor));
   if(replacement) {
-    order.supplierId=replacement.supplierId;order.pickup=structuredClone(replacement.location);
+    order.supplierId=replacement.supplierId;
+    if(replacement.nightWindow)e.nightWindow=structuredClone(replacement.nightWindow);else delete e.nightWindow;
+    order.pickup=structuredClone(replacement.location);
     for(const job of store.orderJobs||[])if(job.orderId===order.id){job.supplierId=order.supplierId;job.pickup=structuredClone(order.pickup);job.updatedAt=at;}
     expressEvent(store,order,'moved',{at,id,actorId,reason:kind==='timed_out'?'No response within five minutes.':reason});startExpressAcceptance(order,at);
   } else {

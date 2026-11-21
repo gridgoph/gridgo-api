@@ -4,8 +4,11 @@ import { dispatchReadyAt } from './operating-hours.js';
 // Only new order clocks containing overrides opt in. Historical dispatch and
 // the no-override path keep their existing platform-hours behavior.
 export const hasWeekdayOverrides = schedule => Boolean(schedule?.weekdayOverrides?.length);
-export const shopDispatchOpen = (order, at) => !hasWeekdayOverrides(order?.shopClock?.schedule)
-  || isOpenAt(order.shopClock.schedule, at);
+export const shopDispatchOpen = (order, at) => {
+  const night = order?.orderType === 'express' && order.expressOrder?.nightWindow;
+  if (night && Date.parse(at) >= Date.parse(night.startsAt) && Date.parse(at) < Date.parse(night.endsAt)) return true;
+  return !hasWeekdayOverrides(order?.shopClock?.schedule) || isOpenAt(order.shopClock.schedule, at);
+};
 
 /** First overlap of shop opening and GRIDGO's dispatch window. */
 export function nextShopDispatchAt(settings, schedule, at) {

@@ -102,7 +102,7 @@ export function createWebPushDelivery({ vapid, sendNotification = webpush.sendNo
       const payload = JSON.stringify({ title: message.title, body: message.body, data: message.data, url });
       try {
         await sendNotification({ endpoint: subscription.endpoint, keys: subscription.keys }, payload,
-          { vapidDetails: vapid, TTL: 3600, timeout: 10000, urgency: 'normal' });
+          { vapidDetails: vapid, TTL: Number.isFinite(message.ttlSeconds) ? Math.min(3600, message.ttlSeconds) : 3600, timeout: 10000, urgency: 'normal' });
         return [{ ok: true, prune: false, code: null }];
       } catch (error) {
         const status = Number(error?.statusCode);

@@ -1,3 +1,5 @@
+import { supplierMatchBlockersFor } from './supplier-eligibility.js';
+import { expressAvailability } from './shop-availability.js';
 import { playBelowTargetSql } from './play-optin.js';
 import { knownPlayInstallSql } from './play-install.js';
 import { listWebSubscriptions } from "./web-push.js";
@@ -15,6 +17,16 @@ export function outboxVerdict(row, results, at) {
   return row.attempts >= 8 ? "failed" : "pending";
 }
 export function deviceAcceptsNotification(store, device, notification, at) {
+  if (notification.type === 'printer_demand') {
+    const instant = at || new Date().toISOString(), shopId = notification.shopId || notification.userId;
+    const profile = store.supplierProfiles?.find(p => p.userId === shopId);
+    const current = profile && expressAvailability(profile, store.settings, instant);
+    const members = (store.shopMemberships || []).filter(m => m.shopId === shopId);
+    if (!profile?.availability?.printerDemandPings || !current?.nightWindow
+      || supplierMatchBlockersFor(store, instant)(shopId, profile).length
+      || current.nightWindow.night !== notification.night || Date.parse(notification.expiresAt) <= Date.parse(instant)
+      || (members.length && !members.some(m => m.userId === notification.userId && m.role === 'owner' && m.status === 'active'))) return false;
+  }
   if (notification.type === 'shop_express_offer') {
     const order = store.orders?.find(order => order.id === notification.orderId);
     if (!order || order.state !== 'supplier_assigned' || order.shopAcceptance?.status !== 'pending'

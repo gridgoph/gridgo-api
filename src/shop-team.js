@@ -52,7 +52,7 @@ export function shopSummary(store, member) {
 // existing handler still checks ownership, approval, artwork release and state.
 export function staffRouteAllowed(method, path) {
   if (method === 'PATCH' && path === '/me/shop-memberships/selected') return true;
-  if (method === 'GET' && ['/auth/me', '/auth/me/supplier', '/me/shop-memberships', '/notifications', '/notifications/stream', '/web-push/public-key', '/orders', '/jobs'].includes(path)) return true;
+  if (method === 'GET' && ['/auth/me', '/auth/me/supplier', '/me/shop-memberships', '/notifications', '/notifications/stream', '/web-push/public-key', '/orders', '/jobs', '/me/shop-status'].includes(path)) return true;
   if (method === 'POST' && ['/auth/logout', '/devices', '/web-push/subscribe', '/web-push/unsubscribe', '/notifications/read-all'].includes(path)) return true;
   if (['POST', 'DELETE'].includes(method) && /^\/devices(?:\/[^/]+)?$/.test(path)) return true;
   if (['POST', 'PATCH', 'DELETE'].includes(method) && /^\/notifications\/[^/]+(?:\/read)?$/.test(path)) return true;
