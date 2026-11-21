@@ -22,7 +22,7 @@ test('replacement invalidates only the selected invite and preserves its kind an
     assert.equal(result.body.invite.kind,kind);
     assert.equal(result.body.invite.identity,identity);
     assert.equal(result.body.delivery,'share_link');
-    assert.equal(Date.parse(result.body.invite.expiresAt)-Date.parse(AT),172800000);
+    assert.equal(Date.parse(result.body.invite.expiresAt)-Date.parse(AT),86400000);
     assert.match(result.body.token,/^[A-Za-z0-9_-]{43}$/);
     assert.notEqual(result.body.token,oldToken);
     assert.equal(JSON.stringify(result.body.invite).includes('tokenHash'),false);

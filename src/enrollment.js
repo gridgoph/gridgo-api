@@ -3,6 +3,7 @@ import { CLIENT_APPLICATION_FIELDS, validateClientApplication, bindClientApplica
 import crypto from "node:crypto";
 
 import { clerkClientProfile } from "./auth.js";
+import { ensureShopOwners } from "./shop-team-store.js";
 import { notifyOpsSignupSubmitted } from "./client-order-notifications.js";
 import { queueInvalidate } from "./notifications.js";
 import { resolveCategoryCode } from "./taxonomy.js";
@@ -363,6 +364,7 @@ export function enrollSupplier({ store, clerkUserId, clerkUser, body, idempotenc
   user.supplierName = application.shopName;
   user.shop = application.location;
   const membership = ensureMembership(store, user.id, "supplier", at);
+  ensureShopOwners(store);
   const currentProfile = (store.supplierProfiles || []).find((profile) => profile.userId === user.id);
   const profile = {
     userId: user.id,
