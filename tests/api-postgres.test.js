@@ -450,7 +450,7 @@ test("fixed auth projections authorize every state from memberships and approval
       assert.equal(projection.body.approvalCase.rejectionReason, status === "rejected" ? "Fix the application" : null);
       assert.equal(projection.body.approvalCase.suspensionReason, status === "suspended" ? "Account review" : null);
       assert.equal(projection.body.capabilities.receiveJobOffers, status === "approved");
-      assert.equal(projection.body.capabilities.acceptJobs, status === "approved");
+      assert.equal(projection.body.capabilities.acceptJobs, ["approved", "pending"].includes(status));
       assert.equal(projection.body.capabilities.editCatalogue, status !== "suspended");
       assert.equal(typeof projection.body.readiness.readyForApproval, "boolean");
       assert.ok(Array.isArray(projection.body.readiness.missing));

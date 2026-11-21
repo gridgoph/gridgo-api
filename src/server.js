@@ -6915,7 +6915,7 @@ async function handleAuditedRequest(req, res) {
             message: "That supplier account no longer exists. Refresh eligible suppliers and choose another.",
           });
         }
-        if (!handingToMatchedShop && supplierMatchBlockersFor(store)(supplier.id,store.supplierProfiles.find(p=>p.userId===supplier.id)).length) {
+        if (!supplierCanWork(store,supplier.id) || (!handingToMatchedShop && supplierMatchBlockersFor(store)(supplier.id,store.supplierProfiles.find(p=>p.userId===supplier.id)).length)) {
           const approval = (store.approvalCases || []).find((c) => c.userId === supplier.id && c.kind === "supplier");
           return send(res, 409, {
             error: "supplier_not_approved",
