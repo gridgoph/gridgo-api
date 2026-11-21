@@ -166,3 +166,13 @@ test('reservation events use the durable inbox for every current Operations and 
   cancelVerificationReservation(s,o,'stage:notice:production',{at:when(1),actor,id,reason:'No funds sent'});
   for(const userId of ['shop','ops','admin'])assert.equal(s.notifications.filter(n=>n.userId===userId&&n.type==='supplier_verification_update').length,2);
 });
+
+test('ledger decode uses canonical money columns and stable positions when PostgreSQL returns rows in another order',async()=>{
+  const {verificationLedgerRows,loadVerificationLedgerRows}=await import('../src/supplier-verification-store.js');
+  const s=fixture(),a=order(s,'ordered',400000);pay(s,a);a.state='completed';
+  const rows={};verificationLedgerRows(s,rows);rows.supplier_verification_ledger.reverse();
+  for(const row of rows.supplier_verification_ledger)row.data={...row.data,netAmountMinor:1};
+  loadVerificationLedgerRows(s,rows);
+  assert.equal(verificationSummary(s,'shop',when(2)).remainingCapMinor,100000);
+  assert.equal(prepare(s,order(s,'after-decode',100000)).status,'ready');
+});

@@ -28,6 +28,8 @@ async function setup(db) {
 
 test('HTTP reservation/release retries pay once; cap hold persists and verification lifts it; expired shop finishes existing work', {skip:!process.env.DATABASE_URL},async t=>{
   const db=createDatabase(process.env);t.after(()=>db.close());await setup(db);
+  const types=await db.query("SELECT data_type FROM information_schema.columns WHERE table_name='supplier_verification_ledger' AND column_name IN ('amount_minor','net_amount_minor','recovery_minor')");
+  assert.deepEqual(types.rows.map(r=>r.data_type),['bigint','bigint','bigint']);
   const call=await apiForTest(t);
   assert.equal((await call('ops','PATCH','/settings',{expectedVersion:3,reason:'Review',supplierVerification:{payoutCapMinor:1,windowDays:30}})).status,403);
   assert.equal((await call('other','GET','/me/supplier-verification',null,{headers:{'x-gridgo-role':'supplier','x-gridgo-shop-id':'supplier'}})).status,403);

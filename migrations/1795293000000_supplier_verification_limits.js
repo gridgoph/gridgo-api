@@ -9,6 +9,10 @@ export async function up(pgm) {
       payout_key text NOT NULL,
       kind text NOT NULL CHECK(kind IN ('held','available','reserved','released','recovery_due','recovered','reminder','reservation_cancelled')),
       amount_minor bigint NOT NULL CHECK(amount_minor BETWEEN 0 AND 9007199254740991),
+      net_amount_minor bigint CHECK(net_amount_minor BETWEEN 0 AND 9007199254740991),
+      recovery_minor bigint CHECK(recovery_minor BETWEEN 0 AND 9007199254740991),
+      CHECK(kind NOT IN ('reserved','released') OR (net_amount_minor IS NOT NULL AND recovery_minor IS NOT NULL
+        AND net_amount_minor+recovery_minor=amount_minor)),
       created_at timestamptz NOT NULL,
       actor_id text REFERENCES users(id),
       position integer NOT NULL,
@@ -71,20 +75,20 @@ export async function up(pgm) {
         AND NOT EXISTS(SELECT 1 FROM supplier_verification_ledger l WHERE l.kind='released' AND l.order_id=target
           AND l.payout_key=CASE WHEN TG_TABLE_NAME='order_change_payouts' THEN 'change:'||target||':'||(to_jsonb(NEW)->>'change_id') ELSE 'settlement:'||(to_jsonb(NEW)->>'id') END
           AND l.amount_minor=(to_jsonb(NEW)->>'amount_minor')::bigint
-          AND (l.data->>'netAmountMinor')::bigint=0 AND (l.data->>'recoveryMinor')::bigint=l.amount_minor)
+          AND l.net_amount_minor=0 AND l.recovery_minor=l.amount_minor)
       THEN RAISE EXCEPTION 'verification offset ledger required' USING ERRCODE='23514'; END IF;
       IF NOT EXISTS(SELECT 1 FROM approval_cases WHERE user_id=shop AND kind='supplier' AND status='pending') THEN RETURN NULL; END IF;
       SELECT COALESCE((settings#>>'{supplierVerification,payoutCapMinor}')::bigint,500000) INTO cap FROM platform_settings WHERE singleton;
       SELECT COALESCE(sum(amount),0) INTO paid FROM (
-        SELECT COALESCE((l.data->>'netAmountMinor')::bigint,m.amount_minor) AS amount
+        SELECT COALESCE(l.net_amount_minor,m.amount_minor) AS amount
           FROM payout_milestones m JOIN orders o ON o.id=m.order_id
           LEFT JOIN supplier_verification_ledger l ON l.payout_key='stage:'||m.order_id||':'||m.code AND l.kind='released'
           WHERE o.supplier_id=shop AND o.payout_plan_version<>3 AND jsonb_typeof(o.data->'cash') IS DISTINCT FROM 'object' AND NOT o.review_data AND m.status='released'
-        UNION ALL SELECT COALESCE((l.data->>'netAmountMinor')::bigint,p.amount_minor)
+        UNION ALL SELECT COALESCE(l.net_amount_minor,p.amount_minor)
           FROM refund_supplier_payouts p JOIN orders o ON o.id=p.order_id
           LEFT JOIN supplier_verification_ledger l ON l.payout_key='settlement:'||p.id AND l.kind='released'
           WHERE p.supplier_id=shop AND p.status='released' AND o.payout_plan_version<>3 AND jsonb_typeof(o.data->'cash') IS DISTINCT FROM 'object' AND NOT o.review_data
-        UNION ALL SELECT COALESCE((l.data->>'netAmountMinor')::bigint,p.amount_minor)
+        UNION ALL SELECT COALESCE(l.net_amount_minor,p.amount_minor)
           FROM order_change_payouts p JOIN orders o ON o.id=p.order_id
           LEFT JOIN supplier_verification_ledger l ON l.payout_key='change:'||p.order_id||':'||p.change_id AND l.kind='released'
           WHERE p.supplier_id=shop AND o.payout_plan_version<>3 AND jsonb_typeof(o.data->'cash') IS DISTINCT FROM 'object' AND NOT o.review_data
