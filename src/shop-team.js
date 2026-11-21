@@ -56,7 +56,7 @@ export function staffRouteAllowed(method, path) {
   if (method === 'POST' && ['/me/shop-team/working/select','/me/shop-team/working/lock'].includes(path)) return true;
   if (method === 'PATCH' && path === '/me/shop-team/me') return true;
   if (method === 'PATCH' && path === '/me/shop-memberships/selected') return true;
-  if (method === 'GET' && ['/auth/me', '/auth/me/supplier', '/me/shop-memberships', '/notifications', '/notifications/stream', '/web-push/public-key', '/orders', '/jobs'].includes(path)) return true;
+  if (method === 'GET' && ['/auth/me', '/auth/me/supplier', '/me/shop-memberships', '/notifications', '/notifications/stream', '/web-push/public-key', '/orders', '/jobs', '/me/shop-status'].includes(path)) return true;
   if (method === 'POST' && ['/auth/logout', '/devices', '/web-push/subscribe', '/web-push/unsubscribe', '/notifications/read-all'].includes(path)) return true;
   if (['POST', 'DELETE'].includes(method) && /^\/devices(?:\/[^/]+)?$/.test(path)) return true;
   if (['POST', 'PATCH', 'DELETE'].includes(method) && /^\/notifications\/[^/]+(?:\/read)?$/.test(path)) return true;
