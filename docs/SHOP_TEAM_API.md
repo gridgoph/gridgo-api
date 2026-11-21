@@ -488,7 +488,19 @@ switching to another owned shop.
 
 `working/select` and `working/lock` remain available while locked. The picker
 list remains readable without a worker token so the next worker can select
-themselves. A successful selection replaces the prior context. Lock, expiry,
+themselves. A successful selection replaces the prior context.
+
+The PIN allowlist is enforced before **every** route handler and before mutation
+provider/preflight work. Personal privacy/legal/account-deletion routes (including
+Apple revocation and public deletion aliases with this bearer), activation,
+enrollment, invite redemption/discovery, carrier shop selection and personal
+notification transport are refused while this device lock exists. This remains
+true with the worker header omitted and after expiry, reset or removal. New routes
+are refused until explicitly added to the PIN allowlist, wherever registered.
+The picker/list/select/lock and `POST /auth/logout` are recovery exceptions;
+`GET /auth/me` and `/auth/me/supplier` require a valid current worker context and
+return the bounded supplier bootstrap. Unbound Clerk sessions and anonymous
+public requests retain their normal behavior. Lock, expiry,
 PIN reset and removal require selection again; they **never** fall back to the
 Owner. Resume Owner management by ending that Clerk session and signing in
 again, or use the Owner's separate management device. Clear cached private
@@ -606,7 +618,9 @@ Both clients must implement these same calls and gates:
 
 ### Deployment compatibility
 
-Apply forward migrations `1795287000000` and `1795287001000` before this API.
+Apply forward migrations `1795287000000`, `1795287001000` and `1795294100000`
+before this API. The last adds the indexed user/session lookup for the admission
+check; it changes no existing row or authorization grant.
 Manager grants/preferences and PIN/device state live in separate tables; legacy
 `shop_memberships.role` remains `owner|staff` so overlapping older writers keep
 working and treat Managers as limited Staff. Nullable action evidence columns

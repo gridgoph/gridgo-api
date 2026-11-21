@@ -710,3 +710,71 @@ test('HTTP team photos use scoped ready uploads; new team state survives old-col
   assert.equal((await second('other','GET','/auth/me/supplier',null,supplier)).body.shop.role,'manager');
   assert.equal((await second('other','GET','/me/payout-account',null,supplier)).body.error,'shop_owner_required');
 });
+
+test('PIN route boundary protects every early personal/auth handler with selected, missing, expired, reset, removed and locked contexts', {skip}, async t => {
+  const {db,api,env}=await setup(t,store=>{
+    store.userRoleMemberships.push({userId:'supplier',role:'super_admin',createdAt:AT});
+  });
+  const ownerDevice={...supplier,claims:{sid:'private-management'}};
+  const createdPrivate=await api('supplier','POST','/me/privacy-requests',{kind:'access',details:'private-carrier-request',confirmed:true},ownerDevice);
+  assert.equal(createdPrivate.status,201,bodyOf(createdPrivate));
+  assert.equal((await api('supplier','GET','/me/privacy-requests',null,ownerDevice)).status,200);
+  const beforeUsers=(await db.query('SELECT count(*)::int AS n FROM users')).rows[0].n;
+  const routes=[
+    ['GET','/me/privacy-requests'],['POST','/me/privacy-requests',{kind:'deletion',details:'denied-worker-request',confirmed:true}],
+    ['GET','/me/legal/pending'],['POST','/me/legal/accept',{versionId:'unknown'}],
+    ...['client','rider','ops','admin'].map(role=>['GET',`/auth/me/${role}`]),
+    ['GET','/me'],['PATCH','/me',{name:'Denied change'}],
+    ['GET','/me/account-deletion-request'],['POST','/me/account-deletion-request',{confirmed:true}],
+    ['POST','/me/account-deletion-request/apple-revocation',{confirmed:true,clientId:'test.bundle',authorizationCode:'not-a-provider-code'}],
+    ['POST','/account-deletion-requests',{confirmed:true,email:'supplier@example.invalid'}],
+    ['POST','/api/account-deletion-requests',{confirmed:true,email:'supplier@example.invalid'}],
+    ['POST','/auth/clerk/activate',{}],['POST','/auth/clerk/enroll/supplier',{}],['POST','/auth/clerk/enroll/rider',{}],
+    ['POST','/auth/staff/redeem',{code:'not-an-invite'}],['POST','/auth/shop-invites',{}],['POST','/auth/shop-invites/claim',{token:'a'.repeat(43)}],
+    ['POST','/auth/clerk/client-available',{email:'supplier@example.invalid'}],['POST','/auth/login',{}],['POST','/auth/signup',{}],
+    ['GET','/admin/privacy-requests'],['PATCH',`/admin/privacy-requests/${createdPrivate.body.request.id}`,{status:'completed'}],
+    ['GET','/ops/account-deletion-requests'],['GET','/ops/issue-reports'],['GET','/issue-reports'],
+    ['GET','/me/shop-memberships'],['PATCH','/me/shop-memberships/selected',{shopId:'supplier'}],
+    ['POST','/me/future-personal-setting',{}],['GET','/me/../me/privacy-requests'],
+  ];
+  const second=await apiForTest(t,env);
+  let pin=(await api('supplier','POST','/me/shop-team/pin-staff',{name:'Worker',pin:'1234'},ownerDevice)).body.member;
+  let selection=await api('supplier','POST','/me/shop-team/working/select',{pinStaffId:pin.id,pin:'1234'},supplier);
+  assert.equal(selection.status,200,bodyOf(selection));
+  let worker={headers:{...supplier.headers,'X-GRIDGO-Worker-Token':selection.body.token}};
+  const refused=async label=>{
+    for(const opts of [worker,supplier])for(const [method,path,body] of routes){
+      const result=await api('supplier',method,path,body,opts);
+      assert.equal(result.status,403,`${label} ${method} ${path}: ${bodyOf(result)}`);
+      assert.equal(JSON.stringify(result.body).includes('private-carrier-request'),false);
+      assert.equal(JSON.stringify(result.body).includes('supplier@example.invalid'),false);
+    }
+    assert.equal((await second('supplier','GET','/me/privacy-requests',null,worker)).status,403,label);
+    assert.equal((await api('supplier','GET','/me/shop-team/working',null,supplier)).status,200,label);
+  };
+  assert.equal((await api('supplier','GET','/jobs',null,worker)).status,200);
+  await refused('selected and missing token');
+  await db.query("UPDATE shop_worker_sessions SET expires_at=now()-interval '1 minute' WHERE user_id='supplier'");
+  await refused('expired');
+  selection=await api('supplier','POST','/me/shop-team/working/select',{pinStaffId:pin.id,pin:'1234'},supplier);
+  worker={headers:{...supplier.headers,'X-GRIDGO-Worker-Token':selection.body.token}};
+  assert.equal((await api('supplier','POST',`/me/shop-team/pin-staff/${pin.id}/reset`,{pin:'5678'},ownerDevice)).status,200);
+  await refused('reset');
+  selection=await api('supplier','POST','/me/shop-team/working/select',{pinStaffId:pin.id,pin:'5678'},supplier);
+  worker={headers:{...supplier.headers,'X-GRIDGO-Worker-Token':selection.body.token}};
+  assert.equal((await api('supplier','DELETE',`/me/shop-team/pin-staff/${pin.id}`,null,ownerDevice)).status,200);
+  await refused('removed');
+  pin=(await api('supplier','POST','/me/shop-team/pin-staff',{name:'Manager',pin:'8901',role:'manager'},ownerDevice)).body.member;
+  selection=await api('supplier','POST','/me/shop-team/working/select',{pinStaffId:pin.id,pin:'8901'},supplier);
+  worker={headers:{...supplier.headers,'X-GRIDGO-Worker-Token':selection.body.token}};
+  assert.equal((await api('supplier','GET','/me/shop-hours',null,worker)).status,200,'PIN Manager keeps hours access');
+  assert.equal((await api('supplier','GET','/me/privacy-requests',null,worker)).status,403,'PIN Manager cannot use carrier privacy');
+  assert.equal((await api('supplier','POST','/me/shop-team/working/lock',{},worker)).status,200);
+  await refused('locked');
+  assert.equal((await db.query("SELECT count(*)::int AS n FROM privacy_requests WHERE user_id='supplier'")).rows[0].n,1);
+  assert.equal((await db.query("SELECT count(*)::int AS n FROM account_deletion_requests WHERE user_id='supplier' OR contact_email='supplier@example.invalid'")).rows[0].n,0);
+  assert.equal((await db.query('SELECT count(*)::int AS n FROM users')).rows[0].n,beforeUsers);
+  assert.equal((await api('supplier','GET','/me/privacy-requests',null,ownerDevice)).status,200,'owner separate session remains usable');
+  assert.equal((await api('other','GET','/me/privacy-requests',null,supplier)).status,200,'independent staff identity keeps personal rights');
+  assert.equal((await api('supplier','POST','/auth/logout',{},supplier)).status,200,'logout remains available while locked');
+});

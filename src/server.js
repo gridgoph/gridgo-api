@@ -1,3 +1,4 @@
+import { enforceShopWorkerBoundary } from './shop-worker-boundary.js';
 import { bindShopDeviceRequest, effectiveShopRole, resolveShopWorker, managerRouteAllowed } from './shop-team-work.js';
 import { routeShopFileAccess, recordShopFileAccess, fileAccessJobs } from './shop-file-access.js';
 import { isExpressDocumentOrder } from './express-offers.js';
@@ -1208,6 +1209,7 @@ async function recordStaffSignIn(req, store, user) {
  */
 async function verifyClerkBeforeMutation(req, pathname) {
   const verified = await verifiedClerkClaimsFor(req);
+  await enforceShopWorkerBoundary(database,req,verified?.claims,now());
   const needsClerkProfile = [
     "/auth/staff/redeem",
     "/auth/shop-invites",
@@ -2415,6 +2417,12 @@ async function handleAuditedRequest(req, res) {
 
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
     pathname = url.pathname;
+    // Keep the bound-device allowlist ahead of every route registration.
+    // Mutations also check before provider/preflight work and recheck here under their lock.
+    if (hasBearerToken(req) || req.headers['x-gridgo-worker-token']) {
+      const verified=await verifiedClerkClaimsFor(req);
+      await enforceShopWorkerBoundary(database,req,verified?.claims,now());
+    }
 
     if (req.method === "GET" && pathname === "/health") {
       const databaseHealth = await database.health();
