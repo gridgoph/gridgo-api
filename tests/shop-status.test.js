@@ -130,3 +130,44 @@ test('night dispatch ends at the selected deadline even without weekday override
   order.expressOrder.nightWindow=nightWindow(profile,at('19:00'));
   assert.equal(availableDispatch(order,store,'2026-11-24T02:00:00+08:00'),true);
 });
+test('night delivery validates the selected listing at draft and checkout independently of faster listings',async()=>{
+  const {store,client,profile}=setup();store.version=1;
+  profile.availability.nightJobs='until_23';
+  store.settings.operatingHours.schedule.week=[{weekday:1,opensMinute:480,closesMinute:1200}];
+  store.files.find(f=>f.fileId==='file_art').detected={pageCount:1};
+  const fast=store.catalogItems[0],slow={...fast,id:'slow_document',turnaroundMinutes:90,turnaroundHours:1.5};
+  store.catalogItems.push(slow);store.catalogItemPhotos.push({...store.catalogItemPhotos[0],catalogItemId:slow.id});
+  const call=caller(store,client,at('19:00'));
+  const body={supplierId:profile.userId,location:profile.shop,fulfillmentMode:'delivery',dropoff:{...profile.shop,label:'Destination'},
+    files:[{catalogItemId:slow.id,fileId:'file_art',copies:1,colour:'bw',paper:'a4',sides:'one',layout:'fit_to_paper',acceptedWarnings:[]}]};
+  await assert.rejects(call('POST','/express/drafts',body),e=>e.code==='express_shop_unavailable');
+  slow.turnaroundMinutes=15;slow.turnaroundHours=0.25;
+  const draft=await call('POST','/express/drafts',body);
+  slow.turnaroundMinutes=90;slow.turnaroundHours=1.5;
+  const pay={looksRight:true,payment:{method:'qr_manual',reference:'REVIEW-NIGHT',proofFileId:'file_qr'}};
+  await assert.rejects(call('POST',`/me/carts/${draft.body.cartId}/checkout`,{...pay,expressConfirmation:draft.body.confirmation}),e=>e.code==='express_shop_unavailable');
+  assert.equal(store.orders.length,0);
+  const pickup=await call('POST','/express/drafts',{...body,fulfillmentMode:'pickup'});
+  const bought=await call('POST',`/me/carts/${pickup.body.cartId}/checkout`,{...pay,expressConfirmation:pickup.body.confirmation});
+  assert.equal(store.orders.find(o=>o.id===bought.body.order.id).readyBy,new Date(at('20:30')).toISOString());
+});
+test('night replacement checks compatible selected print settings rather than a faster incompatible listing',async()=>{
+  const {declineExpress,startExpressAcceptance}=await import('../src/express-orders.js');
+  const {distanceMetersBetween,deliveryFeeForDistance}=await import('../src/operational-model.js');
+  for(const fulfillmentMode of ['delivery','pickup']) {
+    const {store,client}=setup();
+    for(const profile of store.supplierProfiles)profile.availability.nightJobs='until_23';
+    store.settings.operatingHours.schedule.week=[{weekday:1,opensMinute:480,closesMinute:1200}];
+    const fast=store.catalogItems.find(i=>i.supplierId==='shop_b'),slow={...fast,id:'slow_replacement',printLayouts:['actual_size_centered'],turnaroundMinutes:90,turnaroundHours:1.5};
+    store.catalogItems.push(slow);store.catalogItemPhotos.push({...store.catalogItemPhotos.find(p=>p.catalogItemId===fast.id),catalogItemId:slow.id});
+    const destination={lat:7.07,lng:125.61},replacement=store.supplierProfiles.find(p=>p.userId==='shop_b');
+    const order={id:'replacement_order',clientId:client.id,supplierId:'shop_a',state:'supplier_assigned',fulfillmentMode,dropoff:destination,
+      deliveryFeeMinor:deliveryFeeForDistance(distanceMetersBetween(replacement.shop,destination),store.settings),payments:{},payoutMilestones:[],timeline:[],
+      expressOrder:{version:1,originalSupplierId:'shop_a',declines:0,events:[],location:replacement.shop,
+        printSettings:[{fileId:'file_art',copies:1,colour:'bw',paper:'a4',sides:'one',layout:'actual_size_centered'}]}};
+    store.orders.push(order);startExpressAcceptance(order,at('19:00'));
+    let serial=0;declineExpress(store,order,{at:at('19:00'),id:p=>`${p}_${++serial}`});
+    assert.equal(order.state,fulfillmentMode==='delivery'?'cancelled':'supplier_assigned');
+    if(fulfillmentMode==='pickup')assert.equal(order.supplierId,'shop_b');
+  }
+});

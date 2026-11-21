@@ -494,8 +494,10 @@ would otherwise forbid it.
 pickup for compatibility. Pickup at night goes directly to the shop, with the
 existing Express pickup code. **Delivery is offered only while GRIDGO's rider
 operating schedule is open**, and its estimated readiness must also fall in
-that schedule. Draft creation and checkout recheck the selected mode. Dispatch
-still refuses new rider assignment outside that schedule; existing trips retain
+that schedule. Draft creation and checkout recheck the selected mode and actual
+listings' combined queue/turnaround projection, independently of the shop card's
+fastest listing. Replacement selection applies the same check to listings that
+actually support every accepted print setting. Dispatch still refuses new rider assignment outside that schedule; existing trips retain
 their custody-completion rules. No night staff or off-duty riders are required.
 
 ### Opt-in demand pings
@@ -512,14 +514,19 @@ the requested location qualify. This includes home printers enrolled as shops;
 no new account type or approval bypass is introduced. Each shop gets at most
 **three pings per night**, with at most one per client per night. The night key
 is the Manila date the night began, so midnight does not reset the budget. New
-night = new budget; changing preferences or pausing does not reset it.
+night = new budget; changing preferences or pausing does not reset it. Both the
+current and prior Manila night histories are retained, so editing
+hours across midnight and restoring them cannot reset either budget; older
+histories are pruned only after they are no longer reachable.
 
 `printer_demand` inbox rows go to current active Owners via the ordinary
 notification/save/outbox service. Push carries only the existing allowlisted
 notification ID/type/time, without client identity or location. Delivery rechecks
 opt-in, pause/closure, night window and recipient ownership; queued retries are
-suppressed after the deadline, and transport TTL ends at that deadline. All
-implemented demand events also create current Operations/Super Admin inbox rows.
+suppressed after the deadline. Each send uses the earlier of the issued
+deadline and the current matching night window end for mobile expiry and
+browser TTL; shorter hours shorten retries, and later extensions never extend
+an already-issued notice. All implemented demand events also create current Operations/Super Admin inbox rows.
 
 ### Supplier app and supplier web calls
 

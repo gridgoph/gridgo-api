@@ -10,7 +10,7 @@ import { sameReviewData } from './review-data.js';
 import { expressAvailability } from './shop-availability.js';
 import { isOpenAt } from './availability.js';
 import { operatingHours } from './operating-hours.js';
-import { projectExpressNightFinish, projectShopFinish } from './order-match.js';
+import { projectExpressNightFinish, projectShopFinish, projectListingGroup } from './order-match.js';
 import { testerProgress } from './founding-testers.js';
 import { privilegedAdminMemberships, queueOrderInvalidate } from './notifications.js';
 
@@ -32,6 +32,15 @@ export function expressLinePrice(line) {
 export function expressPoint(point) {
   if(!point || !Number.isFinite(point.lat)||!Number.isFinite(point.lng)||Math.abs(point.lat)>90||Math.abs(point.lng)>180) expressFail(400,'invalid_express_location');
   return {lat:point.lat,lng:point.lng,...(typeof point.label==='string'?{label:point.label.slice(0,500)}:{})};
+}
+/** Shop cards use the fastest listing; an actual job must fit its selected work. */
+export function assertExpressNightJob(source, supplierId, lines, fulfillmentMode, at) {
+  const store=approvedCatalogView(source),profile=store.supplierProfiles.find(p=>p.userId===supplierId);
+  const availability=expressAvailability(profile,store.settings,at,fulfillmentMode);
+  if(!availability)expressFail(409,'express_shop_unavailable');
+  if(!availability.nightWindow)return;
+  const {projection}=projectListingGroup(store,lines,{now:at});
+  if(fulfillmentMode==='delivery' && !isOpenAt(operatingHours(store.settings).schedule,projection.promiseBy))expressFail(409,'express_shop_unavailable');
 }
 export function expressShopList(source,user,{location,sort='nearest',fulfillmentMode='pickup'}={},at) {
   location=expressPoint(location);
@@ -105,7 +114,7 @@ export function declineExpress(store,order,{at,id,kind='declined',actorId=null,r
   e.events.push({state:kind,at,supplierId:previous,reason:kind==='timed_out'?'No response within five minutes.':reason});
   const client=store.users.find(u=>u.id===order.clientId);
   const replacement=e.declines<3 && expressShopList(store,client,{location:e.location,fulfillmentMode:order.fulfillmentMode},at).find(shop=>!e.declinedSupplierIds.includes(shop.supplierId)
-    && expressReplacementSupports(store,shop,e.printSettings||[])
+    && expressReplacementSupports(store,shop,e.printSettings||[],order.fulfillmentMode,at)
     && (order.fulfillmentMode==='pickup'||deliveryFeeForDistance(distanceMetersBetween(shop.location,order.dropoff),store.settings)===order.deliveryFeeMinor));
   if(replacement) {
     order.supplierId=replacement.supplierId;
@@ -159,14 +168,24 @@ export function expressClientProjection(value) {
  return out;
 }
 
-function expressReplacementSupports(source,shop,settings) {
+function expressReplacementSupports(source,shop,settings,fulfillmentMode,at) {
  const store=approvedCatalogView(source);
- return settings.every(print=>shop.catalogItemIds.some(itemId=>{
+ const lines=[];
+ for(const print of settings) {
+  const compatible=shop.catalogItemIds.flatMap(itemId=>{
    const item=store.catalogItems.find(row=>row.id===itemId), listing=item&&publicCatalogItem(store,item);
    const file=store.files.find(row=>row.fileId===print.fileId);
-   if(!listing || !(item.printLayouts||[]).includes(print.layout) || !listingAcceptsArtwork(listing.acceptedFormats,file?.detectedContentType))return false;
-   try { expressCatalogOptions(store,item,print);return true; } catch(error) {if(error.status)return false;throw error;}
- }));
+   if(!listing || !(item.printLayouts||[]).includes(print.layout) || !listingAcceptsArtwork(listing.acceptedFormats,file?.detectedContentType))return [];
+   try { expressCatalogOptions(store,item,print);return [{item,listing}]; } catch(error) {if(error.status)return [];throw error;}
+  }).sort((a,b)=>a.listing.turnaroundHours-b.listing.turnaroundHours);
+  if(!compatible.length)return false;
+  lines.push({catalogItemId:compatible[0].item.id,quantity:print.copies||1,expressPrint:print});
+ }
+ if(lines.length) {
+  try { assertExpressNightJob(store,shop.supplierId,lines,fulfillmentMode,at); }
+  catch(error) { if(['express_night_capacity','express_shop_unavailable'].includes(error.code))return false;throw error; }
+ }
+ return true;
 }
 
 /** Express offers only its standard print controls, never custom paid add-ons. */

@@ -1,7 +1,7 @@
 import { shopPaused } from './shop-availability.js';
 import { pingPrinterDemand } from './printer-demand.js';
 import { isDeepStrictEqual } from 'node:util';
-import { expressRates, expressLinePrice, expressPoint, expressShopList, expressGuide, updateExpressGuide, createExpressSnapshot, publicExpress, expressClientProjection, expressCatalogOptions } from './express-orders.js';
+import { expressRates, expressLinePrice, expressPoint, expressShopList, assertExpressNightJob, expressGuide, updateExpressGuide, createExpressSnapshot, publicExpress, expressClientProjection, expressCatalogOptions } from './express-orders.js';
 import { isReviewData, markReviewPayment, reviewCatalogView, REVIEW_CATALOG_TABLES } from './review-data.js';
 import { approvalPolicy, recordApprovalProof } from './approval-proof.js';
 import { publicColourQuote, publicColourListing } from './colour-projection.js';
@@ -1695,6 +1695,7 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
     const lines=store.cartLines.filter(l=>l.cartId===cart.id);
     const shop=expressShopList(store,user,{location:cart.expressLocation,fulfillmentMode:cart.fulfillmentMode},at).find(s=>s.supplierId===lines[0]?.supplierId);
     if(!shop || lines.some(line=>!line.expressPrint || !shop.catalogItemIds.includes(line.catalogItemId) || line.supplierId!==shop.supplierId)) fail(409,'express_shop_unavailable','Choose an open Express shop.');
+    assertExpressNightJob(store,shop.supplierId,lines,cart.fulfillmentMode,at);
     for(const line of lines) {
       const item=store.catalogItems.find(row=>row.id===line.catalogItemId);
       if(!isDeepStrictEqual(documentPagesFor(store,item,line,undefined,{required:true}),line.documentPages)) fail(409,'express_preview_required','The detected pages changed. Review a new draft.');
@@ -2692,6 +2693,7 @@ function createExpressDraft(store,user,body,id,at) {
    expressLinePrice(line);assertListingArtwork(store,item,line);
    return line;
  });
+ assertExpressNightJob(store,shop.supplierId,lines,cart.fulfillmentMode,at);
  store.carts.push(cart);store.cartLines.push(...lines);
  lockCartFeeSchedules(store,cart,at);
  // The upload proves mission step one; no order or reward is manufactured.
