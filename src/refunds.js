@@ -1,3 +1,4 @@
+import { prepareVerificationPayout, completeVerificationPayout } from "./supplier-verification.js";
 import { staffPageBody } from './staff-list-pages.js';
 import { assertReviewMoneyAllowed } from './review-data.js';
 import { assertProhibitedItemIntake, assertProhibitedItemFileCheck, prohibitedItemHold } from './prohibited-items.js';
@@ -183,7 +184,7 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
     return { status: 200, body: { quote: privileged(user) ? quote : publicCancellationQuote(quote) } };
   }
   const orderMatch = url.pathname.match(/^\/orders\/([^/]+)\/refund-requests$/);
-  const match = url.pathname.match(/^\/refund-requests(?:\/([^/]+)(?:\/(destination|review|settlement-preview|settle|reject|withdraw|payment-attempts|reconcile|payments|supplier-payout))?)?$/);
+  const match = url.pathname.match(/^\/refund-requests(?:\/([^/]+)(?:\/(destination|review|settlement-preview|settle|reject|withdraw|payment-attempts|reconcile|payments|supplier-payout|supplier-payout-prepare))?)?$/);
   if (!orderMatch && !match) return null;
   if (!user) fail(401, 'unauthorized', 'Sign in to manage refunds.');
   if (!privileged(user) && user.role !== 'client') fail(403, 'forbidden', 'Only the client and Operations may read refunds.');
@@ -203,7 +204,7 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
   const action = orderMatch ? 'request' : match?.[2];
   if ((action === 'destination' ? req.method !== 'PATCH' : req.method !== 'POST') || !action) return null;
   if (!['request', 'destination', 'withdraw'].includes(action)) requireOps(user);
-  if (['settle', 'payment-attempts', 'payments', 'supplier-payout'].includes(action)) assertReviewMoneyAllowed(order);
+  if (['settle', 'payment-attempts', 'payments', 'supplier-payout', 'supplier-payout-prepare'].includes(action)) assertReviewMoneyAllowed(order);
   const body = await readBody(req);
   if (!body || Array.isArray(body) || typeof body !== 'object') fail(400, 'invalid_refund_request', 'Send a JSON object.');
   if (action === 'settlement-preview') {
@@ -387,7 +388,7 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
     attempt.status = body.outcome; attempt.updatedAt = at;
     request.status = body.outcome === 'unknown' ? 'payment_unknown' : 'approved';
     eventKind = body.outcome; eventData = { attemptId: attempt.id };
-  } else if (action === 'supplier-payout') {
+  } else if (action === 'supplier-payout' || action === 'supplier-payout-prepare') {
     const settlement = settlementFor(store, request);
     const payout = store.refundSupplierPayouts.find((row) => row.settlementId === settlement?.id && row.status === 'pending');
     if (!payout) fail(409, 'refund_supplier_payout_not_pending', 'No remaining shop settlement payout is pending.');
@@ -396,19 +397,25 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
       || store.refundRequests.some((row) => row.orderId === order.id && ['requested', 'reviewed'].includes(row.status))) {
       fail(409, 'payout_held', 'Resolve the independent claims, issues and pending refund reviews before paying the shop.');
     }
-    if (body.amountMinor !== payout.amountMinor) fail(409, 'refund_supplier_payout_amount_mismatch', 'Pay exactly the agreed remaining shop obligation.', { amountMinor: payout.amountMinor });
+    const prepared=prepareVerificationPayout(store,order,{key:`settlement:${payout.id}`,amountMinor:payout.amountMinor,at,actor:user,id});
+    if(action==='supplier-payout-prepare'||prepared.status==='held')return {status:prepared.status==='held'?202:200,body:{payout:prepared},mutated:true};
+    if (body.amountMinor !== prepared.netAmountMinor) fail(409, 'refund_supplier_payout_amount_mismatch', 'Pay exactly the prepared net shop obligation.', { amountMinor: prepared.netAmountMinor });
     const account = opsPayoutAccountProjection(store, payout.supplierId);
-    if (!account?.qr || body.payoutAccountVersion !== account.version || body.destinationVerified !== true) {
-      fail(409, 'refund_supplier_destination_verification_required', 'Open and verify the shop’s current receiving QR before recording payment.');
-    }
-    const reference = paymentReferenceValue(body.reference);
-    if (!reference || !body.receiptFileId) fail(400, 'refund_supplier_transfer_evidence_required', 'Record the wallet reference and receipt screenshot.');
-    const receipt = resolvePayoutReceipt(store, body.receiptFileId, user);
-    bindPayoutReceipt(order, { code: 'refund_settlement' }, receipt);
-    payout.receiptFileId = receipt.fileId;
+    let reference,receipt=null;
+    if(prepared.netAmountMinor>0) {
+      if (!account?.qr || body.payoutAccountVersion !== account.version || body.destinationVerified !== true) {
+        fail(409, 'refund_supplier_destination_verification_required', 'Open and verify the shop’s current receiving QR before recording payment.');
+      }
+      reference = paymentReferenceValue(body.reference);
+      if (!reference || !body.receiptFileId) fail(400, 'refund_supplier_transfer_evidence_required', 'Record the transfer reference and receipt screenshot.');
+      receipt = resolvePayoutReceipt(store, body.receiptFileId, user);
+      bindPayoutReceipt(order, { code: 'refund_settlement' }, receipt);
+    } else reference=`verification-offset:${payout.id}`;
+    payout.receiptFileId = receipt?.fileId||null;
     payout.status = 'released'; payout.reference = reference; payout.releasedAt = at; payout.releasedBy = user.id;
-    eventKind = 'supplier_paid'; eventData = { payoutId: payout.id, receiptFileId: receipt.fileId, amountMinor: payout.amountMinor,
-      payoutAccountVersion: account.version, payoutQrFileId: account.qr.fileId };
+    completeVerificationPayout(store,order,prepared,{at,actor:user,id});
+    eventKind = 'supplier_paid'; eventData = { payoutId: payout.id, receiptFileId: receipt?.fileId||null, amountMinor: payout.amountMinor,netAmountMinor:prepared.netAmountMinor,recoveryMinor:prepared.recoveryMinor,
+      payoutAccountVersion: account?.version||null, payoutQrFileId: account?.qr?.fileId||null };
   } else if (action === 'payments') {
     const attempt = activeAttempt(store, request);
     if (!attempt || !['in_progress', 'unknown'].includes(attempt.status)) fail(409, 'refund_payment_attempt_required', 'Reserve a payment first. If money was already sent, reconcile that transfer; do not send again.');

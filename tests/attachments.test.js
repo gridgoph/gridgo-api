@@ -368,7 +368,7 @@ test("verification documents attach only to the uploader and support typed repla
     400,
     "invalid_verification_document_type",
   );
-  assert.deepEqual(VERIFICATION_DOCUMENT_TYPES, ["business_permit", "valid_id", "sample_work"]);
+  assert.deepEqual(VERIFICATION_DOCUMENT_TYPES, ["business_permit", "valid_id", "id_selfie", "sample_work"]);
 
   const replacement = readyFile("verification_document", { fileId: "permit-new" });
   store.files.push(replacement);
@@ -586,7 +586,7 @@ test("referenced evidence cannot be deleted", () => {
   expectError(() => markFileDeletePending(readyFile("artwork", { references: [{ type: "order", id: "order-a" }] }), client, "2026-08-09T00:00:00Z", { store: { orders: [order()] } }), 409, "file_in_use");
 });
 
-test("order files require approved work membership while verification evidence stays accessible", () => {
+test("order files allow pending supplier work and require approved riders while verification evidence stays accessible", () => {
   for (const role of ["supplier", "rider"]) {
     for (const status of ["approved", "suspended", "pending", "rejected", null]) {
       const member = { id: `${role}-member`, role: "client" };
@@ -611,13 +611,13 @@ test("order files require approved work membership while verification evidence s
       if (role === "rider") workOperations.push(() => authorizeFileAttach(actor,
         readyFile("delivery_photo", { ownerId: member.id }), { type: "order", record: assignedOrder }));
       for (const operation of workOperations) {
-        if (status === "approved") assert.doesNotThrow(operation);
+        if ((status === "approved" || role === "supplier" && status === "pending")) assert.doesNotThrow(operation);
         else expectError(operation, 403, "forbidden");
       }
       assignedOrder.supplierId = null;
       assignedOrder.riderId = null;
       store.orderJobs = [{ id: "job", orderId: assignedOrder.id, supplierId: member.id, riderId: member.id }];
-      if (status === "approved") assert.doesNotThrow(() => authorizeFileRead(actor, store, artwork));
+      if ((status === "approved" || role === "supplier" && status === "pending")) assert.doesNotThrow(() => authorizeFileRead(actor, store, artwork));
       else expectError(() => authorizeFileRead(actor, store, artwork), 403, "forbidden");
 
       const verification = readyFile(role === "supplier" ? "verification_document" : "rider_verification_document", { ownerId: member.id });

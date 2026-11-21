@@ -1,3 +1,4 @@
+import { assertVerifiedCashShop } from "./supplier-verification.js";
 import { isDeepStrictEqual } from 'node:util';
 import { expressRates, expressLinePrice, expressPoint, expressShopList, expressGuide, updateExpressGuide, createExpressSnapshot, publicExpress, expressClientProjection, expressCatalogOptions } from './express-orders.js';
 import { isReviewData, markReviewPayment, reviewCatalogView, REVIEW_CATALOG_TABLES } from './review-data.js';
@@ -1710,6 +1711,7 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
   }
   const lines = (store.cartLines || []).filter((line) => line.cartId === cart.id)
     .sort((a, b) => a.sortOrder - b.sortOrder || a.id.localeCompare(b.id));
+  if (cash) for (const line of lines) assertVerifiedCashShop(store,line.supplierId);
   const suppliers = [...new Set(lines.map((line) => line.supplierId))];
   const groups = cartGroups(cart, lines);
   // Validate the complete relevant draft before materializing any group orders.

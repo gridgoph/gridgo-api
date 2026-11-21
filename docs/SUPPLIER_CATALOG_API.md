@@ -23,7 +23,7 @@ Signed-in optional, same as `GET /catalog`. Invalid bearer tokens still return `
 - `GET /catalog/items/:itemId?optionIds=` returns one public item. `fromPriceMinor` is `basePriceMinor` plus the cheapest active option in each **required spec** group. Add-on groups are not included until selected via `optionIds`. `optionIds` (repeat or comma-separated) computes `effectivePriceMinor` as `max(0, base + selected modifiers)`. `fromPriceMinor` / `effectivePriceMinor` stay the shop amounts. Client-facing GRIDGO amounts (shop + live `serviceFeeRateBps`) are additive: `clientFromPriceMinor`, `clientEffectivePriceMinor`. Supplier `/me/catalog-items` is unchanged. Accepted formats include `inputKind` (`file` or `url`). `prepSteps` is the ordered before-they-order guide.
 - `GET /catalog/media/:fileId` returns metadata for a photo or shop image that is already public.
 
-A listing is public only when the owner has a current `supplier` membership, the supplier case is `approved`, the service is `live`, the item has an approved version and is active, it has a ready photo, every option group has an active option, the effective accepted-format set is nonempty, and a `tarpaulins_outdoor_banners` listing has `printerMaxWidthFeet`.
+A listing is public only when the owner has a current `supplier` membership, the supplier case is approved or meets the [complete pending-shop verification policy](SUPPLIER_VERIFICATION_API.md), the service is `live`, the item has an approved version and is active, it has a ready photo, every option group has an active option, the effective accepted-format set is nonempty, and a `tarpaulins_outdoor_banners` listing has `printerMaxWidthFeet`.
 
 ## Shop self-service
 
@@ -190,7 +190,7 @@ The following is the complete new structured-code vocabulary. The legacy top-lev
 | `deadline_not_met` | This listing cannot meet the selected deadline with the current queue, opening hours, turnaround and quantity capacity. | `choose_later_deadline` |
 | `shop_never_open` | The schedule cannot fit this work within the scheduling horizon. Review opening hours, closures and requested quantity. | `review_schedule` |
 
-Shop gates use `account_inactive`, `supplier_profile`, `shop_location`, `shop_closed`, `supplier_membership`, `supplier_not_approved`, and the aggregate `no_matchable_listing`. Listing gates use `owning_service` through `service_not_live` in the table, plus inherited shop gates. Profile completion uses the legacy setup codes plus `shop_name`, `contact_name`, and `shop_location`; per-service setup uses `service_not_submitted`, `pricing_basis`, `turnaround`, and `service_default_formats`. Only request results use `printer_capacity_exceeded`, `deadline_not_met`, and `shop_never_open`.
+Pending-shop gates additionally use `document_service`, `payout_qr`, `verification_deadline` and `verification_recovery` ([contract](SUPPLIER_VERIFICATION_API.md)). Shop gates use `account_inactive`, `supplier_profile`, `shop_location`, `shop_closed`, `supplier_membership`, `supplier_not_approved`, and the aggregate `no_matchable_listing`. Listing gates use `owning_service` through `service_not_live` in the table, plus inherited shop gates. Profile completion uses the legacy setup codes plus `shop_name`, `contact_name`, and `shop_location`; per-service setup uses `service_not_submitted`, `pricing_basis`, `turnaround`, and `service_default_formats`. Only request results use `printer_capacity_exceeded`, `deadline_not_met`, and `shop_never_open`.
 
 ## Formats and snapshots
 

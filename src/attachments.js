@@ -1,3 +1,4 @@
+import { supplierCanWork } from "./supplier-verification.js";
 import { activeAcknowledgementHandover } from './acknowledgement-receipts.js';
 import { assignmentTime } from './rider-tracking.js';
 import { assertStaffFile, isShopStaff, actorUserId } from './shop-team.js';
@@ -53,7 +54,7 @@ const KINDS = new Set([
   "rider_verification_document",
 ]);
 const CONTENT_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "application/pdf"]);
-export const VERIFICATION_DOCUMENT_TYPES = Object.freeze(["business_permit", "valid_id", "sample_work"]);
+export const VERIFICATION_DOCUMENT_TYPES = Object.freeze(["business_permit", "valid_id", "id_selfie", "sample_work"]);
 const VERIFICATION_DOCUMENT_TYPE_SET = new Set(VERIFICATION_DOCUMENT_TYPES);
 export const PURPOSE_POLICIES = Object.freeze({
   cash_topup_proof: { roles: ['rider'], maxBytes: 15*1024*1024, contentTypes: ['image/jpeg','image/png','image/webp'] },
@@ -887,7 +888,7 @@ export function resolveFileTarget(store, purpose, body, user = null) {
       fail(
         400,
         "invalid_verification_document_type",
-        "Choose business_permit, valid_id, or sample_work for this verification document.",
+        "Choose business_permit, valid_id, id_selfie, or sample_work for this verification document.",
         { allowed: VERIFICATION_DOCUMENT_TYPES },
       );
     }
@@ -1068,9 +1069,13 @@ export function authorizeFileAttachOwner(user, file) {
   }
 }
 
-function hasApprovedWorkRole(user, role) {
+function hasApprovedWorkRole(user, role, store) {
   if (!hasRole(user, role)) return false;
   const approval = approvalCaseFor(authorizationContextFor(user), role);
+  if(role === "supplier") {
+    if(Array.isArray(store?.userRoleMemberships) && store.approvalCases?.some(c=>c.userId===user.id&&c.kind==='supplier')) return supplierCanWork(store,user.id);
+    if(approval?.status==='pending')return (user.accountStatus??'active')==='active';
+  }
   return approval ? approval.status === "approved" : user.role === role && user.verificationStatus === "approved";
 }
 
@@ -1079,11 +1084,11 @@ export function authorizeFileAttach(user, file, target, store = null) {
   const record = target?.record;
   if (file.purpose === 'supplier_invoice') {
     const supplierId = store?.supplierInvoices?.find(row => row.orderId === record?.id)?.supplierId || record?.supplierId;
-    if (target?.type !== 'order' || !hasApprovedWorkRole(user, 'supplier') || supplierId !== user.id) forbidden();
+    if (target?.type !== 'order' || !hasApprovedWorkRole(user, 'supplier', store) || supplierId !== user.id) forbidden();
     return;
   }
   if (file.purpose === 'finished_product_photo') {
-    if (target?.type !== 'order' || !hasApprovedWorkRole(user, 'supplier') || record.supplierId !== user.id) forbidden();
+    if (target?.type !== 'order' || !hasApprovedWorkRole(user, 'supplier', store) || record.supplierId !== user.id) forbidden();
     if (!riderPackingFlow(record) || record.state !== 'production') fail(409, 'finished_product_photo_upload_not_allowed', 'Attach finished, unpacked product photos during production, before submitting them for review.');
     return;
   }
@@ -1094,14 +1099,14 @@ export function authorizeFileAttach(user, file, target, store = null) {
       if (claimBlocksHandover(store || {}, record) || store?.escalations?.some(row => row.orderId === record.id && row.status === 'open')) fail(409, 'pickup_held', 'Resolve all holds and pickup escalations first.');
       return;
     }
-    if (target?.type !== "order" || !hasApprovedWorkRole(user, "supplier") || record.supplierId !== user.id) forbidden();
+    if (target?.type !== "order" || !hasApprovedWorkRole(user, "supplier", store) || record.supplierId !== user.id) forbidden();
     if (!["production", "supplier_self_qc"].includes(record.state)) {
       fail(409, "packing_photo_upload_not_allowed", "Add the packing photo before marking the package ready for dispatch.");
     }
     return;
   }
   if (file.purpose === "production_photo") {
-    if (target?.type !== "order" || !hasApprovedWorkRole(user, "supplier") || record.supplierId !== user.id) forbidden();
+    if (target?.type !== "order" || !hasApprovedWorkRole(user, "supplier", store) || record.supplierId !== user.id) forbidden();
     if (!["production", "supplier_self_qc"].includes(record.state)) {
       fail(409, "production_photo_upload_not_allowed", "Attach progress photos while the job is in production or being packed.");
     }
@@ -1114,7 +1119,7 @@ export function authorizeFileAttach(user, file, target, store = null) {
   if (file.purpose === "fulfilment_proof") {
     if (target?.type !== "order") forbidden();
     const requiredRole = payoutStageFor(record, target.milestoneCode)?.proofBy;
-    if (!requiredRole || !hasApprovedWorkRole(user, requiredRole)) forbidden();
+    if (!requiredRole || !hasApprovedWorkRole(user, requiredRole, store)) forbidden();
     if (requiredRole === "supplier" && record.supplierId !== user.id) forbidden();
     if (requiredRole === "rider" && record.riderId !== user.id) forbidden();
     // A picture the stage already lists never counts against the limit: the
@@ -1391,7 +1396,7 @@ export function authorizeFileRead(user, store, file) {
   if (file.purpose.startsWith('cash_')) {
     if (['ops_admin','super_admin'].includes(user.role) || file.ownerId===user.id) return;
     if (file.purpose==='cash_remedy_receipt' && user.role==='client' && (file.references||[]).some(r=>r.type==='cash' && r.clientId===user.id)) return;
-    if (['cash_reprint_receipt','cash_shop_receipt','cash_shop_return'].includes(file.purpose) && hasApprovedWorkRole(user,'supplier') && (file.references||[]).some(r=>r.type==='cash' && r.supplierId===user.id)) return;
+    if (['cash_reprint_receipt','cash_shop_receipt','cash_shop_return'].includes(file.purpose) && hasApprovedWorkRole(user,'supplier',store) && (file.references||[]).some(r=>r.type==='cash' && r.supplierId===user.id)) return;
     forbidden();
   }
   if (['promotion_logo', 'promotion_image', 'promotion_card_image'].includes(file.purpose)) {
@@ -1455,7 +1460,7 @@ export function authorizeFileRead(user, store, file) {
     const refs = (file.references || []).filter(ref => ref.type === 'order');
     if (!refs.length && user.role === 'client' && file.ownerId === user.id) return;
     if (refs.some(ref => canReadApprovalProof(store, store.orders.find(order => order.id === ref.id), user)
-      && (user.role !== 'supplier' || hasApprovedWorkRole(user, 'supplier')))) return;
+      && (user.role !== 'supplier' || hasApprovedWorkRole(user, 'supplier', store)))) return;
     forbidden();
   }
   if (file.purpose === "client_verification_document") forbidden();
@@ -1470,7 +1475,7 @@ export function authorizeFileRead(user, store, file) {
     forbidden();
   }
   if (file.purpose === 'supplier_invoice') {
-    if (hasApprovedWorkRole(user, 'supplier') && file.ownerId === user.id) return;
+    if (hasApprovedWorkRole(user, 'supplier', store) && file.ownerId === user.id) return;
     forbidden();
   }
   if (file.purpose === "payment_proof") {
@@ -1490,7 +1495,7 @@ export function authorizeFileRead(user, store, file) {
   if (file.purpose === "payout_receipt") {
     if (
       user.role === "supplier"
-      && hasApprovedWorkRole(user, "supplier")
+      && hasApprovedWorkRole(user, "supplier", store)
       && (file.references || []).some((reference) => canReadReference(user, store, reference, file))
     ) return;
     forbidden();
@@ -1500,7 +1505,7 @@ export function authorizeFileRead(user, store, file) {
   if (file.purpose === "handoff_signature" && user.role === "client") forbidden();
   if (["supplier", "rider"].includes(user.role)
       && (file.references || []).some((reference) => reference.type === "order")
-      && !hasApprovedWorkRole(user, user.role)) forbidden();
+      && !hasApprovedWorkRole(user, user.role, store)) forbidden();
   if (["supplier", "rider"].includes(user.role) && ["artwork", "mockup"].includes(file.purpose)
       && (file.references || []).some((reference) => reference.type === "order")) {
     if (file.references.some((reference) => reference.type === "order"

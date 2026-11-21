@@ -1,3 +1,7 @@
+import { supplierCanWork, verificationSettings, verificationSummary,
+  prepareVerificationPayout, completeVerificationPayout, recordVerificationRecovery, cancelVerificationReservation, reconcileVerificationHolds, remindSupplierVerification } from "./supplier-verification.js";
+import { supplierMatchBlockersFor } from "./supplier-eligibility.js";
+import { changePaymentsFor, changePayoutsFor } from "./order-change-policy.js";
 import { routeShopFileAccess, recordShopFileAccess, fileAccessJobs } from './shop-file-access.js';
 import { isExpressDocumentOrder } from './express-offers.js';
 import { awardExpressFriendPass } from './express-rewards.js';
@@ -481,6 +485,15 @@ async function save(view, { notificationsOnly = false } = {}) {
   }
   const scope = clientSaveScope(store);
   const maintenance = saveMaintenanceView(store);
+  if (!scope) {
+    const before=originalDomainStore(store);
+    for(const order of store.orders||[]) {
+      const previous=before?.orders?.find(o=>o.id===order.id);
+      if(order.state==='cancelled' && previous && previous.state!=='cancelled'
+        && order.cancelledBy===order.supplierId)recordVerificationRecovery(store,order,{at:now(),actor:{id:order.cancelledBy,role:'supplier'},id});
+    }
+    reconcileVerificationHolds(store,{at:now(),actor:{role:'system'},id});
+  }
   const flushMaintenanceInvalidates = () => { if (maintenance !== store) moveQueuedInvalidates(maintenance, store); };
   let closedSavedFiles = 0;
   const savedOwners = new Set((maintenance.files || []).filter(file => file.state !== 'deleted'
@@ -1523,6 +1536,9 @@ function approvalCaseDetail(store, approvalCase) {
   return {
     ...base,
     supplierProfile: supplierProfileProjection(store, approvalCase.userId),
+    verification: verificationSummary(store,approvalCase.userId,now()),
+    verificationDocuments: verificationDocumentsFor(store,applicant),
+    verificationLedger:(store.supplierVerificationLedger||[]).filter(e=>e.supplierId===approvalCase.userId),
     categories: [...new Set(services.map((service) => service.categoryCode))],
     services,
     readiness: supplierReadiness(store, approvalCase.userId, approvalCase),
@@ -1585,6 +1601,7 @@ function approvalQueue(store, url) {
     status: 200,
     approvalCases: page.map((approvalCase) => ({
       ...approvalCaseForApprover(store, approvalCase),
+      ...(approvalCase.kind === "supplier" ? {verification:verificationSummary(store,approvalCase.userId,now()),verificationDocuments:verificationDocumentsFor(store,store.users.find(u=>u.id===approvalCase.userId))}:{}),
       applicant: publicIdentity(
         (store.users || []).find((candidate) => candidate.id === approvalCase.userId),
       ),
@@ -1616,17 +1633,17 @@ function fixedAuthProjection(store, auth, role) {
   if (role === "supplier") {
     const approvalCase = approvalCaseFor(context, "supplier");
     const canEdit = approvalCase?.status !== "suspended";
-    const approved = approvalCase?.status === "approved";
     return {
       ...base,
       supplierProfile: supplierProfileProjection(store, auth.user.id),
       approvalCase: approvalCaseSummary(approvalCase),
       readiness: supplierReadiness(store, auth.user.id, approvalCase),
+      verification: verificationSummary(store,auth.user.id,now()),
       capabilities: {
         editCatalogue: canEdit,
         editSettings: canEdit,
-        receiveJobOffers: approved,
-        acceptJobs: approved,
+        receiveJobOffers: supplierMatchBlockersFor(store)(auth.user.id,store.supplierProfiles?.find(p=>p.userId===auth.user.id)).length===0,
+        acceptJobs: supplierCanWork(store,auth.user.id),
       },
     };
   }
@@ -1709,7 +1726,7 @@ function validatedShop(value) {
 }
 
 function verificationDocumentsFor(store, supplier) {
-  if (!supplier || supplier.role !== "supplier") return [];
+  if (!supplier || !(store.userRoleMemberships||[]).some(m=>m.userId===supplier.id&&m.role==="supplier")) return [];
   return (supplier.verificationDocumentFileIds || [])
     .map((fileId) => findFile(store, fileId))
     .filter(
@@ -2208,7 +2225,7 @@ function eligibleSuppliersForOrder(store, order) {
       continue;
     }
     const reasons = [];
-    if (supplier.verificationStatus !== "approved") {
+    if (supplierMatchBlockersFor(store)(supplier.id,store.supplierProfiles.find(p=>p.userId===supplier.id)).length) {
       results.push({
         supplier: publicUser(supplier),
         eligible: false,
@@ -2660,6 +2677,15 @@ async function handleAuditedRequest(req, res) {
     await hydrateCashWallets(database,store);
     if (clientSaveScope(store)) {
       const maintenance = saveMaintenanceView(store);
+  if (!scope) {
+    const before=originalDomainStore(store);
+    for(const order of store.orders||[]) {
+      const previous=before?.orders?.find(o=>o.id===order.id);
+      if(order.state==='cancelled' && previous && previous.state!=='cancelled'
+        && order.cancelledBy===order.supplierId)recordVerificationRecovery(store,order,{at:now(),actor:{id:order.cancelledBy,role:'supplier'},id});
+    }
+    reconcileVerificationHolds(store,{at:now(),actor:{role:'system'},id});
+  }
       const pending = new Set(maintenance.orders.filter(order => order.state === 'issue_window_open').map(order => order.id));
       const at = now();
       if (expireIssueWindows(maintenance, at)) {
@@ -2978,7 +3004,7 @@ async function handleAuditedRequest(req, res) {
         user = selectActorRole(store, user, selectedRole, { restrictMemberships: Boolean(eventRole) });
       }
       if (/^\/(orders|jobs|dispatch|payouts|claims|issues|escalations|refund-requests)(\/|$)/.test(pathname)) {
-        if (!hasRole(store,user.id,user.role) || (['supplier','rider'].includes(user.role) && !approvedRole(store,user.id,user.role))) return send(res,403,{error:'forbidden'});
+        if (!hasRole(store,user.id,user.role) || (['supplier','rider'].includes(user.role) && (user.role==='supplier' ? !supplierCanWork(store,user.id) : !approvedRole(store,user.id,user.role)))) return send(res,403,{error:'forbidden'});
       }
     }
 
@@ -3581,6 +3607,13 @@ async function handleAuditedRequest(req, res) {
         });
       }
       return send(res, orderMatchResponse.status, orderMatchResponse.body);
+    }
+
+    if (req.method === "GET" && pathname === "/me/supplier-verification") {
+      if(user.role!=="supplier" || isShopStaff(user)) return send(res,403,{error:"forbidden"});
+      return send(res,200,{verification:verificationSummary(store,user.id,now()),
+        verificationDocuments:verificationDocumentsFor(store,store.users.find(u=>u.id===user.id)),
+        ledger:(store.supplierVerificationLedger||[]).filter(e=>e.supplierId===user.id)});
     }
 
     // ---- Super Admin approval queue ----
@@ -4422,6 +4455,7 @@ async function handleAuditedRequest(req, res) {
       }
       const next = {
         ...store.settings,
+        supplierVerification: Object.hasOwn(body,"supplierVerification") ? body.supplierVerification : verificationSettings(store.settings),
         expressRates: Object.hasOwn(body,"expressRates") ? body.expressRates : expressRates(store.settings),
         cash: Object.hasOwn(body,'cash') ? (body.cash && typeof body.cash==='object' && !Array.isArray(body.cash)
           ? {...cashSettings(store.settings),...body.cash}:body.cash) : cashSettings(store.settings),
@@ -5470,7 +5504,7 @@ async function handleAuditedRequest(req, res) {
       const service = (store.supplierServices || []).find((s) => s.id === sid);
       if (!service) return send(res, 404, { error: "service_not_found" });
       const owner = store.users.find((u) => u.id === service.supplierId);
-      if (!owner || !approvedRole(store, owner.id, "supplier")) {
+      if (!owner || !supplierCanWork(store, owner.id)) {
         const approval = (store.approvalCases || []).find((c) => c.userId === owner?.id && c.kind === "supplier");
         return send(res, 409, { error: "supplier_not_approved", verificationStatus: approval?.status || owner?.verificationStatus || null });
       }
@@ -6169,7 +6203,19 @@ async function handleAuditedRequest(req, res) {
     }
 
     // ---- supplier payout milestones ----
-    if (req.method === "POST" && /^\/orders\/[^/]+\/milestones\/[^/]+\/release$/.test(pathname)) {
+    if(req.method==='POST' && (/^\/orders\/[^/]+\/milestones\/[^/]+\/cancel-reservation$/.test(pathname)||/^\/orders\/[^/]+\/payout-reservations\/cancel$/.test(pathname))) {
+      if(!isOps(user))return send(res,403,{error:'forbidden'});
+      const order=store.orders.find(o=>o.id===pathname.split('/')[2]);if(!order)return send(res,404,{error:'order_not_found'});
+      const body=await readBody(req);
+      if(body.noFundsSentConfirmed!==true||typeof body.reason!=='string'||!body.reason.trim())return send(res,400,{error:'verification_reservation_confirmation_required'});
+      const code=pathname.split('/')[4],ctx={at:now(),actor:user,id,reason:body.reason.trim()};
+      const keys=pathname.endsWith('/payout-reservations/cancel')?[body.payoutKey]:[`stage:${order.id}:${code}`,...(store.supplierVerificationLedger||[]).filter(e=>e.orderId===order.id&&e.kind==='reserved'&&e.payoutKey.startsWith('change:')).map(e=>e.payoutKey)];
+      if(keys.some(key=>typeof key!=='string'||!(store.supplierVerificationLedger||[]).some(e=>e.orderId===order.id&&e.supplierId===order.supplierId&&e.payoutKey===key)))return send(res,409,{error:'verification_reservation_not_pending'});
+      for(const key of new Set(keys))cancelVerificationReservation(store,order,key,ctx);
+      queueOrderInvalidate(store,order,['payouts']);await save(store);return send(res,200,{ok:true});
+    }
+
+    if (req.method === "POST" && /^\/orders\/[^/]+\/milestones\/[^/]+\/(prepare|release)$/.test(pathname)) {
       if (!isOps(user)) return send(res, 403, { error: "forbidden" });
       const parts = pathname.split("/");
       const orderId = parts[2];
@@ -6178,16 +6224,31 @@ async function handleAuditedRequest(req, res) {
       if (!order) return send(res, 404, { error: "order_not_found" });
       assertReviewMoneyAllowed(order);
       const body = await readBody(req);
+      const existing=order.payoutMilestones.find(stage=>stage.code===milestoneCode);
+      if(existing?.status==='released') return send(res,200,{order:await publicOrder(order,user,store),milestone:existing,replayed:true});
+      const releasedAt = now();
+      releaseMilestone(structuredClone(order),milestoneCode,user,releasedAt,store);
+      const finalCode=order.payoutPlanVersion===4?'delivered':order.payoutPlanVersion===2?'issue_window':'retention';
+      const extra=milestoneCode===finalCode?changePaymentsFor(store,order).filter(p=>!changePayoutsFor(store,order).some(r=>r.changeId===p.changeId)):[];
+      const prepared=[prepareVerificationPayout(store,order,{key:`stage:${order.id}:${milestoneCode}`,amountMinor:existing.amountMinor,at:releasedAt,actor:user,id}),
+        ...extra.map(p=>prepareVerificationPayout(store,order,{key:`change:${order.id}:${p.changeId}`,amountMinor:p.principalMinor,at:releasedAt,actor:user,id}))];
+      const netAmountMinor=prepared.reduce((n,p)=>n+p.netAmountMinor,0);
+      const verificationHold=prepared.find(p=>p.status==='held');
+      if(pathname.endsWith('/prepare')||verificationHold) {
+        queueOrderInvalidate(store,order,['payouts']);await save(store);
+        return send(res,verificationHold?202:200,{payout:{status:verificationHold?'held':'ready',netAmountMinor,items:prepared}});
+      }
+      if(prepared.some(p=>p.recoveryMinor>0) && body.amountMinor!==netAmountMinor) return send(res,409,{error:'verification_net_payout_amount_required',netAmountMinor});
       // The wallet receipt and its reference are read before the share moves,
       // so a refused screenshot never leaves a released share with no proof.
       const reference = paymentReferenceValue(body.reference);
       const receipt = resolvePayoutReceipt(store, body.receiptFileId, user);
-      const releasedAt = now();
       const milestone = releaseMilestone(order, milestoneCode, user, releasedAt, store);
       if (receipt) bindPayoutReceipt(order, milestone, receipt);
       if (reference) milestone.reference = reference;
       const supplementalAmountMinor = releaseChangePayouts(store, order, milestoneCode,
-        { user, reference, receipt, amountMinor: body.amountMinor, at: releasedAt, id, audit });
+        { user, reference, receipt, amountMinor: existing.amountMinor+extra.reduce((n,p)=>n+p.principalMinor,0), at: releasedAt, id, audit, verificationOffset:netAmountMinor===0 });
+      for(const payout of prepared) completeVerificationPayout(store,order,payout,{at:releasedAt,actor:user,id});
       order.updatedAt = releasedAt;
       order.timeline.push({
         at: releasedAt,
@@ -6207,6 +6268,8 @@ async function handleAuditedRequest(req, res) {
         detail: {
           milestoneCode,
           supplementalAmountMinor,
+          netAmountMinor,
+          recoveryMinor:prepared.reduce((n,p)=>n+p.recoveryMinor,0),
           amountMinor: milestone.amountMinor,
           reference: reference || null,
           receiptFileId: receipt?.fileId || null,
@@ -6228,7 +6291,7 @@ async function handleAuditedRequest(req, res) {
           type: "shop_payout_released",
           appRole: "supplier",
           orderId: order.id,
-          title: `${formatMinorPhp(milestone.amountMinor + supplementalAmountMinor)} released`,
+          title: `${formatMinorPhp(netAmountMinor)} released`,
           body: reference
             ? `${payoutStageLabel(milestoneCode)} was sent, reference ${reference}. Open the payout ledger for the receipt.`
             : `${payoutStageLabel(milestoneCode)} was recorded as released. Open the payout ledger for the recorded details.`,
@@ -6238,7 +6301,7 @@ async function handleAuditedRequest(req, res) {
       }
       queueOrderInvalidate(store, order, ["payouts"]);
       await save(store);
-      return send(res, 200, { order: await publicOrder(order, user, store), milestone });
+      return send(res, 200, { order: await publicOrder(order, user, store), milestone,netAmountMinor });
     }
 
     // ---- manual QR installment payments ----
@@ -6814,7 +6877,7 @@ async function handleAuditedRequest(req, res) {
       }
       if (order.handover && ['delivered', 'issue_window_open', 'completed', 'payout_released'].includes(next)
           && !order.handover.consumedAt) return send(res, 409, { error: 'handover_verification_required' });
-      if (!hasRole(store,user.id,user.role) || (['supplier','rider'].includes(user.role) && !approvedRole(store,user.id,user.role))) return send(res,403,{error:'forbidden'});
+      if (!hasRole(store,user.id,user.role) || (['supplier','rider'].includes(user.role) && (user.role==='supplier' ? !supplierCanWork(store,user.id) : !approvedRole(store,user.id,user.role)))) return send(res,403,{error:'forbidden'});
       if (body.paymentMethod != null && String(body.paymentMethod).trim().toLowerCase() !== "qr_manual") {
         return send(res, 400, {
           error: "payment_method_not_allowed",
@@ -6852,7 +6915,7 @@ async function handleAuditedRequest(req, res) {
             message: "That supplier account no longer exists. Refresh eligible suppliers and choose another.",
           });
         }
-        if (!approvedRole(store, supplier.id, "supplier")) {
+        if (!handingToMatchedShop && supplierMatchBlockersFor(store)(supplier.id,store.supplierProfiles.find(p=>p.userId===supplier.id)).length) {
           const approval = (store.approvalCases || []).find((c) => c.userId === supplier.id && c.kind === "supplier");
           return send(res, 409, {
             error: "supplier_not_approved",
@@ -7010,16 +7073,10 @@ async function handleAuditedRequest(req, res) {
       }
       if (next === "supplier_accepted") {
         if (isShopStaff(user)) return send(res, 403, { error: 'shop_owner_required' });
-        if (user.role !== "supplier" || !approvedRole(store,user.id,"supplier") || order.supplierId !== user.id) {
+        if (user.role !== "supplier" || !supplierCanWork(store,user.id) || order.supplierId !== user.id) {
           return send(res, 403, {
             error: "forbidden",
             message: "Only the supplier assigned to this order can accept it and set the final price.",
-          });
-        }
-        if (user.verificationStatus !== "approved") {
-          return send(res, 403, {
-            error: "supplier_not_approved",
-            message: "Operations must approve this supplier before the supplier can accept matched work.",
           });
         }
         const priorQuote = order.pendingQuote || order.acceptedQuote;
@@ -7326,7 +7383,7 @@ async function handleAuditedRequest(req, res) {
       const order = store.orders.find(row => row.id === pathname.split('/')[2]);
       if (!order) return send(res, 404, { error: 'order_not_found' });
       const review = pathname.endsWith('/production-review');
-      if (review ? !isOps(user) : user.role !== 'supplier' || !approvedRole(store, user.id, 'supplier') || order.supplierId !== user.id) {
+      if (review ? !isOps(user) : user.role !== 'supplier' || !supplierCanWork(store,user.id) || order.supplierId !== user.id) {
         return send(res, 403, { error: 'forbidden' });
       }
       if (!riderPackingFlow(order)) return send(res, 409, { error: 'handover_flow_not_available' });
@@ -8037,7 +8094,7 @@ async function handleAuditedRequest(req, res) {
 
     // ---- supplier jobs helper alias ----
     if (req.method === "GET" && pathname === "/jobs") {
-      if (user.role !== "supplier" || !approvedRole(store,user.id,"supplier")) return send(res, 403, { error: "forbidden" });
+      if (user.role !== "supplier" || !supplierCanWork(store,user.id)) return send(res, 403, { error: "forbidden" });
       return send(res, 200, {
         jobs: await publicOrderList(store.orders
           .filter((o) => o.supplierId === user.id && supplierArtworkReleased(o)), user, store),
@@ -8353,6 +8410,14 @@ async function runLifecycleWork() {
         });
       },
       sweepProductionPenalties,
+      async () => {
+        const candidates=await database.query(`SELECT 1 FROM user_role_memberships m JOIN approval_cases c ON c.user_id=m.user_id AND c.kind='supplier'
+          WHERE m.role='supplier' AND c.status='pending' AND floor(extract(epoch FROM ($1::timestamptz-m.created_at))/86400)>=7
+          AND floor(extract(epoch FROM ($1::timestamptz-m.created_at))/86400)<COALESCE((SELECT (settings#>>'{supplierVerification,windowDays}')::int FROM platform_settings WHERE singleton),30)
+          AND EXISTS(SELECT 1 FROM users u WHERE u.id=m.user_id AND u.account_status='active')
+          AND NOT EXISTS (SELECT 1 FROM supplier_verification_ledger l WHERE l.payout_key='reminder:'||m.user_id||':'||(CASE WHEN $1::timestamptz-m.created_at>=interval '27 days' THEN 27 WHEN $1::timestamptz-m.created_at>=interval '20 days' THEN 20 ELSE 7 END)::text) LIMIT 1`,[now()]);
+        if(candidates.rowCount)await enqueueMutation(async()=>{const store=await load();if(remindSupplierVerification(store,{at:now(),id}))await save(store);});
+      },
       expireElapsedIssueWindows,
       async () => {
         // Quote options past their validity; idle ticks read one indexed row.

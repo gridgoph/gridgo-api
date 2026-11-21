@@ -1,3 +1,4 @@
+import { recordVerificationRecovery, hasVerificationReservation } from "./supplier-verification.js";
 import { startExpressAcceptance, declineExpress } from './express-orders.js';
 import { tightDeclineExemption } from './scheduling-policy.js';
 import { sameReviewData } from './review-data.js';
@@ -18,7 +19,7 @@ import { priceShopMove, recoveryFault, SHOP_FAULT_KINDS } from './shop-move-pric
 export const CANCELLABLE_SHOP_STATES = new Set(['supplier_assigned', 'awaiting_checkout', 'awaiting_initial_payment',
   'payment_authorized', 'production', 'supplier_self_qc', 'ready_for_dispatch', 'rider_assigned']);
 export const recoveryHeld = (order) => Boolean(order.shopRecovery && order.shopRecovery.status !== 'accepted');
-export const paidShopShare = (store, order) => supplementTotals(store, order).totalMinor > 0 || (order.payoutMilestones || []).some((stage) => stage.status === 'released')
+export const paidShopShare = (store, order) => hasVerificationReservation(store,order) || supplementTotals(store, order).totalMinor > 0 || (order.payoutMilestones || []).some((stage) => stage.status === 'released')
   || (store.refundSupplierPayouts || []).some((row) => row.orderId === order.id && row.status === 'released');
 const fail = (code) => { throw Object.assign(new Error(code), { status: 409, code }); };
 const normalized = (value) => String(value || '').trim().toLowerCase();
@@ -154,6 +155,7 @@ export function recordShopFailure(store, order, { kind, reason, at, createId, ac
   if(order.orderType === "express" && ["declined","timed_out"].includes(kind)) return declineExpress(store,order,{at,id:createId,kind,actorId,reason});
   assessProductionLapses(store, { at, createId, orderId: order.id });
   const fault = recoveryFault(kind);
+  if (fault === "shop") recordVerificationRecovery(store,order,{at,actor:{id:actorId,role:actorRole||"system"},id:createId});
   const event = { id: createId('shop_event'), supplierId: order.supplierId, kind, fault, stage: order.state, reason, reasonCode, at, actorId,
     exemption: SHOP_FAULT_KINDS.includes(kind) ? tightDeclineExemption(order, kind, reason) : null };
   (order.shopFailureEvents ||= []).push(event);

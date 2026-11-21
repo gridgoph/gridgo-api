@@ -1,3 +1,4 @@
+import { supplierVerified, rankVerifiedWithinDistance } from "./supplier-verification.js";
 import { sameReviewData, reportOrderAllowed } from './review-data.js';
 import { isQuoteListing } from "./quote-listings.js";
 import { performanceTopPick } from './supplier-performance-policy.js';
@@ -197,12 +198,12 @@ function normalizedInverse(value, best) {
   return Math.max(0, Math.min(100, (best / value) * 100));
 }
 
-function approvedOpenSuppliers(store) {
-  const blockersFor = supplierMatchBlockersFor(store);
+function approvedOpenSuppliers(store, at) {
+  const blockersFor = supplierMatchBlockersFor(store, {at});
   const profiles = new Map();
   for (const profile of (store.supplierProfiles || [])) {
     if (blockersFor(profile.userId, profile).length) continue;
-    profiles.set(profile.userId, profile);
+    profiles.set(profile.userId, {...profile, verified:supplierVerified(store,profile.userId)});
   }
   return profiles;
 }
@@ -210,6 +211,7 @@ function approvedOpenSuppliers(store) {
 function matchShopCard(profile, listings, settings, at) {
   return {
     supplierId: profile.userId,
+    verified: Boolean(profile.verified),
     shopName: profile.shopName,
     hours: shopHoursStatus(profile, settings, at),
     shop: profile.shop,
@@ -336,7 +338,7 @@ export function projectListingGroup(store, lines, { now, deadline = null } = {})
 function candidateRows(store, { subcategoryCode, supplierId: onlySupplierId, dropoff, excludedSupplierIds, deadline: requestedDeadline, now, units, widthRequest, ranking = MATCH_FACTORS, delivery = {} }) {
   store = approvedCatalogView(store);
   const excluded = new Set((excludedSupplierIds || []).map(String));
-  const shops = approvedOpenSuppliers(store);
+  const shops = approvedOpenSuppliers(store, now);
   const activeSubcategories = new Set((store.taxonomy?.subcategories || []).filter(row => row.active !== false).map(row => row.code));
   const itemsBySupplier = new Map();
   for (const item of (store.catalogItems || [])) {
@@ -425,7 +427,7 @@ function candidateRows(store, { subcategoryCode, supplierId: onlySupplierId, dro
         if (fast) projection = fast;
       }
       return {
-        supplierId, listing, projection, rushChoices, distance, distanceZone,
+        supplierId, verified:supplierVerified(store,supplierId), listing, projection, rushChoices, distance, distanceZone,
         projectAt: calendarProbeProjector(project, rushProjects),
         queue: { jobsAhead: queue.jobsAhead, estimatedHours: Math.max(0,
           Math.round((Date.parse(projection.promiseBy) - Date.parse(now)) / 3_600_000)) },
@@ -451,6 +453,8 @@ const ZONE_RANK = { nearby: 0, away: 1, long_distance: 2, out_of_zone: 3 };
 const REASON_LABELS = {
   quality: "Matched for Quality", cost: "Matched for Best Value",
   speed: "Matched for Fastest Turnaround", distance: "Matched for Distance",
+  verified: "Verified shop nearby",
+  matched: "Matched to your request",
   vetted: "GRIDGO-Vetted Supplier",
 };
 
@@ -463,6 +467,11 @@ function factorValue(row, factor) {
 
 function decidingFactor(left, right, ranking) {
   return right ? ranking.find((factor) => factorValue(left, factor) !== factorValue(right, factor)) : undefined;
+}
+
+function matchReasonFactor(left,right,ranking) {
+  if(right && left.verified && !right.verified && left.distanceZone?.key && left.distanceZone.key===right.distanceZone?.key)return 'verified';
+  return decidingFactor(left,right,ranking)||(left.verified?'vetted':'matched');
 }
 
 function compareFactors(left, right, ranking) {
@@ -487,6 +496,7 @@ function scoreRows(rows, ranking) {
     row.totalScore = row.factorScores[ranking[0]];
   }
   rows.sort((a, b) => compareFactors(a, b, ranking) || a.supplierId.localeCompare(b.supplierId));
+  rankVerifiedWithinDistance(rows);
   return weights;
 }
 
@@ -504,11 +514,12 @@ export function rankQuoteChoices(store, choices, ranking = MATCH_FACTORS, now = 
     const rating = shopRating(view, choice.supplierId);
     const base = rating && rating.count >= MIN_REVIEWS_FOR_RATING ? Math.min(100, rating.average * 20)
       : listings.length ? capabilityScore(view, choice.supplierId, listings) : 50;
-    return { ...choice, projection: { promiseBy: choice.promiseBy },
+    return { ...choice, verified:supplierVerified(store,choice.supplierId), projection: { promiseBy: choice.promiseBy },
       quality: Math.max(0, base - recentLapseQualityPenalty(view, choice.supplierId, now)) };
   });
   rows.sort((a, b) => compareFactors(a, b, ranking) || String(a.id).localeCompare(String(b.id)));
-  const key = rows.length > 1 ? decidingFactor(rows[0], rows[1], ranking) || "vetted" : "vetted";
+  rankVerifiedWithinDistance(rows);
+  const key = rows.length > 1 ? matchReasonFactor(rows[0], rows[1], ranking) : rows[0]?.verified ? "vetted" : "matched";
   return { rows, matchReason: rows.length ? { key, label: REASON_LABELS[key] } : null };
 }
 
@@ -523,6 +534,7 @@ function otherListing(row) {
       "turnaroundHours", "minimumTurnaroundHours", "turnaroundDays", "minimumTurnaroundDays", "turnaroundMinutes", "minimumTurnaroundMinutes", "productionDayMinutes", "rush", "acceptedFormats", "optionGroups", "version", "express",
       "sampleAvailable", "samplePriceMinor", "clientSamplePriceMinor",
     ].map((key) => [key, item[key]])),
+    verified: Boolean(row.verified),
     id: item.id, name: item.name, photos: item.photos.map(({ fileId, sortOrder, url }) => ({ fileId, sortOrder, url })),
     fromPriceMinor: item.fromPriceMinor, clientFromPriceMinor: item.clientFromPriceMinor,
     pricingUnit: item.pricingUnit, packageQty: item.packageQty,
@@ -696,7 +708,7 @@ export function matchShop(store, input = {}) {
   const winner = contenders[0];
   const alternatives = rows.filter(row => row !== winner);
   const runnerUp = contenders[1];
-  const reasonKey = decidingFactor(winner, runnerUp, ranking) || "vetted";
+  const reasonKey = matchReasonFactor(winner, runnerUp, ranking);
   const alternativesCount = rows.length - 1;
 
   // Internal capture keeps supplier production timing out of client projections.

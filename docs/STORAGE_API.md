@@ -94,7 +94,7 @@ A public file object has exactly this shape:
 }
 ```
 
-For `purpose: "verification_document"`, the attached file object additionally contains `verificationDocumentType: "business_permit" | "valid_id" | "sample_work"`, and its user reference contains the same value as `documentType`. That field is absent before attachment and for every other purpose.
+For `purpose: "verification_document"`, the attached file object additionally contains `verificationDocumentType: "business_permit" | "valid_id" | "id_selfie" | "sample_work"`, and its user reference contains the same value as `documentType`. That field is absent before attachment and for every other purpose.
 
 Owning-client artwork/mockup projections additionally include `savedAt: string | null` (UTC save date). Other roles do not receive that private library choice. Missing legacy values mean unsaved.
 
@@ -364,9 +364,9 @@ A rider-document attach returns `{file,riderDocument,approvalCase}`. Attaching `
 
 Verification-document attachment rules:
 
-- `documentType` is required and must be exactly `business_permit`, `valid_id`, or `sample_work`.
+- `documentType` is required and must be exactly `business_permit`, `valid_id`, `id_selfie`, or `sample_work`.
 - The API derives the supplier account from the bearer token. `userId`, `supplierId`, and all other target fields are rejected with `400 unexpected_target_field`; a supplier cannot target another account.
-- Attaching `business_permit` or `valid_id` automatically replaces every prior attachment in that singleton slot. Replaced files remain private and follow the verification retention policy below; only Super Admin may delete them early with a reason.
+- Attaching `business_permit`, `valid_id`, or `id_selfie` automatically replaces every prior attachment in that singleton slot. Replaced files remain private and follow the verification retention policy below; only Super Admin may delete them early with a reason.
 - `sample_work` without `replaceFileId` appends another photo/document. To replace one sample, send its currently attached `fileId` as `replaceFileId` with `documentType: "sample_work"`.
 - `replaceFileId` may also select the current permit or ID explicitly. It must be attached to the caller in the same type slot or the API returns `409 verification_document_replacement_mismatch`.
 
@@ -544,7 +544,7 @@ The retired states `supplier_proof_review`, `supplier_proof_changes_requested`, 
 | 400 | `attachment_target_required` | Attach body lacks `orderId`, `milestoneCode`, or `supplierServiceId`; send the purpose-specific fields. |
 | 400 | `unexpected_target_field` | Attach JSON includes a field other than the purpose-specific target; remove it. |
 | 400 | `invalid_milestone_code` | POF target is not a file-taking stage of the order's plan (`details.allowed` lists them); choose the stage represented by the file. |
-| 400 | `invalid_verification_document_type` | `documentType` is missing/unknown; choose `business_permit`, `valid_id`, or `sample_work`. |
+| 400 | `invalid_verification_document_type` | `documentType` is missing/unknown; choose `business_permit`, `valid_id`, `id_selfie`, or `sample_work`. |
 | 400 | `invalid_rider_document_type` | `riderDocumentType` is missing/unknown; choose `drivers_license`, `or_cr`, or `selfie`. |
 | 400 | `invalid_application` | A driver's-licence expiry is missing, malformed, or not a real calendar date; send `expiresOn` as `YYYY-MM-DD`. |
 | 400 | `invalid_json` | Attach/transition JSON is malformed; fix JSON. |

@@ -511,3 +511,8 @@ test("approve still notifies only the applicant after ops signup rows exist", ()
   assert.equal(after[0].userId, "supplier");
   assert.match(after[0].type, /^approval_/);
 });
+
+test('pending identity approval accepts already-live reviewed service lines without republishing them',()=>{
+  const store=supplierStore();store.supplierServices[0].state='live';
+  assert.deepEqual(supplierApprovalReadiness(store,'supplier'),{readyForApproval:true,missing:[],publishableServiceIds:[]});
+});

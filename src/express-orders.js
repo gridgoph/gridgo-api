@@ -1,3 +1,4 @@
+import { supplierVerified, rankVerifiedWithinDistance } from "./supplier-verification.js";
 import { staffExpressProjection } from './shop-staff-order.js';
 import { listingAcceptsArtwork } from './file-formats.js';
 import { randomInt } from 'node:crypto';
@@ -6,7 +7,7 @@ import { publicCatalogItem, catalogGroupsForItem, selectedCatalogPrice } from '.
 import { supplierMatchBlockersFor } from './supplier-eligibility.js';
 import { defaultShopSchedule, isOpenAt } from './availability.js';
 import { publicShopRating } from './shop-rating.js';
-import { distanceMetersBetween, deliveryFeeForDistance } from './operational-model.js';
+import { distanceMetersBetween, distanceZoneForDistance, deliveryFeeForDistance } from './operational-model.js';
 import { sameReviewData } from './review-data.js';
 import { projectShopFinish } from './order-match.js';
 import { testerProgress } from './founding-testers.js';
@@ -34,7 +35,7 @@ export function expressPoint(point) {
 export function expressShopList(source,user,{location,sort='nearest'}={},at) {
   location=expressPoint(location);
   if(!['nearest','top_rated','fewest_jobs'].includes(sort)) expressFail(400,'invalid_express_sort');
-  const store=approvedCatalogView(source), blockers=supplierMatchBlockersFor(store);
+  const store=approvedCatalogView(source), blockers=supplierMatchBlockersFor(store,{at});
   const rows=[];
   for(const profile of store.supplierProfiles||[]) {
     const supplierId=profile.userId, supplier=store.users.find(u=>u.id===supplierId);
@@ -46,14 +47,14 @@ export function expressShopList(source,user,{location,sort='nearest'}={},at) {
     const hours=Math.min(...listings.map(item=>publicCatalogItem(store,item).turnaroundHours||1));
     const projection=projectShopFinish(store,{supplierId,turnaroundHours:hours,units:1,now:at}).projection;
     const createdAt=(store.approvalCases||[]).find(c=>c.userId===supplierId&&c.kind==='supplier'&&c.status==='approved')?.decidedAt||supplier.createdAt, age=Date.parse(at)-Date.parse(createdAt);
-    rows.push({supplierId,catalogItemIds:listings.map(item=>item.id),name:profile.shopName||supplier.name||'Shop',address:profile.shop.label||'',
-      location:structuredClone(profile.shop),distanceMeters:distanceMetersBetween(location,profile.shop),rating:publicShopRating(store,supplierId),jobsAhead,
+    rows.push({supplierId,verified:supplierVerified(store,supplierId),catalogItemIds:listings.map(item=>item.id),name:profile.shopName||supplier.name||'Shop',address:profile.shop.label||'',
+      location:structuredClone(profile.shop),distanceMeters:distanceMetersBetween(location,profile.shop),distanceZone:distanceZoneForDistance(distanceMetersBetween(location,profile.shop),store.settings),rating:publicShopRating(store,supplierId),jobsAhead,
       readyAt:projection.promiseBy,busy:jobsAhead>=3,isNew:Number.isFinite(age)&&age>=0&&age<7*86400000});
   }
   rows.sort((a,b)=>(sort==='top_rated'?(b.rating?.average||0)-(a.rating?.average||0):sort==='fewest_jobs'?a.jobsAhead-b.jobsAhead:0)
     ||a.distanceMeters-b.distanceMeters||a.supplierId.localeCompare(b.supplierId));
   if(sort!=='nearest'&&rows.length>1) {const index=rows.findIndex(r=>r.isNew);if(index>=0){const [row]=rows.splice(index,1);rows.splice(1,0,row);}}
-  return rows;
+  return rankVerifiedWithinDistance(rows);
 }
 export function expressStatus(order) {
   if(order.state==='cancelled')return 'cancelled';

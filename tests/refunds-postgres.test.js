@@ -888,3 +888,22 @@ test('live issue window boundary and old report shape retain their existing beha
   const refused = await api('client', 'POST', '/orders/order/issues', { problemType: 'damage', description: 'Late report', photoFileIds: ['evidence'] });
   assert.equal(refused.status, 409); assert.equal(refused.body.error, 'issue_window_closed');
 });
+
+test('verification recovery can settle a zero-net shop remainder without inventing transfer evidence', {skip:!DATABASE_URL},async t=>{
+  const {recordVerificationRecovery}=await import('../src/supplier-verification.js');
+  const db=createDatabase({DATABASE_URL});t.after(()=>db.close());
+  await fixture(db,{state:'production',releases:1});
+  await db.transaction(async()=>{const s=await loadStore(db);s.approvalCases.find(c=>c.userId==='supplier').status='pending';
+    recordVerificationRecovery(s,s.orders[0],{at:AT,actor:s.users.find(u=>u.id==='ops'),id});await saveStore(db,s);});
+  const refund=await settle(db,await review(db,await request(db)),{shop:60000,total:49000});
+  const prepared=await call(db,'ops','POST',`/refund-requests/${refund.id}/supplier-payout-prepare`,{expectedVersion:refund.version,reason:'Prepare recovery offset'});
+  assert.equal(prepared.body.payout.netAmountMinor,0);
+  await call(db,'ops','POST',`/refund-requests/${refund.id}/supplier-payout`,{expectedVersion:refund.version,reason:'Apply recovery offset',amountMinor:0});
+  const s=await loadStore(db),p=s.refundSupplierPayouts[0];assert.equal(p.status,'released');assert.equal(p.receiptFileId,null);
+  assert.match(p.reference,/^verification-offset:/);
+  assert.equal(s.supplierVerificationLedger.find(e=>e.payoutKey===`settlement:${p.id}`&&e.kind==='released').data.netAmountMinor,0);
+  // A legacy column-shaped proposed INSERT remains valid before conflict handling.
+  await db.query(`INSERT INTO refund_supplier_payouts(id,settlement_id,order_id,supplier_id,amount_minor,status,reference,receipt_file_id,released_at,released_by,created_at)
+    SELECT id,settlement_id,order_id,supplier_id,amount_minor,status,reference,receipt_file_id,released_at,released_by,created_at
+    FROM refund_supplier_payouts WHERE id=$1 ON CONFLICT(id) DO NOTHING`,[p.id]);
+});

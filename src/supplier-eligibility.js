@@ -1,13 +1,13 @@
+import { supplierVerified, supplierCanWork, verificationSummary } from "./supplier-verification.js";
 /** Missing standing retains the legacy active-account default. */
 export function supplierAccountIsActive(accountStatus) {
   return (accountStatus ?? "active") === "active";
 }
 
 /** Shop gates shared by matching and the supplier's operational diagnostics. */
-export function supplierMatchBlockersFor(store) {
+export function supplierMatchBlockersFor(store, {at = new Date().toISOString()} = {}) {
   const accountStatuses = new Map((store.users || []).map(row => [row.id, row.accountStatus]));
   const members = new Set((store.userRoleMemberships || []).filter(row => row.role === "supplier").map(row => row.userId));
-  const approved = new Set((store.approvalCases || []).filter(row => row.kind === "supplier" && row.status === "approved").map(row => row.userId));
   return (supplierId, profile) => {
     const missing = [];
     if (!supplierAccountIsActive(accountStatuses.get(supplierId))) missing.push("account_inactive");
@@ -19,9 +19,18 @@ export function supplierMatchBlockersFor(store) {
     if (!members.has(supplierId)) {
       missing.push("supplier_membership");
     }
-    if (!approved.has(supplierId)) {
-      missing.push("supplier_not_approved");
+    if (!supplierVerified(store,supplierId)) {
+      if (!supplierCanWork(store,supplierId)) missing.push("supplier_not_approved");
+      const hasDocumentService=(store.supplierServices||[]).some(service=>service.supplierId===supplierId
+        && !["withdrawn","suspended"].includes(service.state) && (["documents","document_publication"].includes(service.categoryCode)
+          || (store.catalogItems||[]).some(item=>item.supplierServiceId===service.id&&item.subcategoryCode==="document_printing")));
+      if (!hasDocumentService) missing.push("document_service");
+      const account=(store.supplierPayoutAccounts||[]).find(row=>row.supplierId===supplierId);
+      if (!account?.qrFileId || !(store.files||[]).some(f=>f.fileId===account.qrFileId&&f.ownerId===supplierId&&f.purpose==="supplier_payout_qr"&&f.state==="ready"&&!f.deleteRequestedAt&&!f.deletedAt)) missing.push("payout_qr");
+      const summary=verificationSummary(store,supplierId,at);
+      if (!summary.deadlineAt || Date.parse(at)>=Date.parse(summary.deadlineAt)) missing.push("verification_deadline");
     }
+    if (verificationSummary(store,supplierId,at).recoveryDueMinor>0) missing.push("verification_recovery");
     return missing;
   };
 }

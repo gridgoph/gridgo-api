@@ -1,3 +1,4 @@
+import { verificationLedgerTable, verificationLedgerRows, loadVerificationLedgerRows } from "./supplier-verification-store.js";
 import { fileAccessTable, fileAccessRows, loadFileAccessRows } from './shop-file-access.js';
 import { shopTeamTables, emptyShopTeam, shopTeamRows, loadShopTeamRows, ensureShopOwners } from './shop-team-store.js';
 import { STAFF_LIST_PAGE, readStaffPage, staffPageRequested, staffListPlan, parseStaffPage, encodeStaffCursor } from './staff-list-pages.js';
@@ -153,6 +154,7 @@ const TABLES = [
   { name: "notifications", keys: ["id"], columns: ["id", "user_id", "type", "order_id", "created_at", "read_at", "deleted_at", "position", "data"] },
   { name: "location_pings", keys: ["id"], columns: ["id", "order_id", "rider_id", "lat", "lng", "accuracy_meters", "at", "position", "data"] },
   { name: "escalations", keys: ["id"], columns: ["id", "order_id", "rider_id", "status", "created_at", "updated_at", "position", "data"] },
+  verificationLedgerTable,
   { name: "device_tokens", keys: ["id"], columns: ["id", "user_id", "token", "platform", "created_at", "updated_at", "position", "data"] },
 ];
 
@@ -160,6 +162,7 @@ export function emptyStore() {
   return {
     ...emptyStaffStore(),
     ...emptyShopTeam(),
+    supplierVerificationLedger: [],
     shopFileAccesses: [],
     ...emptyVoucherStore(),
     orderSurveys: [],
@@ -248,6 +251,7 @@ function rowsFromStore(store) {
   const rows = Object.fromEntries(TABLES.map(({ name }) => [name, []]));
   ensureShopOwners(store);
   shopTeamRows(store, rows);
+  verificationLedgerRows(store, rows);
   rows.shop_file_accesses = fileAccessRows(store);
   staffRows(store, rows);
   voucherRows(store, rows);
@@ -942,6 +946,7 @@ async function readIdentity(graph, userIds) {
   await graph.read('users', 'WHERE id = ANY($1::text[])', [userIds]);
   await graph.read('user_role_memberships', 'WHERE user_id = ANY($1::text[])', [userIds]);
   await graph.read('approval_cases', 'WHERE user_id = ANY($1::text[])', [userIds]);
+  await graph.read('supplier_verification_ledger', 'WHERE supplier_id = ANY($1::text[])', [userIds]);
 }
 
 async function readNotificationContext(graph, { orderIds = [], caseIds = [], activeRiderIds = [] } = {}) {
@@ -1045,6 +1050,7 @@ export async function loadProductionSweepStore(database) {
     [[...new Set(watched.map(row => row.supplier_id))], watchedIds]);
     await read('file_references', 'WHERE file_id = ANY($1::text[])', [loaded.files.map(row => row.file_id)]);
     await read('supplier_profiles', 'WHERE user_id = ANY($1::text[])', [suppliers]);
+  await read('supplier_payout_accounts', 'WHERE supplier_id = ANY($1::text[])', [suppliers]);
     await read('user_role_memberships', "WHERE role IN ('ops_admin', 'super_admin')");
     return graph.finish({
       legalPenaltyGate: await loadLegalPenaltyGate(database),
@@ -1168,6 +1174,7 @@ async function readCatalogueGraph(graph, actorIds, { supplierIds = null, itemIds
     ...loaded.supplier_shop_media.map(row => row.supplier_id)])];
   const owners = [...new Set([...actorIds, ...suppliers])];
   await read('supplier_profiles', 'WHERE user_id = ANY($1::text[])', [suppliers]);
+  await read('supplier_payout_accounts', 'WHERE supplier_id = ANY($1::text[])', [suppliers]);
   const snapshotServices = loaded.supplier_catalog_items.map(row => row.approved_snapshot?.item?.supplierServiceId).filter(Boolean);
   if (listingOnly) await read('supplier_services', 'WHERE id = ANY($1::text[])',
     [[...new Set([...loaded.supplier_catalog_items.map(row => row.supplier_service_id), ...snapshotServices])]]);
@@ -1183,7 +1190,7 @@ async function readCatalogueGraph(graph, actorIds, { supplierIds = null, itemIds
   if (!listingOnly) await read('supplier_shop_media', 'WHERE supplier_id = ANY($1::text[])', [suppliers]);
   const photos = loaded.supplier_catalog_items.flatMap(row => row.approved_snapshot?.catalogItemPhotos || []).map(row => row.fileId);
   await read('files', 'WHERE file_id = ANY($1::text[])', [[...photos, ...loaded.supplier_catalog_item_photos.map(row => row.file_id),
-    ...loaded.supplier_shop_media.map(row => row.file_id), ...(fileId ? [fileId] : [])]]);
+    ...loaded.supplier_shop_media.map(row => row.file_id), ...loaded.supplier_payout_accounts.map(row => row.qr_file_id), ...(fileId ? [fileId] : [])]]);
   await read('file_references', 'WHERE file_id = ANY($1::text[])', [loaded.files.map(row => row.file_id)]);
   if (ratings) {
     await read('shop_reviews', 'WHERE supplier_id = ANY($1::text[])', [suppliers]);
@@ -1638,6 +1645,7 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
   const suppliers = [...new Set(loaded.orders.map(row => row.supplier_id).filter(Boolean))];
   await read('supplier_profiles', 'WHERE user_id = ANY($1::text[])', [suppliers]);
   await read('supplier_payout_accounts', 'WHERE supplier_id = ANY($1::text[])', [suppliers]);
+  await read('supplier_payout_accounts', 'WHERE supplier_id = ANY($1::text[])', [suppliers]);
   await read('zones', 'WHERE code = ANY($1::text[])', [loaded.orders.map(row => row.zone_code).filter(Boolean)]);
 
   // Include both attached evidence and IDs in immutable snapshots (legacy
@@ -1758,6 +1766,7 @@ async function readQuoteGraph(graph, ids, pathname, status) {
       ...loaded.quote_requests.flatMap(row => (row.data?.options || []).map(option => option.supplierId))])];
     await read('users', 'WHERE id = ANY($1::text[])', [[...new Set([...ids, ...loaded.quote_requests.map(row => row.client_id), ...suppliers])]]);
     await read('supplier_profiles', 'WHERE user_id = ANY($1::text[])', [suppliers]);
+  await read('supplier_payout_accounts', 'WHERE supplier_id = ANY($1::text[])', [suppliers]);
   }
   return graph.finish();
 }
@@ -2093,6 +2102,9 @@ export async function loadHotReadStore(database, clerkSubject, pathname, { after
       for (const name of ['client_profiles', 'supplier_profiles', 'rider_profiles', 'organization_accounts']) await read(name, 'WHERE user_id = ANY($1::text[])', [ids]);
       await read('rider_documents', 'WHERE rider_id = ANY($1::text[])', [ids]);
       if (pathname === '/auth/me/supplier') {
+        await readCatalogueGraph(graph, ids, { supplierIds: ids, ratings: false });
+        await read('orders', 'WHERE supplier_id = ANY($1::text[])', [ids]);
+        await read('payout_milestones', 'WHERE order_id = ANY($1::text[])', [loaded.orders.map(r=>r.id)]);
         await read('supplier_services', 'WHERE supplier_id = ANY($1::text[])', [ids]);
         await read('supplier_service_price_tiers', 'WHERE supplier_service_id = ANY($1::text[])', [loaded.supplier_services.map(row => row.id)]);
         await read('supplier_service_file_formats', 'WHERE supplier_service_id = ANY($1::text[])', [loaded.supplier_services.map(row => row.id)]);
@@ -2281,6 +2293,7 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
   const store = emptyStore();
   store.legalPenaltyGate = legalPenaltyGate;
   loadShopTeamRows(store, loaded);
+  loadVerificationLedgerRows(store, loaded);
   store.shopFileAccesses = loadFileAccessRows(loaded.shop_file_accesses);
   loadStaffRows(store, loaded);
   loadVoucherRows(store, loaded);

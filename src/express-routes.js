@@ -1,10 +1,10 @@
+import { supplierCanWork } from "./supplier-verification.js";
 import { notifyAdmins } from './domain-events.js';
 import { queueInvalidate } from './notifications.js';
 import { actorUserId, isShopStaff } from './shop-team.js';
 import { createInviteCode, publicTesterInvites } from './tester-invites.js';
 import { timingSafeEqual } from 'node:crypto';
 import { expressFail as fail, publicExpress, declineExpress, expressEvent, startExpressAcceptance } from './express-orders.js';
-import { supplierMatchBlockersFor } from './supplier-eligibility.js';
 import { assertRefundWorkAllowed } from './refund-policy.js';
 import { paymentSettled } from './operational-model.js';
 import { completeHandover } from './hub-handover.js';
@@ -52,10 +52,9 @@ export async function routeExpressOrders({req,url,store,user,readBody,id,now,aud
  const order=store.orders.find(o=>o.id===match[1]&&o.orderType==='express');
  if(!order)fail(404,'order_not_found');
  if(order.supplierId!==user.id)fail(403,'forbidden');
- const profile=store.supplierProfiles.find(p=>p.userId===user.id);
  // A shop may finish an already accepted order while temporarily closed, but
- // approval and account standing remain mandatory.
- if(supplierMatchBlockersFor(store)(user.id,{...profile,isClosed:false}).length)fail(403,'supplier_not_approved');
+ // active supplier standing remains mandatory.
+ if(!supplierCanWork(store,user.id))fail(403,'supplier_not_approved');
  const at=now(),body=await readBody(req),action=match[2];
  if(!body||typeof body!=='object'||Array.isArray(body))fail(400,'invalid_request');
  assertRefundWorkAllowed(store,order);
