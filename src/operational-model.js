@@ -1,4 +1,4 @@
-import { validateVerificationSettings, prepareVerificationPayout, completeVerificationPayout } from "./supplier-verification.js";
+import { verificationSettings, validateVerificationSettings, prepareVerificationPayout, completeVerificationPayout } from "./supplier-verification.js";
 import { publicShopFileAccesses } from './shop-file-access.js';
 import { expressRates, validateExpressRates, publicExpress, expressClientProjection } from './express-orders.js';
 import { validateCashSettings, cashAmounts } from './cash-policy.js';
@@ -271,6 +271,7 @@ export function defaultProductionNudge() {
 
 export function defaultOperationalSettings() {
   return {
+    supplierVerification: verificationSettings(),
     riderPacksMinimumBuilds: riderPacksMinimumBuilds(),
     foundingTesterLaunchAt: null,
     testerMonthlyBudgetMinor: null,

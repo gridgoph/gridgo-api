@@ -35,7 +35,7 @@ test('HTTP reservation/release retries pay once; cap hold persists and verificat
   assert.equal((await call('other','GET','/me/supplier-verification',null,{headers:{'x-gridgo-role':'supplier','x-gridgo-shop-id':'supplier'}})).status,403);
   const attached=await call('supplier','POST','/files/id-selfie/attach',{documentType:'id_selfie'});
   assert.equal(attached.status,200,JSON.stringify(attached.body));
-  const checking=await call('supplier','GET','/me/supplier-verification');assert.equal(checking.body.verification.verificationState,'being_checked');
+  const checking=await call('supplier','GET','/me/supplier-verification');assert.equal(checking.body.verification.verificationState,'being_checked');assert.match(checking.headers.get('cache-control'),/private, no-store/);
   const base='/orders/order/milestones/production_started';
   const prepared=await call('ops','POST',`${base}/prepare`,{});
   assert.equal(prepared.status,200,JSON.stringify(prepared.body));assert.equal(prepared.body.payout.netAmountMinor,4000);
@@ -53,7 +53,7 @@ test('HTTP reservation/release retries pay once; cap hold persists and verificat
   const queue=await call('admin','GET','/approval-cases?kind=supplier');
   assert.equal(queue.status,200,JSON.stringify(queue.body));assert.equal(queue.body.approvalCases[0].verification.paidBeforeVerificationMinor,4000);assert.equal(queue.body.approvalCases[0].verificationDocuments[0].fileId,'id-selfie');
   const opsQueue=await call('ops','GET','/ops/supplier-verification');
-  assert.equal(opsQueue.status,200,JSON.stringify(opsQueue.body));assert.equal(opsQueue.body.suppliers[0].verification.paidBeforeVerificationMinor,4000);
+  assert.equal(opsQueue.status,200,JSON.stringify(opsQueue.body));assert.match(opsQueue.headers.get('cache-control'),/private, no-store/);assert.equal(opsQueue.body.suppliers[0].verification.paidBeforeVerificationMinor,4000);
   assert.equal(opsQueue.body.suppliers[0].history,undefined);
   assert.equal((await call('client','GET','/ops/supplier-verification')).status,403);
   assert.equal((await call('ops','GET','/approval-cases')).status,403);

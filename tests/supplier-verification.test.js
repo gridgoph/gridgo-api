@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { defaultOperationalSettings, validateOperationalSettings } from '../src/operational-model.js';
 import { supplierMatchBlockersFor } from '../src/supplier-eligibility.js';
 import { supplierCanWork, verificationSummary, prepareVerificationPayout, completeVerificationPayout,
   recordVerificationRecovery, reconcileVerificationHolds, remindSupplierVerification, rankVerifiedWithinDistance,
@@ -10,6 +11,12 @@ const when = day => new Date(Date.parse(AT) + day * 86400000).toISOString();
 let serial = 0;
 const id = prefix => `${prefix}_${++serial}`;
 const actor = { id: 'ops', role: 'ops_admin' };
+test('fresh operational settings persist the editable verification cap and window',()=>{
+  const settings=defaultOperationalSettings();
+  assert.deepEqual(settings.supplierVerification,{payoutCapMinor:500000,windowDays:30});
+  settings.supplierVerification={payoutCapMinor:250000,windowDays:45};
+  assert.doesNotThrow(()=>validateOperationalSettings(settings));
+});
 function fixture() {
   return { users: [{id:'shop',role:'supplier',createdAt:AT}],
     userRoleMemberships: [{userId:'shop',role:'supplier',createdAt:AT}],

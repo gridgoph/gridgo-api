@@ -3609,6 +3609,7 @@ async function handleAuditedRequest(req, res) {
 
     if (req.method === "GET" && pathname === "/me/supplier-verification") {
       if(user.role!=="supplier" || isShopStaff(user)) return send(res,403,{error:"forbidden"});
+      res.setHeader('Cache-Control','private, no-store');
       return send(res,200,{verification:verificationSummary(store,user.id,now()),
         verificationDocuments:verificationDocumentsFor(store,store.users.find(u=>u.id===user.id)),
         ledger:(store.supplierVerificationLedger||[]).filter(e=>e.supplierId===user.id)});
@@ -3617,6 +3618,7 @@ async function handleAuditedRequest(req, res) {
     const supplierVerificationRead=/^\/ops\/supplier-verification(?:\/([^/]+))?$/.exec(pathname);
     if(req.method==='GET' && supplierVerificationRead) {
       if(!isOps(user))return send(res,403,{error:'forbidden'});
+      res.setHeader('Cache-Control','private, no-store');
       const supplierId=supplierVerificationRead[1];
       const project=approvalCase=>({supplierId:approvalCase.userId,approvalCaseId:approvalCase.id,approvalStatus:approvalCase.status,
         shopName:store.supplierProfiles.find(p=>p.userId===approvalCase.userId)?.shopName||null,
