@@ -17,6 +17,15 @@ test('fresh operational settings persist the editable verification cap and windo
   settings.supplierVerification={payoutCapMinor:250000,windowDays:45};
   assert.doesNotThrow(()=>validateOperationalSettings(settings));
 });
+test('a manual preparation has one payer and cannot be reused for another beneficiary',()=>{
+  const s=fixture(),o=order(s,'attempt');
+  const first=prepare(s,o);
+  assert.ok(first.attemptId);
+  assert.equal(first.payerId,actor.id);
+  assert.equal(prepare(s,o).attemptId,first.attemptId);
+  assert.throws(()=>prepareVerificationPayout(s,o,{key:first.key,amountMinor:first.amountMinor,at:when(1),actor:{id:'admin',role:'super_admin'},id}),/verification_payer_required/);
+  assert.throws(()=>prepareVerificationPayout(s,{...o,supplierId:'replacement'},{key:first.key,amountMinor:first.amountMinor,at:when(1),actor,id}),/verification_payout_identity_mismatch/);
+});
 function fixture() {
   return { users: [{id:'shop',role:'supplier',createdAt:AT}],
     userRoleMemberships: [{userId:'shop',role:'supplier',createdAt:AT}],
@@ -124,8 +133,8 @@ test('Express uses a new immutable single-stage plan after delivery; regular wor
 test('cap reservations serialize competing stages and cancellation frees unused capacity',async()=>{
   const {cancelVerificationReservation}=await import('../src/supplier-verification.js');
   const s=fixture(),a=order(s,'reserved-a',400000),b=order(s,'reserved-b',200000);
-  assert.equal(prepare(s,a).status,'ready');assert.equal(prepare(s,b).status,'held');
-  cancelVerificationReservation(s,a,'stage:reserved-a:production',{at:when(1),actor,id,reason:'No transfer sent'});
+  const prepared=prepare(s,a);assert.equal(prepared.status,'ready');assert.equal(prepare(s,b).status,'held');
+  cancelVerificationReservation(s,a,'stage:reserved-a:production',{at:when(1),actor,id,attemptId:prepared.attemptId,reason:'No transfer sent'});
   assert.equal(prepare(s,b).status,'ready');
 });
 
@@ -169,8 +178,8 @@ test('reminder wording follows the configured window without showing an early co
 test('reservation events use the durable inbox for every current Operations and Super Admin membership',async()=>{
   const {cancelVerificationReservation}=await import('../src/supplier-verification.js');
   const s=fixture();s.userRoleMemberships.push({userId:'ops',role:'ops_admin'},{userId:'admin',role:'super_admin'});
-  const o=order(s,'notice',100);prepare(s,o);
-  cancelVerificationReservation(s,o,'stage:notice:production',{at:when(1),actor,id,reason:'No funds sent'});
+  const o=order(s,'notice',100),payout=prepare(s,o);
+  cancelVerificationReservation(s,o,'stage:notice:production',{at:when(1),actor,id,attemptId:payout.attemptId,reason:'No funds sent'});
   for(const userId of ['shop','ops','admin'])assert.equal(s.notifications.filter(n=>n.userId===userId&&n.type==='supplier_verification_update').length,2);
 });
 

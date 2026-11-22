@@ -617,9 +617,10 @@ export function publicSupplierShop(store, supplierId) {
   const approval = (store.approvalCases || []).find(
     (candidate) => candidate.userId === supplierId && candidate.kind === "supplier",
   );
-  if (!membership || approval?.status !== "approved") return null;
+  if (!membership) return null;
   const profile = (store.supplierProfiles || []).find((candidate) => candidate.userId === supplierId);
   if (!profile) return null;
+  if(approval?.status!=='approved'&&supplierMatchBlockersFor(store)(supplierId,profile).length)return null;
   const services = (store.supplierServices || [])
     .filter((service) => service.supplierId === supplierId && service.state === "live")
     .sort(compareSortOrder)
@@ -650,6 +651,7 @@ export function publicSupplierShop(store, supplierId) {
   if (services.length === 0) return null;
   return {
     supplierId,
+    verified:supplierVerified(store,supplierId),
     shopName: profile.shopName,
     hours: shopHoursStatus(profile, store.settings),
     shop: profile.shop,
@@ -674,6 +676,7 @@ export function publicSupplierShops(store, { categoryCode, cursor, limit = 20 } 
     if (resolved && !shop.categories.includes(resolved)) continue;
     shops.push({
       supplierId: shop.supplierId,
+      verified:shop.verified,
       shopName: shop.shopName,
       hours: shop.hours,
       shop: shop.shop,

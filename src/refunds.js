@@ -1,4 +1,4 @@
-import { prepareVerificationPayout, completeVerificationPayout } from "./supplier-verification.js";
+import { prepareVerificationPayout, completeVerificationPayout, hasVerificationReservation } from "./supplier-verification.js";
 import { staffPageBody } from './staff-list-pages.js';
 import { assertReviewMoneyAllowed } from './review-data.js';
 import { assertProhibitedItemIntake, assertProhibitedItemFileCheck, prohibitedItemHold } from './prohibited-items.js';
@@ -126,6 +126,7 @@ function lateFiling(store, order, at) {
 }
 
 function settlementCalculation(store, order, request, body) {
+  if(hasVerificationReservation(store,order))fail(409,'supplier_transfer_reconciliation_required','Record the prepared supplier transfer, or explicitly confirm it was not sent, before calculating a settlement.');
   const prohibitedRefund = order.fileCheck?.refundRequestId === request.id && order.fileCheck.reasonCode === 'prohibited_item';
   if (prohibitedRefund) assertProhibitedItemFileCheck(order);
   const accepted = acceptedCancellationQuote(store, request);
@@ -397,7 +398,7 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
       || store.refundRequests.some((row) => row.orderId === order.id && ['requested', 'reviewed'].includes(row.status))) {
       fail(409, 'payout_held', 'Resolve the independent claims, issues and pending refund reviews before paying the shop.');
     }
-    const prepared=prepareVerificationPayout(store,order,{key:`settlement:${payout.id}`,amountMinor:payout.amountMinor,at,actor:user,id});
+    const prepared=prepareVerificationPayout(store,order,{key:`settlement:${payout.id}`,amountMinor:payout.amountMinor,at,actor:user,id,recording:action==='supplier-payout',attemptId:body.attemptId});
     if(action==='supplier-payout-prepare'||prepared.status==='held')return {status:prepared.status==='held'?202:200,body:{payout:prepared},mutated:true};
     if (body.amountMinor !== prepared.netAmountMinor) fail(409, 'refund_supplier_payout_amount_mismatch', 'Pay exactly the prepared net shop obligation.', { amountMinor: prepared.netAmountMinor });
     const account = opsPayoutAccountProjection(store, payout.supplierId);
@@ -413,7 +414,7 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
     } else reference=`verification-offset:${payout.id}`;
     payout.receiptFileId = receipt?.fileId||null;
     payout.status = 'released'; payout.reference = reference; payout.releasedAt = at; payout.releasedBy = user.id;
-    completeVerificationPayout(store,order,prepared,{at,actor:user,id});
+    completeVerificationPayout(store,order,prepared,{at,actor:user,id,transferReference:reference,transferAmountMinor:prepared.netAmountMinor});
     eventKind = 'supplier_paid'; eventData = { payoutId: payout.id, receiptFileId: receipt?.fileId||null, amountMinor: payout.amountMinor,netAmountMinor:prepared.netAmountMinor,recoveryMinor:prepared.recoveryMinor,
       payoutAccountVersion: account?.version||null, payoutQrFileId: account?.qr?.fileId||null };
   } else if (action === 'payments') {

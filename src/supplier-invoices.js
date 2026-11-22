@@ -1,3 +1,4 @@
+import { supplierCanWork } from './supplier-verification.js';
 import { isReviewData } from './review-data.js';
 import { staffError as fail, hasMembership, activeAccount } from './staff-access.js';
 import { notifyAdmins } from './domain-events.js';
@@ -5,8 +6,8 @@ import { queueOrderInvalidate } from './notifications.js';
 
 export const SUPPLIER_INVOICE_REMINDER = 'Do not put your shop invoice inside the printed products or give it to the customer. GRIDGO buys from your shop and provides the customer with its own receipt. Upload your invoice scan here and keep the paper original for collection by GRIDGO.';
 const monthAt = at => new Date(Date.parse(at) + 8 * 3600000).toISOString().slice(0, 7);
-const approvedSupplier = (store, user) => hasMembership(store, user, 'supplier')
-  && store.approvalCases.some(row => row.userId === user.id && row.kind === 'supplier' && row.status === 'approved');
+const workingSupplier = (store, user) => hasMembership(store, user, 'supplier')
+  && supplierCanWork(store,user.id);
 const isOps = (store, user) => hasMembership(store, user, 'ops_admin') || hasMembership(store, user, 'super_admin');
 function scanFiles(store, invoice) {
   return store.files.filter(file => file.ownerId === invoice.supplierId && file.purpose === 'supplier_invoice'
@@ -70,7 +71,7 @@ export async function routeSupplierInvoices({ req, url, store, user, readBody, n
   if (!user) fail(401, 'unauthorized');
   if (!activeAccount(user)) fail(403, 'forbidden');
   const staff = match[1] === 'ops/finance';
-  if (staff ? !isOps(store, user) : !approvedSupplier(store, user)) fail(403, 'forbidden');
+  if (staff ? !isOps(store, user) : !workingSupplier(store, user)) fail(403, 'forbidden');
   const response = (invoice, mutated = false) => ({ status: 200, body: { invoice: publicInvoice(store, invoice), reminder: SUPPLIER_INVOICE_REMINDER }, mutated });
   if (!match[2] && req.method === 'GET') {
     const month = url.searchParams.get('month');

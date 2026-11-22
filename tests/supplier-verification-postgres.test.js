@@ -4,28 +4,12 @@ import {createDatabase} from '../src/database.js';
 import {loadStore,saveStore} from '../src/postgres-store.js';
 import {fixture,AT,id} from './fixtures/reschedule.js';
 import {resetDatabase} from './fixtures/reset-database.js';
+import {setupVerification as setup} from './fixtures/supplier-verification.js';
 import {apiForTest} from './fixtures/reschedule-http.js';
 import {prepareVerificationPayout,completeVerificationPayout,recordVerificationRecovery,verificationSummary} from '../src/supplier-verification.js';
 import {supplierMatchBlockersFor} from '../src/supplier-eligibility.js';
 
-async function setup(db) {
-  await resetDatabase(db,'TRUNCATE users, platform_settings, taxonomy_categories RESTART IDENTITY CASCADE');
-  const store=fixture(),now=new Date().toISOString();
-  store.settings.supplierVerification={payoutCapMinor:4000,windowDays:30};
-  store.userRoleMemberships.find(m=>m.userId==='supplier').createdAt=now;
-  Object.assign(store.approvalCases.find(c=>c.userId==='supplier'),{status:'pending',createdAt:now,decidedAt:null});
-  store.users.find(u=>u.id==='supplier').verificationStatus='pending';
-  store.taxonomy.categories.push({id:'documents',code:'document_publication',name:'Documents',active:true});
-  store.supplierServices.push({...store.supplierServices[0],id:'documents',categoryCode:'document_publication',state:'live'});
-  const order=store.orders[0];order.readyBy=new Date(Date.now()+86400000).toISOString();order.promisedDate=order.readyBy;
-  order.payoutMilestones[0].pofFileIds=['proof'];
-  store.files.push({fileId:'proof',ownerId:'supplier',purpose:'fulfilment_proof',state:'ready',objectKey:'proof',originalFilename:'proof.png',size:100,
-    declaredContentType:'image/png',detectedContentType:'image/png',createdAt:AT,references:[{type:'order',id:'order',field:'pofFileIds',milestoneCode:'production_started'}]});
-  store.files.push({fileId:'id-selfie',ownerId:'supplier',purpose:'verification_document',state:'ready',objectKey:'verification/id-selfie',originalFilename:'id-selfie.png',size:100,
-    declaredContentType:'image/png',detectedContentType:'image/png',createdAt:AT,references:[]});
-  store.shopMemberships.push({shopId:'supplier',userId:'other',role:'staff',status:'active',createdAt:AT,updatedAt:AT});
-  await db.transaction(()=>saveStore(db,store));
-}
+
 
 test('HTTP reservation/release retries pay once; cap hold persists and verification lifts it; expired shop finishes existing work', {skip:!process.env.DATABASE_URL},async t=>{
   const db=createDatabase(process.env);t.after(()=>db.close());await setup(db);
@@ -41,11 +25,11 @@ test('HTTP reservation/release retries pay once; cap hold persists and verificat
   const prepared=await call('ops','POST',`${base}/prepare`,{});
   assert.equal(prepared.status,200,JSON.stringify(prepared.body));assert.equal(prepared.body.payout.netAmountMinor,4000);
   const again=await call('ops','POST',`${base}/prepare`,{});assert.deepEqual(again.body,prepared.body);
-  const cancelled=await call('ops','POST',`${base}/cancel-reservation`,{noFundsSentConfirmed:true,reason:'No funds were sent; prepare again'});
+  const cancelled=await call('ops','POST',`${base}/cancel-reservation`,{attemptId:prepared.body.payout.attemptId,noFundsSentConfirmed:true,reason:'No funds were sent; prepare again'});
   assert.equal(cancelled.status,200,JSON.stringify(cancelled.body));
-  assert.equal((await call('ops','POST',`${base}/prepare`,{})).status,200);
-  assert.equal((await call('ops','POST',`${base}/release`,{amountMinor:3999})).body.error,'verification_net_payout_amount_required');
-  const [one,two]=await Promise.all([call('ops','POST',`${base}/release`,{amountMinor:4000}),call('ops','POST',`${base}/release`,{amountMinor:4000})]);
+  const renewed=await call('ops','POST',`${base}/prepare`,{});assert.equal(renewed.status,200);const attemptId=renewed.body.payout.attemptId;
+  assert.equal((await call('ops','POST',`${base}/release`,{attemptId,amountMinor:3999})).body.error,'verification_net_payout_amount_required');
+  const [one,two]=await Promise.all([call('ops','POST',`${base}/release`,{attemptId,amountMinor:4000}),call('ops','POST',`${base}/release`,{attemptId,amountMinor:4000})]);
   assert.equal(one.status,200,JSON.stringify(one.body));assert.equal(two.status,200,JSON.stringify(two.body));
   assert.equal((await db.query("SELECT count(*)::int n FROM supplier_verification_ledger WHERE kind='released'")).rows[0].n,1);
   await db.transaction(async()=>{const s=await loadStore(db);const o=s.orders[0];o.state='delivered';o.payoutMilestones.find(m=>m.code==='delivered').pofFileIds=['proof'];await saveStore(db,s);});

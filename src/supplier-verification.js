@@ -18,6 +18,15 @@ export function validateVerificationSettings(settings) {
   if(!Number.isSafeInteger(value.payoutCapMinor)||value.payoutCapMinor<0||!Number.isSafeInteger(value.windowDays)||value.windowDays<1||value.windowDays>3650)fail('invalid_supplier_verification_settings',400);
   return value;
 }
+export function assertVerificationPolicyChange(store,next) {
+  const cap=verificationSettings(next).payoutCapMinor;
+  if(cap>=verificationSettings(store.settings).payoutCapMinor)return;
+  for(const approval of store.approvalCases||[]) {
+    if(approval.kind!=='supplier'||approval.status!=='pending')continue;
+    const reserved=reservations(store,approval.userId);
+    if(reserved.length&&sum([...paidEvents(store,approval.userId),...reserved].map(e=>e.data?.netAmountMinor??e.amountMinor))>cap)fail('verification_policy_reconciliation_required');
+  }
+}
 export function supplierVerified(store,supplierId) {
   return (store.approvalCases||[]).some(c=>c.userId===supplierId&&c.kind==='supplier'&&c.status==='approved');
 }
@@ -39,7 +48,7 @@ function append(store,{supplierId,orderId=null,key,kind,amountMinor=0,data={}},{
     const recipients=[{userId:supplierId,role:'supplier'},...(store.userRoleMemberships||[]).filter(m=>['ops_admin','super_admin'].includes(m.role))];
     for(const recipient of recipients)(store.notifications||=[]).push({id:id('ntf'),userId:recipient.userId,appRole:recipient.role,at,
       type:'supplier_verification_update',partyUserId:supplierId,approvalCaseId:(store.approvalCases||[]).find(c=>c.userId===supplierId&&c.kind==='supplier')?.id,title:'Shop verification and payouts',
-      body:kind==='reserved'?'Operations prepared a payout. Open Money for its status.':kind==='reservation_cancelled'?'An unsent payout preparation was cancelled. Open Money for its status.':kind==='held'?'A payout is waiting. Open Money for the verification requirement.':kind==='available'?'A verification payout hold was lifted. Operations will review the transfer.':kind==='recovery_due'?'New orders are paused while a paid-stage recovery is outstanding. Open Money or contact Operations.':'A recovery amount was applied to a payout.',read:false});
+      body:kind==='reserved'?(data.transferState==='unknown'?'A supplier transfer needs reconciliation. Do not send it again.':'Operations prepared a payout. Open Money for its status.'):kind==='reservation_cancelled'?'An unsent payout preparation was cancelled. Open Money for its status.':kind==='held'?'A payout is waiting. Open Money for the verification requirement.':kind==='available'?'A verification payout hold was lifted. Operations will review the transfer.':kind==='recovery_due'?'New orders are paused while a paid-stage recovery is outstanding. Open Money or contact Operations.':'A recovery amount was applied to a payout.',read:false});
   }
   store.auditLog.push({id:id('aud'),at,actorId:(store.users||[]).some(u=>u.id===actor.id)?actor.id:null,actorRole:actor.role||'system',action:`supplier_verification.${kind}`,
     entityType:'user',entityId:supplierId,...(orderId?{orderId}:{}),detail:entry});
@@ -63,7 +72,7 @@ function paidEvents(store,supplierId) {
   return [...recorded.values()];
 }
 function reservations(store,supplierId) {
-  return ledgerFor(store,supplierId).filter(e=>e.kind==='reserved' && latest(store,e.payoutKey)?.kind==='reserved');
+  return ledgerFor(store,supplierId).filter(e=>e.kind==='reserved' && latest(store,e.payoutKey)===e);
 }
 export function verificationSummary(store,supplierId,at=new Date().toISOString()) {
   const policy=verificationSettings(store.settings),verified=supplierVerified(store,supplierId);
@@ -94,15 +103,39 @@ export function verificationSummary(store,supplierId,at=new Date().toISOString()
 }
 export function assertVerifiedCashShop(store,supplierId) {if(!supplierVerified(store,supplierId))fail('cash_supplier_verification_required');}
 /** Reserve before a manual transfer. A retry returns the same frozen amount. */
-export function prepareVerificationPayout(store,order,{key,amountMinor,at,actor,id}) {
+function reservationData(entry) {
+  return {...entry.data,attemptId:entry.data.attemptId||entry.id,payerId:entry.data.payerId??entry.actorId,
+    requiresAttempt:entry.data.requiresAttempt??true};
+}
+function assertPayoutIdentity(entry,order) {
+  if(entry.orderId!==order.id||entry.supplierId!==order.supplierId)fail('verification_payout_identity_mismatch');
+}
+function assertPayer(data,actor,recording=false) {
+  if(data.payerId!==(actor?.id||null) && !(recording&&actor?.role==='super_admin'))fail('verification_payer_required',403);
+}
+export function assertVerificationReplay(store,order,key,{attemptId,reference,amountMinor}={}) {
+  const entry=latest(store,key);
+  if(entry?.kind!=='released')return;
+  assertPayoutIdentity(entry,order);
+  if(entry.data.requiresAttempt && attemptId!==entry.data.attemptId)fail('verification_payout_attempt_required');
+  if(Object.hasOwn(entry.data,'transferReference')&&(reference||null)!==entry.data.transferReference)fail('verification_transfer_reconciliation_required');
+  if(amountMinor!==undefined&&entry.data.transferAmountMinor!==undefined&&amountMinor!==entry.data.transferAmountMinor)fail('verification_transfer_reconciliation_required');
+}
+export function prepareVerificationPayout(store,order,{key,amountMinor,at,actor,id,attemptId,recording=false,sharedAttempt=false,reconciling=false}) {
   if(!Number.isSafeInteger(amountMinor)||amountMinor<0)fail('invalid_money');
   if(order.cash)return {status:'ready',key,amountMinor,netAmountMinor:amountMinor,recoveryMinor:0,exempt:true};
   const previous=latest(store,key);
+  if(previous&&['released','reserved'].includes(previous.kind))assertPayoutIdentity(previous,order);
   if(previous?.kind==='released')return {status:'released',key,...previous.data,amountMinor:previous.amountMinor};
   if(previous?.kind==='reserved') {
     if(previous.amountMinor!==amountMinor)fail('verification_payout_changed');
-    return {status:'ready',key,amountMinor,...previous.data};
+    const data=reservationData(previous);
+    assertPayer(data,actor,recording);
+    if((recording&&data.requiresAttempt || attemptId!==undefined)&&attemptId!==data.attemptId)fail('verification_payout_attempt_required');
+    if(data.transferState==='unknown'&&!reconciling)fail('verification_transfer_unknown');
+    return {status:'ready',key,amountMinor,...data};
   }
+  if(attemptId && (!sharedAttempt || !reservations(store,order.supplierId).some(e=>e.orderId===order.id&&reservationData(e).attemptId===attemptId)))fail('verification_payout_attempt_required');
   const summary=verificationSummary(store,order.supplierId,at);
   const reservedRecovery=sum(reservations(store,order.supplierId).map(e=>e.data.recoveryMinor));
   const recoveryMinor=Math.min(amountMinor,Math.max(0,summary.recoveryDueMinor-reservedRecovery));
@@ -116,15 +149,26 @@ export function prepareVerificationPayout(store,order,{key,amountMinor,at,actor,
     if(previous?.kind!=='held')append(store,{supplierId:order.supplierId,orderId:order.id,key,kind:'held',amountMinor,data},{at,actor,id});
     return {status:'held',key,amountMinor,...data};
   }
+  Object.assign(data,{attemptId:attemptId||id?.('sattempt')||randomUUID(),payerId:actor?.id||null,requiresAttempt:!recording,transferState:'in_progress'});
   append(store,{supplierId:order.supplierId,orderId:order.id,key,kind:'reserved',amountMinor,data},{at,actor,id});
   return {status:'ready',key,amountMinor,...data};
 }
 export function completeVerificationPayout(store,order,payout,ctx) {
-  if(payout.exempt||latest(store,payout.key)?.kind==='released')return;
+  if(payout.exempt)return;
+  const previous=latest(store,payout.key);
+  if(previous?.kind==='released') {assertVerificationReplay(store,order,payout.key,{attemptId:payout.attemptId,reference:ctx.transferReference});return;}
+  if(previous?.kind!=='reserved')fail('verification_reservation_not_pending');
+  assertPayoutIdentity(previous,order);
+  const data=reservationData(previous);assertPayer(data,ctx.actor,true);
+  if(payout.attemptId!==data.attemptId||payout.amountMinor!==previous.amountMinor
+    ||payout.netAmountMinor!==data.netAmountMinor||payout.recoveryMinor!==data.recoveryMinor)fail('verification_payout_attempt_required');
   if(payout.status!=='ready')fail('verification_payout_not_ready');
   if(payout.recoveryMinor)append(store,{supplierId:order.supplierId,orderId:order.id,key:`recovered:${payout.key}`,kind:'recovered',amountMinor:payout.recoveryMinor},ctx);
+  const approval=(store.approvalCases||[]).find(c=>c.userId===order.supplierId&&c.kind==='supplier');
   append(store,{supplierId:order.supplierId,orderId:order.id,key:payout.key,kind:'released',amountMinor:payout.amountMinor,
-    data:{netAmountMinor:payout.netAmountMinor,recoveryMinor:payout.recoveryMinor,beforeVerification:!supplierVerified(store,order.supplierId)}},ctx);
+    data:{...data,transferState:'paid',transferReference:ctx.transferReference||null,transferAmountMinor:ctx.transferAmountMinor??payout.netAmountMinor,
+      ...(ctx.reconciled?{reconciled:true,transferReceiptFileId:ctx.receipt.fileId,transferPaidAt:ctx.paidAt}:{}),
+      beforeVerification:!supplierVerified(store,order.supplierId)||Boolean(ctx.paidAt&&approval?.decidedAt&&Date.parse(ctx.paidAt)<Date.parse(approval.decidedAt))}},ctx);
 }
 export function recordVerificationRecovery(store,order,ctx) {
   if(order.cash||order.reviewData||supplierVerified(store,order.supplierId))return false;
@@ -183,10 +227,35 @@ export function cancelVerificationReservation(store,order,key,ctx) {
   const previous=latest(store,key);
   if(previous?.kind==='reservation_cancelled')return;
   if(previous?.kind!=='reserved')fail('verification_reservation_not_pending');
+  assertPayoutIdentity(previous,order);
+  const data=reservationData(previous);assertPayer(data,ctx.actor,true);
+  if(ctx.attemptId!==data.attemptId)fail('verification_payout_attempt_required');
   append(store,{supplierId:order.supplierId,orderId:order.id,key,kind:'reservation_cancelled',amountMinor:previous.amountMinor,
-    data:{reason:ctx.reason}},ctx);
+    data:{...data,reason:ctx.reason,transferState:'not_sent'}},ctx);
+}
+
+export function markVerificationTransferUnknown(store,order,key,ctx) {
+  const previous=latest(store,key);
+  if(previous?.kind!=='reserved')fail('verification_reservation_not_pending');
+  assertPayoutIdentity(previous,order);
+  const data=reservationData(previous);assertPayer(data,ctx.actor,true);
+  if(ctx.attemptId!==data.attemptId)fail('verification_payout_attempt_required');
+  if(data.transferState==='unknown')return;
+  append(store,{supplierId:order.supplierId,orderId:order.id,key,kind:'reserved',amountMinor:previous.amountMinor,
+    data:{...data,transferState:'unknown',reason:ctx.reason}},ctx);
 }
 
 export function hasVerificationReservation(store,order) {
-  return reservations(store,order.supplierId).some(e=>e.orderId===order.id);
+  return (store.supplierVerificationLedger||[]).some(e=>e.orderId===order.id&&e.kind==='reserved'&&latest(store,e.payoutKey)===e);
+}
+export function verificationReservationsForOrder(store,order) {
+  return (store.supplierVerificationLedger||[]).filter(e=>e.orderId===order.id&&e.kind==='reserved'&&latest(store,e.payoutKey)===e)
+    .map(e=>({...e,data:reservationData(e)}));
+}
+
+export function hasSupplierTransferExposure(store,order) {
+  return hasVerificationReservation(store,order)||(order.payoutMilestones||[]).some(s=>s.status==='released')
+    ||(store.orderChangePayments||[]).some(p=>p.orderId===order.id&&p.amountMinor>0)
+    ||(store.orderChangePayouts||[]).some(p=>p.orderId===order.id)
+    ||(store.refundSupplierPayouts||[]).some(p=>p.orderId===order.id&&p.status==='released');
 }

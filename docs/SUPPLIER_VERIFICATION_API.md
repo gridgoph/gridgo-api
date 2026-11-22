@@ -4,7 +4,7 @@ Refs gridgoph/gridgo-api#411; issue report F318781A. API contract for the suppli
 
 A pending shop can receive new online work after sign-up has a location, a document service and a ready receiving QR. Existing active-account, shop-open, membership, live-service, listing review, production/deadline and file gates remain. Operations may independently verify a submitted service line before the shop identity is verified; identity approval is no longer a prerequisite for that line-review action. Rejected or suspended suppliers do not gain access through this policy.
 
-The verification window begins at the supplier membership's immutable creation time, including when another role enrolled first. Reapplying, uploading replacement files and editing a profile do not restart it. At the deadline, new matching and checkout stop. Assigned orders can still be read, accepted, produced and handed over; temporary shop closure, expiry and recovery debt do not revoke existing work access. Account suspension and independent work/claim/refund holds still apply.
+The verification window begins at the supplier membership's immutable creation time, including when another role enrolled first. Reapplying, uploading replacement files and editing a profile do not restart it. At the deadline, new matching and checkout stop. Assigned orders can still be read, accepted, produced and handed over, with their owning supplier’s change-request, production-deadline and invoice tools; temporary shop closure, expiry and recovery debt do not revoke existing work access. Account suspension and independent work/claim/refund holds still apply.
 
 ## Operational settings
 
@@ -14,7 +14,7 @@ Super Admin uses the existing `PATCH /settings`, `expectedVersion` and a nonblan
 {"expectedVersion":12,"reason":"Reviewed verification policy","supplierVerification":{"payoutCapMinor":500000,"windowDays":30}}
 ```
 
-The amount is integer centavos, a nonnegative safe integer. The window is an integer from 1 to 3650 days. Operations cannot change either value. Limits apply to current policy reads; lowering the cap never rewrites money already paid, and further payments wait for verification. The starting values remain subject to legal/tax review. This API does not introduce automatic bank or payment gateway transfers.
+The amount is integer centavos, a nonnegative safe integer. The window is an integer from 1 to 3650 days. Operations cannot change either value. Limits apply to current policy reads; lowering the cap never rewrites money already paid, and further positive payments wait for verification. A cap reduction that would invalidate an unresolved transfer returns `409 verification_policy_reconciliation_required`; record its actual outcome or explicitly retire the unsent attempt first. Zero-net debt offsets do not spend additional cap capacity. The starting values remain subject to legal/tax review. This API does not introduce automatic bank or payment gateway transfers.
 
 ## Supplier app calls
 
@@ -23,7 +23,7 @@ The amount is integer centavos, a nonnegative safe integer. The window is an int
 - `countdownDays` is null until the last seven days. Render a short optional verification To do card and a Money banner while unverified; show the cap-reached note from `capReached`. Keep the cap off the receiving-QR screen. A false `verified` flag does not request a negative client-facing label.
 - Upload verification bytes using the existing private `POST /files` intake, upload/complete and `POST /files/:fileId/attach` flow. Purpose is `verification_document`; attach body is `{"documentType":"valid_id"}`, `{"documentType":"id_selfie"}` or `{"documentType":"business_permit"}`. Images and PDFs follow existing storage limits. `id_selfie` is the photo with the ID. `replaceFileId` keeps the existing typed replacement semantics. A ready attached upload projects `being_checked`; uploading never stops jobs or approves the case.
 - `/auth/me/supplier` includes the verification summary and updates `receiveJobOffers` versus `acceptJobs`: new offers use current eligibility; existing work remains accessible after the deadline. Money should use the dedicated Owner route above.
-- Match shop/listing cards, anonymous alternative listings and Express shop lists expose a positive `verified` boolean. Verified candidates are promoted within the existing shared distance bands after ordinary ranking; deadline-incapable candidates remain excluded. Different distance bands keep their ordinary ranking positions. A verification-driven match reason is `verified` / `Verified shop nearby`.
+- Public shop detail/directory/media use the same pending-shop eligibility as listings. Shop/listing cards, anonymous alternative listings and Express shop lists expose a positive `verified` boolean. Verified candidates are promoted within the existing shared distance bands after ordinary ranking; deadline-incapable candidates remain excluded. Different distance bands keep their ordinary ranking positions. A verification-driven match reason is `verified` / `Verified shop nearby`.
 
 Day 7, 20 and 27 reminders use durable inbox/outbox delivery, with a copy to every current Operations and Super Admin membership. The lifecycle sends the latest overdue reminder after downtime, once, while the window is still open. The stored reminder key prevents duplicates across retries and restarts. No SMS provider is introduced.
 
@@ -35,7 +35,34 @@ Before sending a transfer, Operations/Super Admin calls:
 
 `POST /orders/:orderId/milestones/:code/prepare` with `{}`.
 
-The existing stage's proof, fulfillment, collection, claim, refund, production-penalty and other release gates are checked first. A successful response contains `payout.status: ready`, the frozen `netAmountMinor` to transfer, and `items` with gross `amountMinor`, `recoveryMinor` and `netAmountMinor`. The transaction reserves cap space and a paid-open job slot. Retrying prepare returns the same amount. Do not send a held transfer. If an unused preparation is abandoned, use `POST /orders/:orderId/milestones/:code/cancel-reservation` with `noFundsSentConfirmed: true` and a nonblank `reason`; this releases its cap reservation with an audit entry. For a settlement or individual supplemental reservation, use `POST /orders/:orderId/payout-reservations/cancel` with its `payoutKey`, the same confirmation and reason. Never cancel when a transfer may already have been sent; reconcile its actual outcome first. An active preparation also prevents automatic shop reassignment.
+The existing stage's proof, fulfillment, collection, claim, refund, production-penalty and other release gates are checked first.
+A successful preparation returns `payout.status: ready`, the frozen `netAmountMinor`, an opaque `attemptId`, its `payerId`, and `items` with gross/net/recovery amounts.
+One payer owns that attempt; another operator, including Super Admin, receives `403 verification_payer_required` instead of another instruction to send.
+A same-payer preparation retry returns the same attempt and amounts; it never creates a second transfer.
+Final-stage supplements share the stage's attempt and must be transferred and recorded together.
+The transaction reserves cap space and paid-open job slots, including during rolling deployments with an older writer.
+Do not send a held transfer, resend an in-progress transfer, or reuse a retired attempt.
+
+Include the returned `attemptId` when recording an explicitly prepared transfer through `/release` or `/supplier-payout`.
+A missing/stale attempt is `409 verification_payout_attempt_required`; retry a completed command with its original reference and amount.
+A changed reference or amount after completion is `409 verification_transfer_reconciliation_required`, rather than a successful replay.
+Legacy direct recording remains compatible, but cannot take over an outstanding preparation.
+
+For an abandoned unsent preparation use `POST /orders/:orderId/milestones/:code/cancel-reservation`, or `POST /orders/:orderId/payout-reservations/cancel` with `payoutKey`.
+Both require `attemptId`, `noFundsSentConfirmed: true` and a nonblank `reason`.
+They retire the whole transfer attempt, with its bundled items, and audit the released capacity.
+Only its payer or Super Admin may reconcile it.
+
+`POST /orders/:orderId/payout-reservations/reconcile` requires `payoutKey`, `attemptId`, `reason` and one of these outcomes:
+
+- `unknown`: keep the reservation and mark the whole attempt uncertain; further preparation is `409 verification_transfer_unknown`. Never send again while uncertain.
+- `not_sent`: require `noFundsSentConfirmed: true`; retire the attempt before any new preparation.
+- `paid`: require `fundsSentConfirmed: true`, exact combined `amountMinor`, the actual ISO `paidAt` (not in the future), `reference` and a ready owned `payout_receipt` `receiptFileId`. This records an already-sent frozen attempt, including its supplements/remainder, without authorizing a new transfer. A positive actual transfer and evidence are required; zero-net offsets use the normal release path. Payer or Super Admin may record it. Exact retries do not duplicate the financial rows, ledger, audit or notifications.
+
+Reconciliation remains available under independent work/refund holds, and never clears those holds or resumes work.
+Financial supersession, changed beneficiaries and stage-amount corrections wait while a transfer is unresolved, including a deadline rematch and a new refund settlement.
+Record the actual transfer first, or explicitly confirm it was not sent, then calculate settlement amounts from the updated paid ledger.
+The database requires matching immutable ledger/evidence proof for recording a prepared stage under a refund hold; it does not permit a fresh payout through that hold.
 
 An over-cap whole stage or third paid-open regular job returns HTTP 202 and `payout.status: held`, with `reason: verification_payout_cap | verification_open_jobs` on the affected item. Every regular stage, legacy retention, supplemental change payout and refund settlement shop payout is included in online cap accounting. Existing rider-paid cash is exempt. A held stage's published amount/status is not reshaped. Additional regular jobs can wait for their first paid stage; existing paid jobs can finish.
 
@@ -47,7 +74,7 @@ Verification lifts verification-specific holds and writes `available` ledger/aud
 
 If an unverified shop drops/cancels a job after an online stage was paid, one `recovery_due` entry records the full value of paid payout entitlements, including prior recovery offsets, and new orders pause while the shop remains unverified and that debt is outstanding. Subsequent prepared online payouts recover the debt before computing the cash amount to send. `recovered` plus `released` entries settle the gross obligation without changing published stage shares. If that job is later cancelled, its full paid value becomes recoverable, including any earlier offset; a zero-net payment cannot erase an older debt. Verification ends the probationary new-order pause but does not erase debt; subsequent online payouts still recover it. This lets a verified shop earn the money to settle its recovery balance, including when no other job was open. Open work continues. GRIDGO staff can see the debt, paid amount and hold history in the verification queue.
 
-Ledger money is safe-integer centavos, persisted as PostgreSQL BIGINT. Holds, availability, reservations, releases and recovery offsets each have audit records and commit in the existing domain transaction. Release and recovery identities are unique. A deferred database cap check also refuses a legacy process's new over-cap online release; it does not add incompatible CHECKs to legacy upsert shapes.
+Ledger money is safe-integer centavos, persisted as PostgreSQL BIGINT. Holds, availability, reservations, releases and recovery offsets each have audit records and commit in the existing domain transaction. Release and recovery identities are unique. A deferred database cap check counts outstanding reservations and paid amounts, excludes only an exactly matching already-recorded item, and protects reserved regular-job slots against legacy writers; it does not add incompatible CHECKs to legacy upsert shapes.
 
 ## Dashboard calls
 

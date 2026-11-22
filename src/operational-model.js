@@ -1093,7 +1093,7 @@ export function releaseMilestone(order, code, actor, at, store = null) {
   }
 
   if(actor.role==='system' && store) {
-    const prepared=prepareVerificationPayout(store,order,{key:`stage:${order.id}:${code}`,amountMinor:milestone.amountMinor,at,actor});
+    const prepared=prepareVerificationPayout(store,order,{key:`stage:${order.id}:${code}`,amountMinor:milestone.amountMinor,at,actor,recording:true});
     if(prepared.status==='held')return milestone;
     completeVerificationPayout(store,order,prepared,{at,actor});
   }

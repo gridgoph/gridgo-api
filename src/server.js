@@ -1,6 +1,7 @@
-import { supplierCanWork, verificationSettings, verificationSummary,
-  prepareVerificationPayout, completeVerificationPayout, recordVerificationRecovery, cancelVerificationReservation, reconcileVerificationHolds, remindSupplierVerification } from "./supplier-verification.js";
+import { supplierCanWork, verificationSettings, verificationSummary, assertVerificationPolicyChange,
+  prepareVerificationPayout, completeVerificationPayout, recordVerificationRecovery, cancelVerificationReservation, markVerificationTransferUnknown, verificationReservationsForOrder, assertVerificationReplay, reconcileVerificationHolds, remindSupplierVerification } from "./supplier-verification.js";
 import { supplierMatchBlockersFor } from "./supplier-eligibility.js";
+import {recordPreparedSupplierTransfer} from './supplier-transfer-reconciliation.js';
 import { changePaymentsFor, changePayoutsFor } from "./order-change-policy.js";
 import { enforceShopWorkerBoundary } from './shop-worker-boundary.js';
 import { bindShopDeviceRequest, effectiveShopRole, resolveShopWorker, managerRouteAllowed } from './shop-team-work.js';
@@ -3530,7 +3531,9 @@ async function handleAuditedRequest(req, res) {
         // Resolve money already sent before an independent work hold; never reopen fulfillment.
         const reconcilePin = /^delivery-pin\/payment\/(confirm|reject)$/.test(refundGuard[2])
           && guardedOrder && isOps(user) && deliveryPinPaymentPending(guardedOrder);
-        if (guardedOrder && !reconcileBalance && !reconcilePin) assertRefundWorkAllowed(store, guardedOrder);
+        const reconcileSupplier=req.method==='POST'&&isOps(user)
+          && /^(payout-reservations\/(reconcile|cancel)|milestones\/[^/]+\/cancel-reservation)$/.test(refundGuard[2]);
+        if (guardedOrder && !reconcileBalance && !reconcilePin && !reconcileSupplier) assertRefundWorkAllowed(store, guardedOrder);
       }
     }
 
@@ -4567,6 +4570,7 @@ async function handleAuditedRequest(req, res) {
           }) : artworkGuidanceSettings(store.settings),
       };
       validateOperationalSettings(next);
+      assertVerificationPolicyChange(store,next);
       next.deliveryFeeBands = next.deliveryFeeBands.map((band) => ({
         zone: band.zone,
         label: band.label,
@@ -6250,15 +6254,26 @@ async function handleAuditedRequest(req, res) {
     }
 
     // ---- supplier payout milestones ----
-    if(req.method==='POST' && (/^\/orders\/[^/]+\/milestones\/[^/]+\/cancel-reservation$/.test(pathname)||/^\/orders\/[^/]+\/payout-reservations\/cancel$/.test(pathname))) {
+    if(req.method==='POST' && (/^\/orders\/[^/]+\/milestones\/[^/]+\/cancel-reservation$/.test(pathname)||/^\/orders\/[^/]+\/payout-reservations\/(cancel|reconcile)$/.test(pathname))) {
       if(!isOps(user))return send(res,403,{error:'forbidden'});
       const order=store.orders.find(o=>o.id===pathname.split('/')[2]);if(!order)return send(res,404,{error:'order_not_found'});
       const body=await readBody(req);
-      if(body.noFundsSentConfirmed!==true||typeof body.reason!=='string'||!body.reason.trim())return send(res,400,{error:'verification_reservation_confirmation_required'});
-      const code=pathname.split('/')[4],ctx={at:now(),actor:user,id,reason:body.reason.trim()};
-      const keys=pathname.endsWith('/payout-reservations/cancel')?[body.payoutKey]:[`stage:${order.id}:${code}`,...(store.supplierVerificationLedger||[]).filter(e=>e.orderId===order.id&&e.kind==='reserved'&&e.payoutKey.startsWith('change:')).map(e=>e.payoutKey)];
+      const unknown=pathname.endsWith('/reconcile')&&body.outcome==='unknown',paid=pathname.endsWith('/reconcile')&&body.outcome==='paid';
+      if(pathname.endsWith('/reconcile')&&!['unknown','not_sent','paid'].includes(body.outcome))return send(res,400,{error:'invalid_verification_transfer_outcome'});
+      if((!unknown&&!paid&&body.noFundsSentConfirmed!==true)||typeof body.reason!=='string'||!body.reason.trim())return send(res,400,{error:'verification_reservation_confirmation_required'});
+      const code=pathname.split('/')[4],ctx={at:now(),actor:user,id,attemptId:body.attemptId,reason:body.reason.trim()};
+      if(paid) {
+        assertReviewMoneyAllowed(order);
+        const alreadyRecorded=(store.supplierVerificationLedger||[]).some(e=>e.payoutKey===body.payoutKey&&e.kind==='released');
+        const result=recordPreparedSupplierTransfer(store,order,{...ctx,payoutKey:body.payoutKey,amountMinor:body.amountMinor,
+          fundsSentConfirmed:body.fundsSentConfirmed,paidAt:body.paidAt,reference:paymentReferenceValue(body.reference),receipt:alreadyRecorded?null:resolvePayoutReceipt(store,body.receiptFileId,user)});
+        queueOrderInvalidate(store,order,['payouts']);await save(store);return send(res,200,{ok:true,...result});
+      }
+      const active=verificationReservationsForOrder(store,order),targetKey=pathname.includes('/payout-reservations/')?body.payoutKey:`stage:${order.id}:${code}`;
+      const target=active.find(e=>e.payoutKey===targetKey);
+      const keys=target?active.filter(e=>e.data.attemptId===target.data.attemptId).map(e=>e.payoutKey):[targetKey];
       if(keys.some(key=>typeof key!=='string'||!(store.supplierVerificationLedger||[]).some(e=>e.orderId===order.id&&e.supplierId===order.supplierId&&e.payoutKey===key)))return send(res,409,{error:'verification_reservation_not_pending'});
-      for(const key of new Set(keys))cancelVerificationReservation(store,order,key,ctx);
+      for(const key of new Set(keys))(unknown?markVerificationTransferUnknown:cancelVerificationReservation)(store,order,key,ctx);
       queueOrderInvalidate(store,order,['payouts']);await save(store);return send(res,200,{ok:true});
     }
 
@@ -6272,18 +6287,26 @@ async function handleAuditedRequest(req, res) {
       assertReviewMoneyAllowed(order);
       const body = await readBody(req);
       const existing=order.payoutMilestones.find(stage=>stage.code===milestoneCode);
-      if(existing?.status==='released') return send(res,200,{order:await publicOrder(order,user,store),milestone:existing,replayed:true});
+      if(existing?.status==='released') {
+        if(pathname.endsWith('/prepare'))return send(res,200,{payout:{status:'released'},milestone:existing});
+        if(verificationReservationsForOrder(store,order).some(e=>e.payoutKey===`stage:${order.id}:${milestoneCode}`))return send(res,409,{error:'verification_transfer_reconciliation_required'});
+        const reference=paymentReferenceValue(body.reference);
+        if((reference||null)!==(existing.reference||null))return send(res,409,{error:'verification_transfer_reconciliation_required'});
+        assertVerificationReplay(store,order,`stage:${order.id}:${milestoneCode}`,{attemptId:body.attemptId,reference,amountMinor:body.amountMinor});
+        return send(res,200,{order:await publicOrder(order,user,store),milestone:existing,replayed:true});
+      }
       const releasedAt = now();
       releaseMilestone(structuredClone(order),milestoneCode,user,releasedAt,store);
       const finalCode=order.payoutPlanVersion===4?'delivered':order.payoutPlanVersion===2?'issue_window':'retention';
       const extra=milestoneCode===finalCode?changePaymentsFor(store,order).filter(p=>!changePayoutsFor(store,order).some(r=>r.changeId===p.changeId)):[];
-      const prepared=[prepareVerificationPayout(store,order,{key:`stage:${order.id}:${milestoneCode}`,amountMinor:existing.amountMinor,at:releasedAt,actor:user,id}),
-        ...extra.map(p=>prepareVerificationPayout(store,order,{key:`change:${order.id}:${p.changeId}`,amountMinor:p.principalMinor,at:releasedAt,actor:user,id}))];
+      const recording=pathname.endsWith('/release');
+      const stagePayout=prepareVerificationPayout(store,order,{key:`stage:${order.id}:${milestoneCode}`,amountMinor:existing.amountMinor,at:releasedAt,actor:user,id,recording,attemptId:body.attemptId});
+      const prepared=[stagePayout,...(stagePayout.status==='held'?[]:extra.map(p=>prepareVerificationPayout(store,order,{key:`change:${order.id}:${p.changeId}`,amountMinor:p.principalMinor,at:releasedAt,actor:user,id,recording,attemptId:stagePayout.attemptId,sharedAttempt:true})))];
       const netAmountMinor=prepared.reduce((n,p)=>n+p.netAmountMinor,0);
       const verificationHold=prepared.find(p=>p.status==='held');
       if(pathname.endsWith('/prepare')||verificationHold) {
         queueOrderInvalidate(store,order,['payouts']);await save(store);
-        return send(res,verificationHold?202:200,{payout:{status:verificationHold?'held':'ready',netAmountMinor,items:prepared}});
+        return send(res,verificationHold?202:200,{payout:{status:verificationHold?'held':'ready',netAmountMinor,attemptId:stagePayout.attemptId,payerId:stagePayout.payerId,items:prepared}});
       }
       const amountRequired=extra.length>0||prepared.some(p=>p.beforeVerification||p.recoveryMinor>0)||body.amountMinor!==undefined;
       if(amountRequired && body.amountMinor!==netAmountMinor) return send(res,409,{error:extra.length && !prepared.some(p=>p.recoveryMinor>0)?'supplement_payout_amount_mismatch':'verification_net_payout_amount_required',netAmountMinor});
@@ -6296,7 +6319,7 @@ async function handleAuditedRequest(req, res) {
       if (reference) milestone.reference = reference;
       const supplementalAmountMinor = releaseChangePayouts(store, order, milestoneCode,
         { user, reference, receipt, amountMinor: existing.amountMinor+extra.reduce((n,p)=>n+p.principalMinor,0), at: releasedAt, id, audit, verificationOffset:netAmountMinor===0 });
-      for(const payout of prepared) completeVerificationPayout(store,order,payout,{at:releasedAt,actor:user,id});
+      for(const payout of prepared) completeVerificationPayout(store,order,payout,{at:releasedAt,actor:user,id,transferReference:reference,transferAmountMinor:netAmountMinor});
       order.updatedAt = releasedAt;
       order.timeline.push({
         at: releasedAt,

@@ -1,9 +1,10 @@
+import { supplierCanWork } from './supplier-verification.js';
 import { parseColourCorrection } from './colour-correction.js';
 import crypto from 'node:crypto';
 import { serviceFeeMoney } from './service-fee.js';
 import { specialInstructions, instructionLines } from './special-instructions.js';
 import { changesFor, changePaymentsFor, changePayoutsFor, changeWindowOpen, publicChange, supplementTotals } from './order-change-policy.js';
-import { privilegedAdminMemberships, queueOrderInvalidate, approvedRole } from './notifications.js';
+import { privilegedAdminMemberships, queueOrderInvalidate } from './notifications.js';
 import { assertRefundWorkAllowed, refundHold, refundSettlementFor } from './refund-policy.js';
 import { rescheduleHold } from './order-reschedule-policy.js';
 import { awaitedTopUp } from './shop-move-pricing.js';
@@ -80,7 +81,7 @@ export async function routeOrderChanges({ req, url, store, user, readBody, now, 
   }
   const order = store.orders.find(o => o.id === match[1]);
   if (!order) fail(404, 'order_not_found');
-  const supplier = user.role === 'supplier' && user.id === order.supplierId && approvedRole(store, user.id, 'supplier');
+  const supplier = user.role === 'supplier' && user.id === order.supplierId && supplierCanWork(store, user.id);
   const client = user.role === 'client' && user.id === order.clientId;
   if (!staff(user) && !supplier && !client) fail(403, 'forbidden');
   const rows = changesFor(store, order);

@@ -1,8 +1,8 @@
-import { recordVerificationRecovery, hasVerificationReservation } from "./supplier-verification.js";
+import { recordVerificationRecovery, hasSupplierTransferExposure } from "./supplier-verification.js";
 import { startExpressAcceptance, declineExpress } from './express-orders.js';
 import { tightDeclineExemption } from './scheduling-policy.js';
 import { sameReviewData } from './review-data.js';
-import { supplementTotals, changePaymentPending } from './order-change-policy.js';
+import { changePaymentPending } from './order-change-policy.js';
 import { snapshotShopClock, shopSlaClock } from './shop-hours.js';
 import { approvedCatalogView } from "./catalog-review-state.js";
 
@@ -19,8 +19,7 @@ import { priceShopMove, recoveryFault, SHOP_FAULT_KINDS } from './shop-move-pric
 export const CANCELLABLE_SHOP_STATES = new Set(['supplier_assigned', 'awaiting_checkout', 'awaiting_initial_payment',
   'payment_authorized', 'production', 'supplier_self_qc', 'ready_for_dispatch', 'rider_assigned']);
 export const recoveryHeld = (order) => Boolean(order.shopRecovery && order.shopRecovery.status !== 'accepted');
-export const paidShopShare = (store, order) => hasVerificationReservation(store,order) || supplementTotals(store, order).totalMinor > 0 || (order.payoutMilestones || []).some((stage) => stage.status === 'released')
-  || (store.refundSupplierPayouts || []).some((row) => row.orderId === order.id && row.status === 'released');
+export const paidShopShare = hasSupplierTransferExposure;
 const fail = (code) => { throw Object.assign(new Error(code), { status: 409, code }); };
 const normalized = (value) => String(value || '').trim().toLowerCase();
 
