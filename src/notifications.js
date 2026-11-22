@@ -1,3 +1,4 @@
+import { supplierCanWork } from "./supplier-verification.js";
 import { sameReviewData } from './review-data.js';
 import { availableDispatch, riderOfferVisible } from "./dispatch-policy.js";
 import { supplierArtworkReleased } from "./artwork-gates.js";
@@ -352,7 +353,7 @@ export function canAccessOrder(store, userId, order, {role, location = false, of
   if (!role || role === 'supplier') {
     const person = store.users?.find(row => row.id === userId);
     if ((person?.accountStatus || 'active') === 'active' && (store.shopMemberships || []).some(m => m.userId === userId && m.userId !== m.shopId && m.status === 'active'
-      && approvedRole(store, m.shopId, 'supplier') && supplierArtworkReleased(order)
+      && supplierCanWork(store, m.shopId) && supplierArtworkReleased(order)
       && (order.supplierId === m.shopId || (!order.supplierId && !location && (store.orderJobs || []).filter(job => job.orderId === order.id && job.state !== 'cancelled').length > 1 && store.orderJobs?.some(job => job.orderId === order.id && job.supplierId === m.shopId && job.state !== 'cancelled'))))) return true;
   }
   const roles = role ? [role] : EVENT_ROLES;
@@ -360,7 +361,7 @@ export function canAccessOrder(store, userId, order, {role, location = false, of
     if (!hasRole(store,userId,r)) return false;
     if (r === 'ops_admin' || r === 'super_admin') return true;
     if (r === 'client') return order.clientId === userId && (!location || order.fulfillmentMode !== 'pickup');
-    if (!approvedRole(store,userId,r)) return false;
+    if (r === 'supplier' ? !supplierCanWork(store,userId) : !approvedRole(store,userId,r)) return false;
     if (r === 'supplier') return supplierArtworkReleased(order) && (order.supplierId === userId || (!location && !order.supplierId && (store.orderJobs || []).filter(j=>j.orderId===order.id&&j.state!=='cancelled').length>1 && (store.orderJobs || []).some(j => j.orderId === order.id && j.supplierId === userId && j.state !== 'cancelled')));
     return r === 'rider' && (order.riderId === userId || (!location && offer && sameReviewData(order, store.users?.find(u => u.id === userId)) && availableDispatch(order, store) && riderOfferVisible(order, userId)));
   });

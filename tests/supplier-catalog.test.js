@@ -1536,7 +1536,7 @@ test("operational readiness explains shop gates without changing legacy setup re
     ["shop_closed", s => { s.supplierProfiles[0].isClosed = true; }],
     ["shop_location", s => { s.supplierProfiles[0].shop = null; }],
     ["supplier_profile", s => { s.supplierProfiles = []; }],
-    ["supplier_not_approved", s => { s.approvalCases[0].status = "pending"; }],
+    ["document_service", s => { s.approvalCases[0].status = "pending"; }],
   ]) {
     const store = fixture(); change(store);
     const result = await readinessResponse(store);

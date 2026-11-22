@@ -66,10 +66,10 @@ export function supplierApprovalReadiness(store, supplierId) {
     }
   }
 
-  const pendingServices = (store.supplierServices || []).filter(
-    (service) => service.supplierId === supplierId && service.state === "pending_verification",
+  const reviewableServices = (store.supplierServices || []).filter(
+    (service) => service.supplierId === supplierId && ["pending_verification", "live"].includes(service.state),
   );
-  const publishableServices = pendingServices.filter(
+  const publishableServices = reviewableServices.filter(
     (service) =>
       Boolean(activeCategory(store, service.categoryCode)) &&
       Boolean(nonblank(service.pricingBasis)) &&
@@ -83,7 +83,7 @@ export function supplierApprovalReadiness(store, supplierId) {
   return {
     readyForApproval: missing.length === 0,
     missing,
-    publishableServiceIds: publishableServices.map((service) => service.id),
+    publishableServiceIds: publishableServices.filter(service=>service.state === "pending_verification").map((service) => service.id),
   };
 }
 

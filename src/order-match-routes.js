@@ -1,3 +1,4 @@
+import { assertVerifiedCashShop } from "./supplier-verification.js";
 import { shopPaused } from './shop-availability.js';
 import { assertDocumentRequest } from './document-capabilities.js';
 import { pingPrinterDemand } from './printer-demand.js';
@@ -1723,6 +1724,7 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
   }
   const lines = (store.cartLines || []).filter((line) => line.cartId === cart.id)
     .sort((a, b) => a.sortOrder - b.sortOrder || a.id.localeCompare(b.id));
+  if (cash) for (const line of lines) assertVerifiedCashShop(store,line.supplierId);
   const suppliers = [...new Set(lines.map((line) => line.supplierId))];
   const groups = cartGroups(cart, lines);
   // Validate the complete relevant draft before materializing any group orders.

@@ -7,7 +7,9 @@ three `1795315000000`–`1795315002000` forward migrations before deploying.
 Clerk remains the identity provider. Supplier accreditation and listing review
 remain unchanged: sign-up prepares real, positive-priced document services and
 pending listings; it does not approve the shop or its listings. Optional
-verification is a separate release. Do not promise a payout hour or a bonus.
+verification uses the separate [verification contract](SUPPLIER_VERIFICATION_API.md),
+including its pending-shop eligibility and payout limits. Do not promise a payout
+hour or a bonus.
 
 ## Save and resume before enrollment
 

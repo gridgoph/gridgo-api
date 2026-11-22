@@ -10,6 +10,7 @@ test('PIN allowlist preserves shop work and manager tools while refusing carrier
     ['POST','/me/account-deletion-request/apple-revocation'],['POST','/auth/clerk/activate'],['POST','/auth/clerk/enroll/supplier'],['POST','/auth/clerk/enroll/rider'],
     ['POST','/auth/staff/redeem'],['GET','/notifications'],['GET','/notifications/stream'],['POST','/devices'],['POST','/web-push/subscribe'],
     ['GET','/me/shop-memberships'],['PATCH','/me/shop-memberships/selected'],['GET','/me'],['PATCH','/me'],['GET','/me/future-personal-route'],
+    ['GET','/me/supplier-verification'],['GET','/ops/supplier-verification'],['GET','/ops/supplier-verification/shop'],
     ['HEAD','/orders/order'],['DELETE','/auth/logout'],
   ])assert.equal(pinWorkerRouteAllowed(method,path,role),false,`${role} ${method} ${path}`);
   for(const [method,path] of [['GET','/me/shop-hours'],['PATCH','/me/shop-hours'],['POST','/me/catalog-items'],['POST','/me/shop-team/invites']]) {

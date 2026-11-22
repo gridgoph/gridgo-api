@@ -639,3 +639,20 @@ test('deadline calendar uses Manila dates and explains a review-delayed impossib
   assert.equal(answer.operatingStatus.scheduledReviewAt, '2026-10-13T00:00:00.000Z');
   assert.equal(answer.earliest, '2026-10-13T03:30:00.000Z');
 });
+
+test('complete pending shops match with a positive verified badge and verified-first same-band ranking',()=>{
+  const store=fixture();store.supplierPayoutAccounts=[];
+  for(const id of ['pending','verified'])addShop(store,{id,lat:7.06,lng:125.60,turnaroundHours:2,priceMinor:id==='pending'?100:10000});
+  store.approvalCases.find(c=>c.userId==='pending').status='pending';
+  store.userRoleMemberships.find(m=>m.userId==='pending').createdAt=AT;
+  store.supplierServices.push({id:'documents',supplierId:'pending',categoryCode:'document_publication',state:'draft'});
+  store.supplierPayoutAccounts.push({supplierId:'pending',qrFileId:'qr'});
+  store.files.push({fileId:'qr',ownerId:'pending',purpose:'supplier_payout_qr',state:'ready'});
+  const input={subcategoryCode:'flyers',ranking:['cost','distance','quality','speed'],dropoff:{lat:7.06,lng:125.60},now:AT};
+  const result=matchShop(store,input);
+  assert.equal(result.shop.supplierId,'verified');assert.equal(result.shop.verified,true);
+  assert.equal(result.matchReason.key,'verified');assert.equal(result.otherListings[0].verified,false);
+  store.approvalCases.find(c=>c.userId==='verified').status='suspended';
+  const pending=matchShop(store,input);assert.equal(pending.shop.supplierId,'pending');assert.equal(pending.shop.verified,false);assert.doesNotMatch(pending.matchReason.label,/verified|vetted/i);
+  assert.throws(()=>matchShop(store,{...input,now:new Date(Date.parse(AT)+30*86400000).toISOString()}),{code:'match_not_found'});
+});

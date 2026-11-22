@@ -119,3 +119,21 @@ test('A3 payment is unavailable before acceptance, blocks production while unpai
   assert.equal(paid.payments.initial.status,'confirmed');
   await assert.rejects(db.query("UPDATE orders SET data=jsonb_set(data,'{expressOrder,paymentTiming}','\"checkout\"') WHERE id=$1",[order.id]),/payment timing is immutable/);
 });
+
+test('destination pause blocks payout preparation and recording without reserving verification capacity',{skip},async t=>{
+  const {db,api}=await setup(t);
+  await db.transaction(async()=>{
+    const store=await loadStore(db);
+    store.supplierPayoutPolicies=[{supplierId:'supplier',pausedUntil:new Date(Date.now()+86400000).toISOString(),updatedAt:new Date().toISOString()}];
+    await saveStore(db,store);
+  });
+  const base='/orders/order/milestones/production_started';
+  for(const action of ['prepare','release']) {
+    const response=await api('ops','POST',`${base}/${action}`,{amountMinor:4000,reference:'PAYOUT'});
+    assert.equal(response.status,409);
+    assert.equal(response.body.error,'supplier_payout_paused');
+  }
+  const store=await loadStore(db);
+  assert.equal(store.orders[0].payoutMilestones[0].status,'pending_pof');
+  assert.equal(store.supplierVerificationLedger.length,0);
+});

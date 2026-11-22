@@ -13,7 +13,7 @@ Staff `/users`, `/claims` and `/escalations` lists support compatible, opt-in
 - Money: integer PHP minor units. Never send formatted peso strings as amounts.
 - Errors: `{ "error": "snake_case", "message": "concrete problem and recovery", ...details }`.
 - Membership roles: `client`, `supplier`, `rider`, `ops_admin`, `super_admin`. Clerk claims and metadata never grant them.
-- Approval cases: `pending | approved | suspended | rejected`. Only `approved` supplier/rider cases can receive work.
+- Approval cases: `pending | approved | suspended | rejected`. Rider cases require `approved`; complete pending shops can receive online work under [supplier verification limits](SUPPLIER_VERIFICATION_API.md).
 - Client `accountType`: `individual | business | organization`. Clerk self-activation creates an `individual` client; Operations can update the profile later.
 
 ### Selecting an actor role
@@ -105,7 +105,7 @@ Staff-only `GET /users?role=supplier` rows additionally include `contactName` fr
 | POST | `/supplier-services` | supplier | create `draft` service |
 | GET/PATCH | `/supplier-services/:id` | owner supplier; ops/super read, limited edit | service detail/edit |
 | POST | `/supplier-services/:id/submit` | owner supplier | request verification |
-| POST | `/supplier-services/:id/verify` | ops/super | make service `live`; owner must be approved |
+| POST | `/supplier-services/:id/verify` | ops/super | make service `live`; owner must have active pending/approved supplier standing |
 | POST | `/supplier-services/:id/suspend` | ops/super | suspend; reason required |
 | POST | `/supplier-services/:id/withdraw` | owner supplier | withdraw from new matching |
 | GET | `/orders/:id/eligible-suppliers` | ops/super | explainable approved/live matches |
@@ -113,7 +113,7 @@ Staff-only `GET /users?role=supplier` rows additionally include `contactName` fr
 | GET | `/orders/:id` | related party/ops/super | role-filtered order detail |
 | POST | `/orders` | client | draft/submit order and return estimate range |
 | POST | `/orders/:id/transition` | edge-specific role | unchanged QA/production edges below |
-| POST | `/orders/:id/decline` | assigned approved supplier | [decline response](#supplier-decline) |
+| POST | `/orders/:id/decline` | assigned active supplier | [decline response](#supplier-decline) |
 | POST | `/orders/:id/payments/:installment/submit` | owning client | submit QR reference and optional uploaded receipt |
 | POST | `/orders/:id/payments/:installment/confirm` | ops/super | manual confirmation |
 | POST | `/orders/:id/payments/:installment/reject` | ops/super | reject submitted reference with client-visible reason |
@@ -145,7 +145,7 @@ Staff-only `GET /users?role=supplier` rows additionally include `contactName` fr
 | GET | `/ops/push/stats` | ops/super | [push reach and delivery](#get-opspushstats) aggregates |
 | POST | `/dispatch/:id/delivery` | assigned rider | file-backed delivery evidence; opens issue window |
 | POST | `/dispatch/:id/proof` | authenticated | retired: always `410 dispatch_proof_route_retired` |
-| GET | `/jobs` | approved supplier | only the caller's assigned supplier jobs |
+| GET | `/jobs` | active supplier | only the caller's assigned supplier jobs |
 
 ## Clerk identity and role provisioning
 
@@ -891,7 +891,7 @@ It is derived from current product and live-service reference prices. No supplie
 
 Order creation validates its inputs before drafting anything: `quantity` must be a positive integer (omitted means `1`) or the request is `400 invalid_quantity`, and `zone` must be an active zone code from `GET /zones` (omitted means `davao_central`) or the request is `400 invalid_zone`. When the reference catalog has not been seeded, creation fails with `409 catalog_not_seeded` instead of estimating from missing data.
 
-The assigned approved supplier issues a versioned final quote:
+The assigned active supplier issues a versioned final quote:
 
 ```http
 POST /orders/:id/transition
@@ -1137,6 +1137,8 @@ A shop is paid across proof-gated stages, every one a share of the shop's own co
 | 2 | `delivered` | Delivered | 35 | `delivery_proof` | the client has the job (`delivered`, `issue_window_open`, `completed`, `payout_released`) with delivery proof. The rider's `POST /dispatch/:id/delivery` evidence is recorded as this proof automatically; the rider may also attach a `fulfilment_proof` to it, and [the same picture is listed once](#payout-proofs) |
 | 3 | `issue_window` | Issue window closed | 25 | `issue_window_closed` | the complaint window has closed (`completed` or `payout_released`) -- the timer ended or the client confirmed the job fine -- with no active claim. It has no file of its own |
 
+**Plan 4, new Express online:** one 100% `delivered` stage, available after delivery or governed Express counter handover. Verification caps, prepare/reserve, recovery offsets and independent holds apply; see [Supplier verification](SUPPLIER_VERIFICATION_API.md). Regular online plan 2 stays 40/35/25. Plan 3 keeps its frozen cash protocol.
+
 **Plan 1, legacy four stages** (every order committed earlier, including every row that predates the column): `printing` 50% (`shop_proof`), `packaging_qc` 15% (`shop_proof`, job packed and ready for a rider), `delivered` 25% (`delivery_proof`, a rider-attached `fulfilment_proof`), `retention` 10% (`issue_window_closed`, inherits the delivered proof). These orders release exactly as before, including the system release of `retention` when the window closes with proof attached.
 
 Amounts round half-up per stage and the last stage takes the remainder, so the stages sum exactly to `supplierPlatformPayoutMinor`. Statuses are `pending_pof | pof_attached | released`.
@@ -1158,7 +1160,7 @@ Every order projection that carries stages carries the plan with it, so a screen
 }
 ```
 
-- `payoutPlanVersion`: `1` (legacy four stages) or `2` (escrow split); `null` until a commitment creates the stages.
+- `payoutPlanVersion`: `1` (legacy four stages), `2` (regular escrow split), `3` (frozen rider-paid cash) or `4` (new Express single delivered stage); `null` until a commitment creates the stages.
 - `label`: the shop-facing name. Render it rather than mapping `code` yourself; a future plan adds codes without a screen change.
 - `releaseRequires`: `shop_proof | delivery_proof | issue_window_closed`, what the release desk is waiting on.
 - `sharePercent` and `amountMinor` are the stored snapshot. On plan 2 the `issue_window` stage stays `pending_pof` until released; it never needs a file.
@@ -1187,6 +1189,8 @@ POST /orders/:id/milestones/:code/release
 ```
 
 `note`, `reference`, and `receiptFileId` are all optional. `reference` is the wallet's own reference number (trimmed, up to 80 characters; `400 invalid_payout_reference` beyond that). `receiptFileId` binds the caller's own ready `payout_receipt` upload (`docs/STORAGE_API.md`) to the share; anything else is `400 invalid_payout_receipt`, and a receipt already bound elsewhere is `409 file_already_attached`. Both are validated before the share moves. The released milestone then carries `reference` and `receiptFileId`, the order lists the file in `payoutReceiptFileIds`, the audit row records both, and the shop's `shop_payout_released` notification quotes the reference. Clients never receive either field.
+
+Prepared transfers require their original `attemptId`; payer ownership, uncertain outcomes, evidence-backed recording under holds and retry/reconciliation errors follow [Supplier verification](SUPPLIER_VERIFICATION_API.md#payout-desk-calls-and-ledger).
 
 Only Operations/Super Admin (`403 forbidden` for everyone else). Stages release in any order their own gates allow; in practice that is plan order. A share that waits on a file and has none is `409 pof_required` (`production_started`, `delivered`; legacy `printing`, `packaging_qc`, `delivered`, `retention`); a share whose stage the order has not reached is `409 milestone_not_reached` (`delivered` before the client has the job is `409 delivery_required`; `issue_window` or `retention` before the window closes is `409 issue_window_open`); a code the order does not carry is `404 milestone_not_found`; insufficient confirmed supplier principal is `409 supplier_principal_not_collected`; an active claim or hold blocks every remaining stage with `409 payout_held`. Every release writes an `ops_payout_released` notification to each Operations and Super Admin membership and a `shop_payout_released` notification to the supplier. `completed -> payout_released` is permitted only after every milestone is released.
 
@@ -1265,9 +1269,9 @@ The transition endpoint accepts only these role edges. A role label means the re
 | `client_correction` | `needs_qa` | ops/super | release a prohibited-item hold with a required note; ordinary QA pass still required |
 | `proof_approval` | `approved_for_matching` | owning client | approve artwork/QA |
 | `proof_approval` | `client_correction` | owning client | request artwork correction |
-| `approved_for_matching` | `supplier_assigned` | ops/super | supplier must be approved and eligible |
+| `approved_for_matching` | `supplier_assigned` | ops/super | supplier must be eligible under the verification policy |
 | `supplier_assigned` | `approved_for_matching` | assigned supplier | decline/rematch |
-| `supplier_assigned` | `awaiting_checkout` | assigned approved supplier | request says `supplier_accepted`; creates the next final quote version |
+| `supplier_assigned` | `awaiting_checkout` | assigned active supplier | request says `supplier_accepted`; creates the next final quote version |
 | `awaiting_checkout` | `awaiting_initial_payment` | owning client | accepts exact quote version and snapshots money/fulfillment |
 | `payment_authorized` | `production` | assigned supplier | after confirmed initial payment and no refund hold; supplier stages still require their explicit release route |
 | `production` | `ready_for_dispatch` | assigned supplier; ops/super correction | production photo required for supplier; offers and notifications go to approved riders; joint pickup QC still required |

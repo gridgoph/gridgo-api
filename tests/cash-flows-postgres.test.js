@@ -595,3 +595,18 @@ test('cash rollout settings require Super Admin, audit and current version; part
   assert.deepEqual(disabled.body.settings.cash,{enabled:false,limitMinor:140000,noShowWaitSeconds:900});
   const store=await loadStore(db);assert.ok(store.auditLog.some(a=>a.reason==='Reviewed rollout'));
 });
+
+test('existing unverified cash orders retain their protocol through a legacy-shaped full upsert and remain outside verification recovery', {skip:!process.env.DATABASE_URL},async()=>{
+  const {recordVerificationRecovery,verificationSummary}=await import('../src/supplier-verification.js');
+  const db=createDatabase(process.env);
+  try {
+    await setup(db);
+    await db.transaction(async()=>{const s=await loadStore(db);s.approvalCases.find(c=>c.userId==='supplier').status='pending';
+      s.orders[0].timeline.push({at:AT,state:'rider_assigned',note:'Existing cash work continues'});
+      await saveStore(db,s);});
+    await fund(db);await payShop(db);
+    await db.transaction(async()=>{const s=await loadStore(db);recordVerificationRecovery(s,s.orders[0],{at:AT,actor:s.users.find(u=>u.id==='ops'),id});
+      assert.equal(verificationSummary(s,'supplier',AT).paidBeforeVerificationMinor,0);assert.equal(verificationSummary(s,'supplier',AT).recoveryDueMinor,0);
+      await saveStore(db,s);});
+  }finally{await db.close();}
+});

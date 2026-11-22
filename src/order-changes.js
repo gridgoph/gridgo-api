@@ -1,10 +1,11 @@
 import { assertSupplierPayoutAllowed } from './supplier-payout-policy.js';
+import { supplierCanWork } from './supplier-verification.js';
 import { parseColourCorrection } from './colour-correction.js';
 import crypto from 'node:crypto';
 import { serviceFeeMoney } from './service-fee.js';
 import { specialInstructions, instructionLines } from './special-instructions.js';
 import { changesFor, changePaymentsFor, changePayoutsFor, changeWindowOpen, publicChange, supplementTotals } from './order-change-policy.js';
-import { privilegedAdminMemberships, queueOrderInvalidate, approvedRole } from './notifications.js';
+import { privilegedAdminMemberships, queueOrderInvalidate } from './notifications.js';
 import { assertRefundWorkAllowed, refundHold, refundSettlementFor } from './refund-policy.js';
 import { rescheduleHold } from './order-reschedule-policy.js';
 import { awaitedTopUp } from './shop-move-pricing.js';
@@ -81,7 +82,7 @@ export async function routeOrderChanges({ req, url, store, user, readBody, now, 
   }
   const order = store.orders.find(o => o.id === match[1]);
   if (!order) fail(404, 'order_not_found');
-  const supplier = user.role === 'supplier' && user.id === order.supplierId && approvedRole(store, user.id, 'supplier');
+  const supplier = user.role === 'supplier' && user.id === order.supplierId && supplierCanWork(store, user.id);
   const client = user.role === 'client' && user.id === order.clientId;
   if (!staff(user) && !supplier && !client) fail(403, 'forbidden');
   const rows = changesFor(store, order);
@@ -183,20 +184,20 @@ export async function routeOrderChanges({ req, url, store, user, readBody, now, 
   store.refundCommands.push({ id: id('rcmd'), actorId: user.id, requestKey: key, route, bodyHash, response: structuredClone(response), createdAt: at });
   return { ...response, mutated: true };
 }
-export function releaseChangePayouts(store, order, code, { user, reference, receipt, amountMinor, at, id, audit }) {
-  const finalCode = order.payoutPlanVersion === 2 ? 'issue_window' : 'retention';
+export function releaseChangePayouts(store, order, code, { user, reference, receipt, amountMinor, at, id, audit, verificationOffset = false }) {
+  const finalCode = order.payoutPlanVersion === 4 ? 'delivered' : order.payoutPlanVersion === 2 ? 'issue_window' : 'retention';
   if (code !== finalCode) return 0;
   const payments = changePaymentsFor(store, order).filter(p => !changePayoutsFor(store, order).some(r => r.changeId === p.changeId));
   if (!payments.length) return 0;
   assertSupplierPayoutAllowed(store,order.supplierId,at);
-  if (!reference || !receipt) fail(400, 'supplement_payout_receipt_required');
+  if ((!reference || !receipt) && !verificationOffset) fail(400, 'supplement_payout_receipt_required');
   const expected = order.payoutMilestones.find(stage => stage.code === code).amountMinor + payments.reduce((sum, p) => sum + p.principalMinor, 0);
   if (amountMinor !== expected) fail(409, 'supplement_payout_amount_mismatch');
   let total = 0;
   for (const payment of payments) {
     const request = changesFor(store, order).find(r => r.id === payment.changeId);
     const row = { id: id('chgpayout'), orderId: order.id, changeId: request.id, supplierId: request.supplierId,
-      amountMinor: payment.principalMinor, reference, receiptFileId: receipt.fileId, releasedBy: user.id, createdAt: at };
+      amountMinor: payment.principalMinor, reference:verificationOffset?`verification-offset:${request.id}`:reference, receiptFileId: receipt?.fileId||null, releasedBy: user.id, createdAt: at };
     (store.orderChangePayouts ||= []).push(row); total += row.amountMinor;
     audit(store, { actor: user, action: 'order.change_payout_released', entityType: 'order', entityId: order.id, orderId: order.id, detail: row });
   }
