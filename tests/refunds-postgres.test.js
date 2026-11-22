@@ -11,6 +11,8 @@ import { createDatabase } from '../src/database.js';
 import { emptyStore, loadStore, saveStore } from '../src/postgres-store.js';
 import { createFileRetention } from '../src/file-retention.js';
 import { routeRefunds } from '../src/refunds.js';
+import {prepareVerificationPayout,cancelVerificationReservation,markVerificationTransferUnknown} from '../src/supplier-verification.js';
+import {recordPreparedSupplierTransfer} from '../src/supplier-transfer-reconciliation.js';
 import { calculateRefundSettlement, collectedRefundComponents, assertRefundWorkAllowed } from '../src/refund-policy.js';
 import { createPayoutMilestones, defaultOperationalSettings, publicOrderFor, expireIssueWindows, confirmIssueWindow, releaseMilestone } from '../src/operational-model.js';
 import { authorizeFileRead, authorizeFileUpload, markFileDeletePending } from '../src/attachments.js';
@@ -21,6 +23,38 @@ const AT = '2026-09-28T00:00:00.000Z';
 const POINT = { lat: 7.06, lng: 125.6, label: 'Davao' };
 const id = (prefix) => `${prefix}_${crypto.randomUUID()}`;
 const roles = { client: 'client', other: 'client', supplier: 'supplier', rider: 'rider', ops: 'ops_admin', ops2: 'ops_admin', super: 'super_admin' };
+
+test('settlement supersession waits for every kind of unresolved supplier transfer, including uncertain outcomes',{skip:!DATABASE_URL},async t=>{
+  const db=createDatabase(process.env);t.after(()=>db.close());
+  for(const payoutKey of ['stage:order:production_started','change:order:prepared','settlement:prepared']) {
+    await fixture(db,{state:'production',principal:10000,fee:1000,delivery:1000});
+    let prepared;
+    await db.transaction(async()=>{const s=await loadStore(db);s.approvalCases.find(c=>c.kind==='supplier').status='pending';s.settings.supplierVerification.payoutCapMinor=5000;
+      prepared=prepareVerificationPayout(s,s.orders[0],{key:payoutKey,amountMinor:4000,actor:actor(s,'ops'),at:AT,id});
+      markVerificationTransferUnknown(s,s.orders[0],payoutKey,{actor:actor(s,'ops'),at:AT,id,attemptId:prepared.attemptId,reason:'Outcome uncertain'});await saveStore(db,s);});
+    const refund=await review(db,await request(db));
+    await assert.rejects(settle(db,refund,{shop:2000,total:9800}),e=>e.code==='supplier_transfer_reconciliation_required');
+    const blocked=await loadStore(db);assert.equal(blocked.refundSettlements.length,0);assert.notEqual(blocked.orders[0].payoutMilestones[0].status,'superseded');
+    await db.transaction(async()=>{const s=await loadStore(db);cancelVerificationReservation(s,s.orders[0],payoutKey,{actor:actor(s,'ops'),at:AT,id,attemptId:prepared.attemptId,reason:'Confirmed not sent'});await saveStore(db,s);});
+    const settled=await settle(db,refund,{shop:2000,total:9800});assert.equal(settled.settlement.shopEntitlementMinor,2000);
+  }
+});
+
+test('settlement payout preparation has one payer and records an uncertain original attempt without resending',{skip:!DATABASE_URL},async t=>{
+  const db=createDatabase(process.env);t.after(()=>db.close());await fixture(db,{state:'production'});
+  const refund=await settle(db,await review(db,await request(db)),{shop:20000,total:93000});
+  const path=`/refund-requests/${refund.id}/supplier-payout`,body={expectedVersion:refund.version,reason:'Prepared shop transfer'};
+  const first=(await call(db,'ops','POST',`${path}-prepare`,body)).body.payout;
+  await assert.rejects(call(db,'ops2','POST',`${path}-prepare`,body),e=>e.code==='verification_payer_required');
+  await assert.rejects(call(db,'super','POST',`${path}-prepare`,body),e=>e.code==='verification_payer_required');
+  const s=await loadStore(db),payout=s.refundSupplierPayouts[0];
+  await db.transaction(async()=>{const s=await loadStore(db);markVerificationTransferUnknown(s,s.orders[0],`settlement:${payout.id}`,{actor:actor(s,'ops'),at:AT,id,attemptId:first.attemptId,reason:'Check original transfer'});await saveStore(db,s);});
+  await assert.rejects(call(db,'ops','POST',`${path}-prepare`,body),e=>e.code==='verification_transfer_unknown');
+  await assert.rejects(call(db,'ops','POST',path,{...body,amountMinor:20000}),e=>e.code==='verification_payout_attempt_required');
+  await assert.rejects(call(db,'ops','POST',path,{...body,attemptId:first.attemptId,amountMinor:20000,payoutAccountVersion:1,destinationVerified:true,reference:'SHOP-TRANSFER-A',receiptFileId:'shop_receipt'}),e=>e.code==='verification_transfer_unknown');
+  await db.transaction(async()=>{const s=await loadStore(db);const result=recordPreparedSupplierTransfer(s,s.orders[0],{payoutKey:`settlement:${payout.id}`,attemptId:first.attemptId,amountMinor:20000,reference:'SHOP-TRANSFER-A',receipt:s.files.find(f=>f.fileId==='shop_receipt'),actor:actor(s,'ops'),at:AT,paidAt:AT,id,fundsSentConfirmed:true,reason:'Original transfer confirmed'});assert.equal(result.replayed,false);await saveStore(db,s);});
+  await assert.rejects(call(db,'ops','POST',path,{...body,attemptId:first.attemptId,amountMinor:20000,reference:'SHOP-TRANSFER-B'}),e=>e.code==='refund_supplier_payout_not_pending');
+});
 const actor = (store, key) => {
   const user = store.users.find((row) => row.id === key);
   return selectActorRole(store, { ...user, context: resolveAuthorizationContext(store, user) }, user.role);
@@ -887,4 +921,23 @@ test('live issue window boundary and old report shape retain their existing beha
   });
   const refused = await api('client', 'POST', '/orders/order/issues', { problemType: 'damage', description: 'Late report', photoFileIds: ['evidence'] });
   assert.equal(refused.status, 409); assert.equal(refused.body.error, 'issue_window_closed');
+});
+
+test('verification recovery can settle a zero-net shop remainder without inventing transfer evidence', {skip:!DATABASE_URL},async t=>{
+  const {recordVerificationRecovery}=await import('../src/supplier-verification.js');
+  const db=createDatabase({DATABASE_URL});t.after(()=>db.close());
+  await fixture(db,{state:'production',releases:1});
+  await db.transaction(async()=>{const s=await loadStore(db);s.approvalCases.find(c=>c.userId==='supplier').status='pending';
+    recordVerificationRecovery(s,s.orders[0],{at:AT,actor:s.users.find(u=>u.id==='ops'),id});await saveStore(db,s);});
+  const refund=await settle(db,await review(db,await request(db)),{shop:60000,total:49000});
+  const prepared=await call(db,'ops','POST',`/refund-requests/${refund.id}/supplier-payout-prepare`,{expectedVersion:refund.version,reason:'Prepare recovery offset'});
+  assert.equal(prepared.body.payout.netAmountMinor,0);
+  await call(db,'ops','POST',`/refund-requests/${refund.id}/supplier-payout`,{expectedVersion:refund.version,reason:'Apply recovery offset',attemptId:prepared.body.payout.attemptId,amountMinor:0});
+  const s=await loadStore(db),p=s.refundSupplierPayouts[0];assert.equal(p.status,'released');assert.equal(p.receiptFileId,null);
+  assert.match(p.reference,/^verification-offset:/);
+  assert.equal(s.supplierVerificationLedger.find(e=>e.payoutKey===`settlement:${p.id}`&&e.kind==='released').data.netAmountMinor,0);
+  // A legacy column-shaped proposed INSERT remains valid before conflict handling.
+  await db.query(`INSERT INTO refund_supplier_payouts(id,settlement_id,order_id,supplier_id,amount_minor,status,reference,receipt_file_id,released_at,released_by,created_at)
+    SELECT id,settlement_id,order_id,supplier_id,amount_minor,status,reference,receipt_file_id,released_at,released_by,created_at
+    FROM refund_supplier_payouts WHERE id=$1 ON CONFLICT(id) DO NOTHING`,[p.id]);
 });

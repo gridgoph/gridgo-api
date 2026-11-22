@@ -140,16 +140,23 @@ test('supplement paid with final stage requires exact combined transfer receipt 
     await saveStore(db, store);
   });
   const path = '/orders/order/milestones/issue_window/release';
-  assert.equal((await api('ops', 'POST', path, { reference: 'FINAL', receiptFileId: 'payout', amountMinor: 2500 })).body.error, 'supplement_payout_amount_mismatch');
+  const prepared=await api('ops','POST',path.replace('/release','/prepare'),{});
+  assert.equal(prepared.status,200,JSON.stringify(prepared.body));
+  assert.equal(prepared.body.payout.items.length,2);
+  assert.equal(new Set(prepared.body.payout.items.map(p=>p.attemptId)).size,1);
+  const attemptId=prepared.body.payout.attemptId;
+  assert.equal((await api('admin','POST',path.replace('/release','/prepare'),{})).body.error,'verification_payer_required');
+  assert.equal((await api('ops', 'POST', path, { attemptId,reference: 'FINAL', receiptFileId: 'payout', amountMinor: 2500 })).body.error, 'supplement_payout_amount_mismatch');
   assert.notEqual((await loadStore(db)).orders[0].payoutMilestones.at(-1).status, 'released');
-  const released = await api('ops', 'POST', path, { reference: 'FINAL', receiptFileId: 'payout', amountMinor: 3500 });
+  const released = await api('ops', 'POST', path, { attemptId,reference: 'FINAL', receiptFileId: 'payout', amountMinor: 3500 });
   assert.equal(released.status, 200, JSON.stringify(released.body));
   const after = await loadStore(db);
   assert.equal(after.orderChangePayouts[0].amountMinor, 1000);
   assert.equal(after.orders[0].payoutMilestones.at(-1).amountMinor, 2500);
   assert.equal(released.body.order.supplierSettlement.totalSupplierEarningsMinor, 11000);
   assert.equal(released.body.order.supplierSettlement.supplierReleasedMinor, 3500);
-  await api('ops', 'POST', path, {});
+  assert.equal((await api('ops', 'POST', path, {attemptId,reference:'FINAL'})).body.replayed,true);
+  assert.equal((await api('admin','POST',path,{attemptId,reference:'DIFFERENT'})).body.error,'verification_transfer_reconciliation_required');
   assert.equal((await loadStore(db)).orderChangePayouts.length, 1);
   await assert.rejects(db.query('DELETE FROM order_change_payments'));
   await assert.rejects(db.query('DELETE FROM order_change_payouts'));
@@ -165,6 +172,27 @@ test('refund includes verified supplemental principal and fee while original sna
   assert.equal(preview.body.amounts.feeMinor, 1100);
   assert.equal(preview.body.amounts.totalMinor, 13100);
   assert.equal((await loadStore(db)).orders[0].totalMinor, 12000);
+});
+
+test('an already-sent final-stage and supplement attempt reconciles together under a refund hold',{skip:!DATABASE_URL},async t=>{
+  const {api,db}=await setup(t);await paidChange(api);
+  await db.transaction(async()=>{const s=await loadStore(db);s.orders[0].state='completed';
+    s.files.push({fileId:'bundle-receipt',ownerId:'ops',purpose:'payout_receipt',state:'ready',objectKey:'private/bundle-receipt',originalFilename:'receipt.png',declaredContentType:'image/png',detectedContentType:'image/png',size:100,createdAt:AT});await saveStore(db,s);});
+  let prepared=await api('ops','POST','/orders/order/milestones/issue_window/prepare',{});assert.equal(prepared.status,200,JSON.stringify(prepared.body));
+  assert.equal(prepared.body.payout.items.length,2);
+  const retired=prepared.body.payout.attemptId;
+  assert.equal((await api('ops','POST','/orders/order/payout-reservations/cancel',{payoutKey:'stage:order:issue_window',attemptId:retired,noFundsSentConfirmed:true,reason:'Original transfer was not sent'})).status,200);
+  prepared=await api('ops','POST','/orders/order/milestones/issue_window/prepare',{});assert.equal(prepared.status,200,JSON.stringify(prepared.body));
+  assert.notEqual(prepared.body.payout.attemptId,retired);
+  assert.equal((await api('ops','POST','/orders/order/milestones/issue_window/release',{attemptId:retired,amountMinor:3500})).body.error,'verification_payout_attempt_required');
+  assert.equal((await api('ops','POST','/orders/order/payout-reservations/reconcile',{payoutKey:'stage:order:issue_window',attemptId:prepared.body.payout.attemptId,outcome:'unknown',reason:'Check the original bundled transfer'})).status,200);
+  assert.equal((await api('ops','POST','/orders/order/milestones/issue_window/prepare',{})).body.error,'verification_transfer_unknown');
+  const refund=await api('admin','POST','/orders/order/refund-requests',{kind:'cancellation',reason:'Review the final settlement'});assert.equal(refund.status,201,JSON.stringify(refund.body));
+  const body={payoutKey:'stage:order:issue_window',attemptId:prepared.body.payout.attemptId,outcome:'paid',fundsSentConfirmed:true,paidAt:new Date().toISOString(),amountMinor:3500,reference:'BUNDLE-TRANSFER',receiptFileId:'bundle-receipt',reason:'Original bundled transfer was already sent'};
+  const recorded=await api('ops','POST','/orders/order/payout-reservations/reconcile',body);assert.equal(recorded.status,200,JSON.stringify(recorded.body));
+  assert.equal((await api('ops','POST','/orders/order/payout-reservations/reconcile',body)).body.replayed,true);
+  const s=await loadStore(db);assert.equal(s.orderChangePayouts.length,1);assert.equal(s.orderChangePayouts[0].amountMinor,1000);
+  assert.equal(s.orders[0].payoutMilestones.at(-1).status,'released');assert.equal(s.supplierVerificationLedger.filter(l=>l.kind==='released').length,2);
 });
 test('frozen bracket increment excludes new discounts and refuses invalid amounts and late requests', { skip: !DATABASE_URL }, async t => {
   const { api, db } = await setup(t, 'production', store => {

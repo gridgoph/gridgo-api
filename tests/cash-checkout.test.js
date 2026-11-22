@@ -38,3 +38,11 @@ test('whole-cart cash limit and debts fail closed; online checkout keeps its cur
       { code: { disabled: 'cash_disabled', limit: 'cash_limit_exceeded', debt: 'cash_client_barred' }[mode] });
   }
 });
+
+test('pending shops cannot enter new cash checkout even with cash enabled',async()=>{
+  const store=checkoutFixture();store.vouchers=[];store.settings.cash.enabled=true;
+  // Create the draft under the verified listing, then recheck current identity at checkout.
+  const {call,path}=await makeCart(store);
+  store.approvalCases.find(c=>c.userId==='supplier').status='pending';
+  await assert.rejects(call('POST',`${path}/checkout`,{payment:{method:'cash'}}),{code:'cash_supplier_verification_required'});
+});

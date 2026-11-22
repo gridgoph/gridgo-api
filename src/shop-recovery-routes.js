@@ -1,8 +1,8 @@
+import { supplierCanWork } from "./supplier-verification.js";
 import { actorUserId } from './shop-team.js';
 import { rescheduleHold } from './order-reschedule-policy.js';
 import { supplierArtworkReleased } from './artwork-gates.js';
 import { publicRecovery } from './shop-recovery-projection.js';
-import { approvedRole } from './notifications.js';
 import { recordShopFailure, recoveryHeld, paidShopShare, findReplacementShop, rankedReplacements, startShopAcceptance, notifyRecovery, CANCELLABLE_SHOP_STATES } from './shop-recovery.js';
 import { routeRefunds, changeDestination } from './refunds.js';
 import { refundHold, refundSettlementFor, sumMinor, collectedRefundComponents, productionStarted, ACTIVE_REFUND_STATUSES } from './refund-policy.js';
@@ -89,7 +89,7 @@ export async function routeShopRecovery({ req, url, store, user, readBody, now, 
   const order = store.orders.find((row) => row.id === match[1]);
   if (!order) fail(404, 'order_not_found');
   const ownClient = user.role === 'client' && order.clientId === user.id;
-  const ownSupplier = user.role === 'supplier' && order.supplierId === user.id && approvedRole(store, user.id, 'supplier') && supplierArtworkReleased(order);
+  const ownSupplier = user.role === 'supplier' && order.supplierId === user.id && supplierCanWork(store,user.id) && supplierArtworkReleased(order);
   if (!ops && !ownClient && !ownSupplier) fail(403, 'forbidden');
   if (req.method === 'GET' && match[2] === 'shop-recovery' && !match[3]) {
     return { status: 200, body: { recovery: publicRecovery(order, user) } };

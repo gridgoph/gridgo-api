@@ -10,6 +10,10 @@ import { listingExpress } from "./express.js";
 
 // Stable codes and actions are the app contract; messages are display-ready.
 const STEPS = {
+  document_service: ["Add your document printing service.", "edit_services"],
+  payout_qr: ["Add your receiving QR.", "edit_payment_terms"],
+  verification_deadline: ["Complete verification to receive new orders.", "view_approval"],
+  verification_recovery: ["A recovery balance pauses new orders. Open Money or contact Operations.", "contact_operations"],
   account_inactive: ["Your account is not active.", "contact_operations"],
   supplier_profile: ["Complete your shop profile.", "edit_profile"],
   shop_name: ["Add your shop name.", "edit_profile"],

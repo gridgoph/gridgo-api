@@ -1,3 +1,4 @@
+import { verificationSettings, validateVerificationSettings, prepareVerificationPayout, completeVerificationPayout } from "./supplier-verification.js";
 import { publicShopFileAccesses } from './shop-file-access.js';
 import { expressRates, validateExpressRates, publicExpress, expressClientProjection } from './express-orders.js';
 import { validateCashSettings, cashAmounts } from './cash-policy.js';
@@ -270,6 +271,7 @@ export function defaultProductionNudge() {
 
 export function defaultOperationalSettings() {
   return {
+    supplierVerification: verificationSettings(),
     riderPacksMinimumBuilds: riderPacksMinimumBuilds(),
     foundingTesterLaunchAt: null,
     testerMonthlyBudgetMinor: null,
@@ -335,6 +337,7 @@ export function defaultOperationalSettings() {
 }
 
 export function validateOperationalSettings(settings) {
+  validateVerificationSettings(settings);
   validateExpressRates(Object.hasOwn(settings || {}, 'expressRates') ? settings.expressRates : expressRates());
   validateCashSettings(settings);
   if (settings.riderOfferTimeoutSeconds !== undefined && (!Number.isInteger(settings.riderOfferTimeoutSeconds)
@@ -832,9 +835,9 @@ export function createPayoutMilestones(money, { version = CURRENT_PAYOUT_PLAN_VE
  * do not match the version stored beside them.
  */
 export function snapshotPayoutPlan(order, money = order) {
-  order.payoutPlanVersion = CURRENT_PAYOUT_PLAN_VERSION;
+  order.payoutPlanVersion = order.orderType === "express" ? 4 : CURRENT_PAYOUT_PLAN_VERSION;
   order.shopHandoverVersion = 2;
-  order.payoutMilestones = createPayoutMilestones(money, { version: CURRENT_PAYOUT_PLAN_VERSION });
+  order.payoutMilestones = createPayoutMilestones(money, { version: order.payoutPlanVersion });
   return order.payoutMilestones;
 }
 
@@ -1089,6 +1092,11 @@ export function releaseMilestone(order, code, actor, at, store = null) {
     );
   }
 
+  if(actor.role==='system' && store) {
+    const prepared=prepareVerificationPayout(store,order,{key:`stage:${order.id}:${code}`,amountMinor:milestone.amountMinor,at,actor,recording:true});
+    if(prepared.status==='held')return milestone;
+    completeVerificationPayout(store,order,prepared,{at,actor});
+  }
   milestone.status = "released";
   milestone.releasedAt = at;
   milestone.releasedBy = actor.id || "system";
@@ -1870,7 +1878,7 @@ function closeIssueWindow(store, order, at, { by, note }) {
       at,
       state: "completed",
       by: "system",
-      note: "Client retention milestone released",
+      note: retention.status==='released'?"Client retention milestone released":"Retention is waiting for shop verification",
     });
   }
 }
