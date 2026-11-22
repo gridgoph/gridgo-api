@@ -378,6 +378,9 @@ test('cheaper substitute: shop paid its own price, exact difference reserved in 
   assert.equal(activePayoutHold(store, order), false);
   assert.equal(store.refundPayments?.length || 0, 0, 'no transfer is claimed');
   assert.equal(moneyReportingForOrder(order, store).supplierSettlement.totalSupplierEarningsMinor, 8000);
+  const {syncShopMoney,shopMoneyBalances}=await import('../src/shop-money.js');
+  syncShopMoney(store,{at:AT,id});
+  assert.equal(shopMoneyBalances(store,'replacement',AT).owedMinor,8000,'the cheaper-shop credit preserves its agreed unpaid principal');
   const [move] = order.shopMoves;
   assert.deepEqual([move.fault, move.choice, move.refundRequestId, move.refundStatus], ['shop', 'replacement', request.id, 'reserved']);
   assert.ok(store.auditLog.some((row) => row.action === 'order.shop_move_applied'));

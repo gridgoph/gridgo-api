@@ -1,6 +1,7 @@
 import { verificationLedgerTable, verificationLedgerRows, loadVerificationLedgerRows } from "./supplier-verification-store.js";
 import {shopMoneyTables,shopMoneyRows,loadShopMoneyRows} from './shop-money-store.js';
 import {clientPaymentSnapshot} from './shop-payment-method.js';
+import {shopMoneyDeadlineSql} from './shop-money-policy.js';
 import { fileAccessTable, fileAccessRows, loadFileAccessRows } from './shop-file-access.js';
 import { shopTeamTables, emptyShopTeam, shopTeamRows, loadShopTeamRows, ensureShopOwners } from './shop-team-store.js';
 import { STAFF_LIST_PAGE, readStaffPage, staffPageRequested, staffListPlan, parseStaffPage, encodeStaffCursor } from './staff-list-pages.js';
@@ -937,7 +938,8 @@ function readGraph(database) {
   async function read(name, where, values = [], options = {}) {
     const table = TABLES.find(table => table.name === name);
     if (!table) throw new Error(`Unknown read graph table: ${name}`);
-    loaded[name] = (await database.query(orderReadQuery(table, where, options), values)).rows;
+    const projection=name==='supplier_profiles'?{...options,select:[...(options.select||table.columns),`(${shopMoneyDeadlineSql}) AS shop_money_deadline_at`]}:options;
+    loaded[name] = (await database.query(orderReadQuery(table, where, projection), values)).rows;
   }
   function finish(options = {}) {
     const store = storeFromRows(loaded, { ...options, writable: false });
@@ -953,7 +955,6 @@ async function readIdentity(graph, userIds) {
   await graph.read('user_role_memberships', 'WHERE user_id = ANY($1::text[])', [userIds]);
   await graph.read('approval_cases', 'WHERE user_id = ANY($1::text[])', [userIds]);
   const pendingSuppliers=graph.loaded.approval_cases.filter(row=>row.kind==='supplier'&&row.status==='pending').map(row=>row.user_id);
-  await graph.read('shop_money_events', 'WHERE supplier_id = ANY($1::text[])', [userIds]);
   if(pendingSuppliers.length)await graph.read('supplier_verification_ledger', 'WHERE supplier_id = ANY($1::text[])', [pendingSuppliers]);
 }
 
@@ -2318,6 +2319,8 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
   loadShopTeamRows(store, loaded);
   loadVerificationLedgerRows(store, loaded);
   loadShopMoneyRows(store, loaded);
+  Object.defineProperty(store,'shopMoneyDeadlines',{value:new Map(loaded.supplier_profiles.filter(row=>Object.hasOwn(row,'shop_money_deadline_at'))
+    .map(row=>[row.user_id,row.shop_money_deadline_at])),enumerable:false});
   store.shopFileAccesses = loadFileAccessRows(loaded.shop_file_accesses);
   loadStaffRows(store, loaded);
   loadVoucherRows(store, loaded);

@@ -19,7 +19,7 @@ export function recordPreparedSupplierTransfer(store,order,ctx) {
   if(!reference||!receipt||ctx.fundsSentConfirmed!==true)fail('verification_actual_transfer_evidence_required');
   if(typeof ctx.paidAt!=='string'||!/^\d{4}-\d\d-\d\dT.*(?:Z|[+-]\d\d:\d\d)$/.test(ctx.paidAt)||!Number.isFinite(Date.parse(ctx.paidAt))||Date.parse(ctx.paidAt)>Date.parse(at))fail('invalid_supplier_transfer_paid_at');
   const entries=active.filter(e=>e.data.attemptId===entry.data.attemptId);
-  const prepared=entries.map(e=>prepareVerificationPayout(store,order,{key:e.payoutKey,amountMinor:e.amountMinor,at,actor,id,attemptId,recording:true,reconciling:true}));
+  const prepared=entries.map(e=>prepareVerificationPayout(store,order,{key:e.payoutKey,amountMinor:e.amountMinor,at,actor,id,attemptId,recording:true,reconciling:true,dailyTransferId:ctx.dailyTransferId}));
   const total=prepared.reduce((n,p)=>n+BigInt(p.netAmountMinor),0n);
   if(total<=0n||total!==BigInt(Number.isSafeInteger(amountMinor)?amountMinor:-1))fail('verification_net_payout_amount_required');
   const updates=[];

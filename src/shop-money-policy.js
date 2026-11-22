@@ -3,6 +3,14 @@ export const payRequestClosed=(store,id)=>(store.shopMoneyEvents||[]).some(e=>['
 export const activeShopTransferForKey=(store,key)=>(store.shopMoneyEvents||[]).find(e=>e.kind==='transfer_reserved'&&e.data.items.some(i=>i.key===key)
   &&!(store.shopMoneyEvents||[]).some(x=>['transfer_paid','transfer_cancelled'].includes(x.kind)&&x.data.transferId===e.id));
 export function shopMoneyPaused(store,supplierId,at=new Date().toISOString()) {
-  if(!shopMoneyPolicy(store,supplierId).counterCashEnabled)return false;
+  if(store.shopMoneyDeadlines?.has(supplierId)) {
+    const deadline=store.shopMoneyDeadlines.get(supplierId);
+    return Boolean(deadline&&Date.parse(deadline)<=Date.parse(at));
+  }
   return (store.shopMoneyEvents||[]).some(e=>e.kind==='pay_request'&&e.supplierId===supplierId&&e.data.amountMinor>0&&e.data.deadlineAt<=at&&!payRequestClosed(store,e.id));
 }
+/** Bounded facts join the existing profile query instead of every identity read. */
+export const shopMoneyDeadlineSql=`SELECT min((r.data->>'deadlineAt')::timestamptz) FROM shop_money_events r
+  WHERE r.kind='pay_request' AND r.supplier_id=supplier_profiles.user_id AND (r.data->>'amountMinor')::bigint>0
+  AND NOT EXISTS(SELECT 1 FROM shop_money_events c WHERE c.supplier_id=r.supplier_id
+    AND c.kind IN ('pay_confirmed','pay_offset') AND c.data->>'requestId'=r.id)`;

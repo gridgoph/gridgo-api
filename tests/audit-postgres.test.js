@@ -57,7 +57,9 @@ test('audit HTTP search, bounded paging, date filters, CSV, permissions and orde
       reason: '=SUM(1,2)\nsecond line', detail: { password: 'never-save', nested: { accessToken: 'never-save', count: 3 }, document: { content: 'never-save' } } }, { id: () => id, at });
   });
   const api = await apiForTest(t);
-  const list = async query => { const result = await api('admin', 'GET', `/audit${query}`); assert.equal(result.status, 200, JSON.stringify(result.body)); return result.body; };
+  // Scope the pagination/CSV fixture to its author; independent background
+  // financial initialization is also audited and must remain in the full log.
+  const list = async query => { const result = await api('admin', 'GET', `/audit${query}${query?'&':'?'}actorId=admin`); assert.equal(result.status, 200, JSON.stringify(result.body)); return result.body; };
   assert.deepEqual((await list('?limit=2')).audit.map(r => r.id), ['c', 'b']);
   assert.equal((await list('?limit=2')).nextOffset, 2);
   assert.deepEqual((await list('?limit=2&offset=2')).audit.map(r => r.id), ['a']);
@@ -68,7 +70,7 @@ test('audit HTTP search, bounded paging, date filters, CSV, permissions and orde
   for (const query of ['?limit=-1', '?limit=NaN', '?limit=0', '?limit=501', '?offset=1.5', '?from=2026-02-30', '?from=bad', '?from=2026-10-03&to=2026-10-01', '?format=html']) {
     assert.equal((await api('admin', 'GET', `/audit${query}`)).status, 400, query);
   }
-  const csv = await api('admin', 'GET', '/audit?format=csv&limit=2', null, { raw: true });
+  const csv = await api('admin', 'GET', '/audit?format=csv&limit=2&actorId=admin', null, { raw: true });
   assert.equal(csv.status, 200); assert.match(csv.headers.get('content-type'), /^text\/csv/);
   assert.equal(csv.headers.get('x-next-offset'), '2');
   assert.match(csv.body, /"'=Admin, ""One"""/); assert.match(csv.body, /"'=SUM\(1,2\)\nsecond line"/);
@@ -82,7 +84,9 @@ test('audit HTTP search, bounded paging, date filters, CSV, permissions and orde
   const scoped = await api('ops', 'GET', '/orders/order/audit');
   assert.deepEqual(scoped.body.audit.map(r => r.id), ['b']);
   assert.equal((await api('ops', 'GET', '/orders/order/audit?action=settings.operational_update')).body.audit.length, 0);
-  assert.equal((await api('admin', 'GET', '/orders/order/audit')).body.audit.length, 2);
+  assert.equal((await api('admin', 'GET', '/orders/order/audit?actorId=admin')).body.audit.length, 2);
+  const completeOrderAudit=(await api('admin','GET','/orders/order/audit')).body.audit;
+  assert.ok(completeOrderAudit.some(row=>row.action==='shop_money.entitlement'),'unrestricted order audit retains financial backfill evidence');
   assert.equal((await api('admin', 'GET', '/orders/order/audit?orderId=another')).status, 400);
   assert.equal((await api('admin', 'GET', '/orders/missing/audit')).status, 404);
   for (const method of ['PATCH', 'DELETE']) assert.equal((await api('admin', method, '/audit/a', {})).status, 404);

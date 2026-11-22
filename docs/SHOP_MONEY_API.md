@@ -44,6 +44,8 @@ Times are Manila `HH:mm`; cutoff < reminder < deadline. Weekdays use Sunday=0. C
 
 Gross entitlements and actual payouts are distinct journal events. Work not yet eligible for release remains in the owed balance and does not enter the actionable daily transfer amount. Recovery is deducted before the minimum is applied. A zero-cash full recovery offset may settle without an external transfer or invented receipt. Independent holds never become a new permission to send money.
 
+Delivery-only and cheaper-shop adjustment credits preserve unpaid shop principal. A `fulfilled_with_refund` settlement replaces the original unpaid stages with the agreed remainder; the retained accepted-job bonus becomes payable after that remainder is paid or included in the same daily transfer, subject to independent holds. Financial writes synchronize the journal; lifecycle backfill initializes historical entries separately from unrelated request maintenance.
+
 ## Dashboard
 
 All routes below are Operations/Super Admin, except the per-shop rollout switch, which is Super Admin only.
@@ -56,6 +58,8 @@ All routes below are Operations/Super Admin, except the per-shop rollout switch,
 
 Existing individual `/orders/:id/milestones/:code/prepare`, `/release`, reservation reconciliation and refund supplier-payout routes remain compatible. Do not use them to send a second transfer for a batch's reserved items. Unknown attempts retain the same evidence/reconciliation contract as [supplier verification](SUPPLIER_VERIFICATION_API.md).
 
+Batch preparation uses a batch-only payer identity in the canonical reservations, so a historical API cannot return an independent ready instruction for a constituent item. Database guards also prevent a historical privileged writer from partially recording or cancelling that batch. The updated daily desk authorizes its complete recording/cancellation within the existing transaction; normal unclaimed legacy payouts remain compatible.
+
 ## Pay GRIDGO and future counter cash
 
 Counter cash remains off for every shop by default. `PATCH /ops/shop-money/shops/:supplierId/policy` takes `expectedVersion` (initially 0), `counterCashEnabled`, and `reason`. Enabling requires a verified supplier and the platform receiving QR to be configured. This preserves the existing new-cash verification boundary. This switch prepares financial collection and new-order holds; it does not add a client checkout option or change Express's existing all-online payment policy.
@@ -65,6 +69,8 @@ For a future checkout that has already snapshotted `counter_cash`, staff may `PO
 At a business cutoff a negative shop net creates one Pay GRIDGO request. The 16:00 settlement notice and 17:00 unpaid reminder use the existing durable inbox/outbox, with copies to every current Operations and Super Admin membership. Reminders and overdue events are durable and deduplicated across retries/restarts.
 
 At the snapshotted 18:00 deadline, shared matching/checkout eligibility pauses new orders while the request is unpaid. Accepted work can finish. The team checks the actual incoming bank receipt then calls `POST /ops/shop-money/payments/:requestId/confirm` with the current exact `amountMinor`, actual bank `reference`, and `reason`. Confirmation reduces recovery debt, audits and notifies, and immediately lifts this new-order hold. Exact retries do nothing twice. An overlapping prepared recovery must be reconciled first to avoid collecting the same debt twice. Full payout recovery also closes the request. Other standing/verification/claim holds remain independent.
+
+Disabling future counter cash preserves every issued request's original deadline and overdue hold. Confirmation or full recovery clears that hold even while counter cash is disabled; re-enabling the switch never restarts the deadline.
 
 There is no payment gateway account, credential or webhook integration in this change. Pay GRIDGO is manually confirmed until that integration is available. Supplier app, rider app and dashboard screens remain separate releases.
 

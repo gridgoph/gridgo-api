@@ -4855,7 +4855,9 @@ test("Operations audit reads are limited to workspace actions or one file", { sk
   const unrestricted = await request(instance.api, "/audit", { subject: "clerk_super" });
   assert.equal(unrestricted.status, 200);
   assert.deepEqual(unrestricted.body.audit.filter(row => rows.some(fixture => fixture.id === row.id)).map(row => row.id).sort(), rows.map(row => row.id).sort());
-  const lifecycle = unrestricted.body.audit.filter(row => !rows.some(fixture => fixture.id === row.id));
+  const bookkeeping = unrestricted.body.audit.filter(row => row.action.startsWith('shop_money.'));
+  assert.ok(bookkeeping.every(row=>row.actorRole==='system'));
+  const lifecycle = unrestricted.body.audit.filter(row => !rows.some(fixture => fixture.id === row.id)&&!row.action.startsWith('shop_money.'));
   assert.equal(lifecycle.length, 1);
   assert.equal(lifecycle[0].action, 'order.transition');
   assert.equal(lifecycle[0].actorRole, 'system');

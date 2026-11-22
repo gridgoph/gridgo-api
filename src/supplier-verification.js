@@ -118,7 +118,11 @@ function reservationData(entry) {
 function assertPayoutIdentity(entry,order) {
   if(entry.orderId!==order.id||entry.supplierId!==order.supplierId)fail('verification_payout_identity_mismatch');
 }
-function assertPayer(data,actor,recording=false) {
+function assertPayer(data,actor,recording=false,dailyTransferId) {
+  if(data.dailyTransferId) {
+    if(data.dailyTransferId!==dailyTransferId)fail('shop_money_transfer_route_required');
+    data={...data,payerId:data.batchPayerId};
+  }
   if(data.payerId!==(actor?.id||null) && !(recording&&actor?.role==='super_admin'))fail('verification_payer_required',403);
 }
 export function assertVerificationReplay(store,order,key,{attemptId,reference,amountMinor}={}) {
@@ -129,7 +133,7 @@ export function assertVerificationReplay(store,order,key,{attemptId,reference,am
   if(Object.hasOwn(entry.data,'transferReference')&&(reference||null)!==entry.data.transferReference)fail('verification_transfer_reconciliation_required');
   if(amountMinor!==undefined&&entry.data.transferAmountMinor!==undefined&&amountMinor!==entry.data.transferAmountMinor)fail('verification_transfer_reconciliation_required');
 }
-export function prepareVerificationPayout(store,order,{key,amountMinor,at,actor,id,attemptId,recording=false,sharedAttempt=false,reconciling=false}) {
+export function prepareVerificationPayout(store,order,{key,amountMinor,at,actor,id,attemptId,recording=false,sharedAttempt=false,reconciling=false,dailyTransferId}) {
   if(!Number.isSafeInteger(amountMinor)||amountMinor<0)fail('invalid_money');
   if(order.cash&&!key.startsWith('bonus:'))return {status:'ready',key,amountMinor,netAmountMinor:amountMinor,recoveryMinor:0,exempt:true};
   const previous=latest(store,key);
@@ -138,7 +142,7 @@ export function prepareVerificationPayout(store,order,{key,amountMinor,at,actor,
   if(previous?.kind==='reserved') {
     if(previous.amountMinor!==amountMinor)fail('verification_payout_changed');
     const data=reservationData(previous);
-    assertPayer(data,actor,recording);
+    assertPayer(data,actor,recording,dailyTransferId);
     if((recording&&data.requiresAttempt || attemptId!==undefined)&&attemptId!==data.attemptId)fail('verification_payout_attempt_required');
     if(data.transferState==='unknown'&&!reconciling)fail('verification_transfer_unknown');
     return {status:'ready',key,amountMinor,...data};
@@ -158,6 +162,9 @@ export function prepareVerificationPayout(store,order,{key,amountMinor,at,actor,
     return {status:'held',key,amountMinor,...data};
   }
   Object.assign(data,{attemptId:attemptId||id?.('sattempt')||randomUUID(),payerId:actor?.id||null,requiresAttempt:!recording,transferState:'in_progress'});
+  // Historical runtimes compare payerId before returning an actionable amount.
+  // This batch-only principal can never match an authenticated user identity.
+  if(dailyTransferId)Object.assign(data,{dailyTransferId,batchPayerId:actor?.id||null,payerId:`daily-transfer:${dailyTransferId}`});
   append(store,{supplierId:order.supplierId,orderId:order.id,key,kind:'reserved',amountMinor,data},{at,actor,id});
   return {status:'ready',key,amountMinor,...data};
 }
@@ -167,7 +174,7 @@ export function completeVerificationPayout(store,order,payout,ctx) {
   if(previous?.kind==='released') {assertVerificationReplay(store,order,payout.key,{attemptId:payout.attemptId,reference:ctx.transferReference});return;}
   if(previous?.kind!=='reserved')fail('verification_reservation_not_pending');
   assertPayoutIdentity(previous,order);
-  const data=reservationData(previous);assertPayer(data,ctx.actor,true);
+  const data=reservationData(previous);assertPayer(data,ctx.actor,true,ctx.dailyTransferId);
   if(payout.attemptId!==data.attemptId||payout.amountMinor!==previous.amountMinor
     ||payout.netAmountMinor!==data.netAmountMinor||payout.recoveryMinor!==data.recoveryMinor)fail('verification_payout_attempt_required');
   if(payout.status!=='ready')fail('verification_payout_not_ready');
@@ -266,7 +273,7 @@ export function cancelVerificationReservation(store,order,key,ctx) {
   if(previous?.kind==='reservation_cancelled')return;
   if(previous?.kind!=='reserved')fail('verification_reservation_not_pending');
   assertPayoutIdentity(previous,order);
-  const data=reservationData(previous);assertPayer(data,ctx.actor,true);
+  const data=reservationData(previous);assertPayer(data,ctx.actor,true,ctx.dailyTransferId);
   if(ctx.attemptId!==data.attemptId)fail('verification_payout_attempt_required');
   append(store,{supplierId:order.supplierId,orderId:order.id,key,kind:'reservation_cancelled',amountMinor:previous.amountMinor,
     data:{...data,reason:ctx.reason,transferState:'not_sent'}},ctx);
@@ -276,7 +283,7 @@ export function markVerificationTransferUnknown(store,order,key,ctx) {
   const previous=latest(store,key);
   if(previous?.kind!=='reserved')fail('verification_reservation_not_pending');
   assertPayoutIdentity(previous,order);
-  const data=reservationData(previous);assertPayer(data,ctx.actor,true);
+  const data=reservationData(previous);assertPayer(data,ctx.actor,true,ctx.dailyTransferId);
   if(ctx.attemptId!==data.attemptId)fail('verification_payout_attempt_required');
   if(data.transferState==='unknown')return;
   append(store,{supplierId:order.supplierId,orderId:order.id,key,kind:'reserved',amountMinor:previous.amountMinor,

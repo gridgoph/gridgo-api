@@ -52,7 +52,7 @@ test('launch bonus: 20%, seven days, cap per shop, per-job snapshot and legacy e
  }
  syncShopMoney(s,ctx);assert.deepEqual(s.orders.map(o=>o.shopLaunchBonus.amountMinor),[40000,10000,0,0]);
  s.settings.shopMoney.bonusRateBps=5000;syncShopMoney(s,ctx);assert.equal(s.orders[0].shopLaunchBonus.amountMinor,40000);
- const old=setup();syncShopMoney(old,ctx);assert.equal(old.orders[0].shopLaunchBonus,null);
+ const old=setup();syncShopMoney(old,ctx);assert.equal(old.orders[0].shopLaunchBonus,undefined);
 });
 test('regular stages keep their gross split, proof and claim holds; verification cap is respected',()=>{
  const s=setup(),o=s.orders[0];o.orderType='regular';o.payoutPlanVersion=2;o.state='production';o.payoutMilestones=createPayoutMilestones(o,{version:2});
@@ -145,4 +145,38 @@ test('unpaid reviewed rematch reverses the old shop and starts the new beneficia
  assert.equal(shopMoneyBalances(s,'supplier',AT).owedMinor,0);assert.equal(shopMoneyBalances(s,'replacement',AT).owedMinor,36000);
  syncShopMoney(s,ctx);assert.equal(shopMoneyBalances(s,'replacement',AT).owedMinor,36000);
  assert.equal(s.shopMoneyEvents.find(e=>e.kind==='first_order'&&e.supplierId==='supplier').data.startedAt,originalClock);
+});
+test('delivery and cheaper-shop adjustment refunds preserve unpaid principal in both balances',()=>{
+ for(const disposition of ['delivery_adjustment','price_adjustment']) {
+  const s=setup({amount:10000,bonus:true});syncShopMoney(s,ctx);
+  s.refundSettlements.push({id:'adjustment',orderId:'order',sequence:1,disposition});syncShopMoney(s,ctx);
+  assert.equal(shopMoneyBalances(s,'supplier',AT).owedMinor,12000,disposition);
+  assert.equal(shopMoneyBalances(s,'supplier',AT).owingMinor,0,disposition);
+ }
+});
+test('fulfilled refund pays the retained launch bonus after the agreed shop remainder',async()=>{
+ const s=setup({amount:100000,bonus:true});syncShopMoney(s,ctx);const o=s.orders[0];
+ o.state='completed';o.payoutMilestones.forEach(m=>m.status='superseded');
+ s.refundSettlements.push({id:'terminal',orderId:'order',sequence:1,disposition:'fulfilled_with_refund',shopEntitlementMinor:50000});
+ s.refundSupplierPayouts.push({id:'remainder',orderId:'order',settlementId:'terminal',supplierId:'supplier',status:'released',amountMinor:50000,releasedAt:AT,reference:'REMAINDER'});
+ syncShopMoney(s,ctx);assert.equal(shopMoneyBalances(s,'supplier',AT).owedMinor,20000);
+ const held=structuredClone(s);held.orders[0].payoutHold=true;
+ const heldRow=rowFor(runShopSettlement(held,ctx));assert.equal(heldRow.availableMinor,0);assert.ok(heldRow.held.some(i=>i.key==='bonus:order:supplier'&&i.reason==='payout_held'));
+ const run=runShopSettlement(s,ctx);assert.equal(rowFor(run).availableMinor,20000);assert.equal(rowFor(run).items[0].key,'bonus:order:supplier');
+ receipt(s);const transfer=(await call(s,`/ops/shop-money/runs/${run.id}/shops/supplier/prepare`)).body.transfer;
+ await call(s,`/ops/shop-money/transfers/${transfer.id}/confirm`,{amountMinor:20000,reference:'BONUS-AFTER-REFUND',receiptFileId:'receipt',fundsSentConfirmed:true,paidAt:AT,reason:'Retained bonus'});
+ assert.equal(shopMoneyBalances(s,'supplier',AT).owedMinor,0);
+ assert.equal(o.payoutMilestones[0].status,'superseded');
+});
+test('disabling future counter cash retains an issued overdue hold until payment',async()=>{
+ const s=setup();s.orders=[];s.settings.paymentQrFileId='platform';
+ await call(s,'/ops/shop-money/shops/supplier/policy',{expectedVersion:0,counterCashEnabled:true,reason:'Controlled rollout'},actors.admin,AT,'PATCH');
+ recordShopRecovery(s,'supplier','counter-debt',15000,ctx,{debt:true});runShopSettlement(s,ctx);
+ await call(s,'/ops/shop-money/shops/supplier/policy',{expectedVersion:1,counterCashEnabled:false,reason:'Stop future counter collections'},actors.admin,AT,'PATCH');
+ assert.equal(shopMoneyPaused(s,'supplier','2026-11-23T10:01:00Z'),true);
+ await call(s,'/ops/shop-money/shops/supplier/policy',{expectedVersion:2,counterCashEnabled:true,reason:'Re-enable future counter collections'},actors.admin,AT,'PATCH');
+ assert.equal(shopMoneyPaused(s,'supplier','2026-11-23T10:01:00Z'),true,'re-enabling must retain the original issued deadline');
+ const request=s.shopMoneyEvents.find(e=>e.kind==='pay_request');
+ await call(s,`/ops/shop-money/payments/${request.id}/confirm`,{amountMinor:15000,reference:'CASH-DISABLED-RECEIPT',reason:'Bank verified'},actors.ops,'2026-11-23T10:01:00Z');
+ assert.equal(shopMoneyPaused(s,'supplier','2026-11-23T10:01:00Z'),false);
 });

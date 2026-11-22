@@ -1,4 +1,4 @@
-import {routeShopMoney,syncShopMoney,sweepShopMoney,shopMoneySettings,shopMoneyWorkDue} from './shop-money.js';
+import {routeShopMoney,syncShopMoney,sweepShopMoney,shopMoneySettings,shopMoneyWorkDue,shopMoneyChanged} from './shop-money.js';
 import {validateShopMoneySettings} from './shop-money-settings.js';
 import {activeShopTransferForKey} from './shop-money-policy.js';
 import { supplierCanWork, verificationSettings, verificationSummary, assertVerificationPolicyChange,
@@ -592,7 +592,7 @@ async function save(view, { notificationsOnly = false } = {}) {
     }
   }
   if (!scope) { await hydrateCashWallets(database,store); reconcileDispatchOffers(store, { at: now(), id, audit }); }
-  if(!scope)syncShopMoney(store,{at:now(),id});
+  if(!scope&&shopMoneyChanged(store,originalDomainStore(store)))syncShopMoney(store,{at:now(),id});
   deriveMissingAudit(store, originalDomainStore(store));
   recordOrderActions(store, originalDomainStore(store));
   deriveDomainEvents(store, originalDomainStore(store), {createId:id,at:now()});
@@ -3222,7 +3222,7 @@ async function handleAuditedRequest(req, res) {
       return send(res, riderProfileResponse.status, riderProfileResponse.body);
     }
 
-    const moneyResponse=await routeShopMoney({req,url,store,user,readBody,now,id});
+    const moneyResponse=await routeShopMoney({req,url,store,user,readBody,now,id,database});
     if(moneyResponse){res.setHeader('Cache-Control','private, no-store');if(moneyResponse.mutated)await save(store);return send(res,moneyResponse.status,moneyResponse.body);}
 
     const payoutAccountResponse = await routePayoutAccount({
