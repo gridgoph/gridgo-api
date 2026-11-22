@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { fixture, caller } from './fixtures/scheduling.js';
 import { matchShop } from '../src/order-match.js';
 import { expressCatalogOptions, expressStatus } from '../src/express-orders.js';
-import { createSignupDocuments } from '../src/document-capabilities.js';
+import { createSignupDocuments, supplierSupportsDocumentOrder } from '../src/document-capabilities.js';
 import { routeExpressOrders } from '../src/express-routes.js';
 const AT='2026-09-23T01:00:00.000Z';
 function setup() {
@@ -54,4 +54,15 @@ test('Express and ordinary cart writes refuse an unsupported document request',a
   const cart=await call('POST','/me/carts',{fulfillmentMode:'pickup'});
   await assert.rejects(call('POST',`/me/carts/${cart.body.cart.id}/lines`,{catalogItemId:item.id,expectedVersion:1,expectedServiceVersion:1,
     quantity:1,optionIds:[],structuredSpec:{colourMode:'colour'},artworkFileId:'file_art',printLayout:'fit_to_paper'}),e=>e.code==='document_capability_unavailable');
+});
+test('manual supplier eligibility also respects immutable document print facts',()=>{
+  const {store}=setup();
+  for(const print of [{colour:'colour',paper:'a4',sides:'one'},{colour:'bw',paper:'a3',sides:'one'},{colour:'bw',paper:'a4',sides:'two'}]) {
+    const order={id:'saved',expressOrder:{printSettings:[print]}};
+    assert.equal(supplierSupportsDocumentOrder(store,'shop_a',order),false);
+    assert.equal(supplierSupportsDocumentOrder(store,'shop_b',order),true);
+  }
+  store.orderLineItems=[{id:'saved_line',orderId:'normal',sourceCatalogItemId:store.catalogItems[0].id,structuredSpecSnapshot:{size:'A4'}}];
+  store.orderLineItemOptions=[{orderLineItemId:'saved_line',groupNameSnapshot:'Colour',optionLabelSnapshot:'Colour'}];
+  assert.equal(supplierSupportsDocumentOrder(store,'shop_a',{id:'normal'}),false);
 });

@@ -54,6 +54,25 @@ export function assertDocumentRequest(store,item,request) {
   if (!documentRequestSupported(store,item,request)) throw new CatalogError(409,'document_capability_unavailable','This shop cannot print the requested paper, colour or back-to-back pages.');
 }
 
+/** Recovery/manual assignment consume accepted facts, never today's source options. */
+export function supplierSupportsDocumentOrder(store,supplierId,order) {
+  const services=(store.supplierServices||[]).filter(s=>s.supplierId===supplierId&&s.state==='live'&&s.documentCapabilities);
+  if(!services.length)return true;
+  const requests=order.expressOrder?.printSettings||(store.orderLineItems||[]).filter(line=>line.orderId===order.id
+    &&((store.catalogItems||[]).some(item=>item.id===line.sourceCatalogItemId&&item.subcategoryCode==='document_printing')||line.expressPrint))
+    .map(line=>{
+      const spec={...(line.structuredSpecSnapshot||{}),...(line.expressPrint||{})};
+      for(const option of (store.orderLineItemOptions||[]).filter(o=>o.orderLineItemId===line.id)) {
+        if(/colou?r/i.test(option.groupNameSnapshot)&&!spec.colour&&!spec.colourMode)spec.colour=option.optionLabelSnapshot;
+        if(/size/i.test(option.groupNameSnapshot)&&!spec.paper&&!spec.size)spec.size=option.optionLabelSnapshot;
+        if(/sides/i.test(option.groupNameSnapshot)&&!spec.sides)spec.sides=/back|two|duplex/i.test(option.optionLabelSnapshot)?'two':'one';
+      }
+      return spec;
+    });
+  return requests.every(request=>services.some(service=>documentRequestSupported({supplierServices:[service]},
+    {supplierServiceId:service.id,subcategoryCode:'document_printing'},request)));
+}
+
 /** One price per size/colour: A3 prices cannot leak into a linear size surcharge. */
 export function createSignupDocuments(store,supplierId,capability,{id,at}) {
   const rates=expressRates(store.settings);

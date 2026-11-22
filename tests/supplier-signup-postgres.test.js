@@ -89,6 +89,7 @@ test('A3 payment is unavailable before acceptance, blocks production while unpai
   const {db,api}=await setup(t,true);let sequence=0;const id=prefix=>`a3_${prefix}_${++sequence}`;
   const store=await loadStore(db);store.orders=[];store.orderJobs=[];store.orderLineItems=[];store.orderLineItemOptions=[];store.orderInvoices=[];
   const [service]=createSignupDocuments(store,'supplier',{papers:['a3'],colours:['bw'],duplex:true,a3PricesMinor:{bw:1200},finishing:{}},{id,at:AT});
+  store.supplierServices.find(s=>s.supplierId==='replacement').documentCapabilities={papers:['a4'],colours:['bw'],duplex:false};
   service.state='live';const item=store.catalogItems.at(-1);item.reviewStatus='approved';
   store.files.push({...store.files.find(f=>f.fileId==='photo_supplier'),fileId:'a3_sample',objectKey:'a3_sample',references:[]});
   store.catalogItemPhotos.push({catalogItemId:item.id,fileId:'a3_sample',sortOrder:0,createdAt:AT});
@@ -99,6 +100,9 @@ test('A3 payment is unavailable before acceptance, blocks production while unpai
   const placed=await call(`/me/carts/${draft.body.cartId}/checkout`,{looksRight:true,expressConfirmation:draft.body.confirmation});
   const order=store.orders.find(o=>o.id===placed.body.order.id);const path=`/orders/${order.id}`;
   await db.transaction(()=>saveStore(db,store));
+  const candidates=ok(await api('ops','GET',`${path}/eligible-suppliers`)).candidates;
+  assert.equal(candidates.find(c=>c.supplier.id==='replacement').eligible,false);
+  assert.ok(candidates.find(c=>c.supplier.id==='replacement').reasons.includes('document_capability_unavailable'));
   assert.equal((await api('client','POST',`${path}/payments/initial/submit`,{method:'qr_manual',reference:'A3',proofFileId:'signup_payment'})).body.error,'initial_payment_not_available');
   await db.transaction(async()=>{const current=await loadStore(db),o=current.orders.find(o=>o.id===order.id);o.fileCheck.status='passed';o.state='supplier_assigned';startExpressAcceptance(o,new Date().toISOString());await saveStore(db,current);});
   assert.equal((await api('supplier','POST',`${path}/transition`,{state:'payment_authorized'},supplier)).body.error,'payment_required');

@@ -173,7 +173,7 @@ An actual SMS to the owner remains a follow-up; delivery uses existing push/inbo
 Capabilities live on the document service and survive PostgreSQL round trips.
 Normal matching accepts the existing `structuredSpec` fields `size`, `colourMode`
 and `sides`; `bw | colour` and `one | two` are the canonical print controls.
-Matching, quotes, cart writes and checkout reject unsupported requested paper,
+Matching, manual supplier eligibility, recovery, quotes, cart writes and checkout reject unsupported requested paper,
 colour or duplex. Fixed size/colour listings must also fit that request. Old
 services without these new capability facts retain their existing behavior.
 

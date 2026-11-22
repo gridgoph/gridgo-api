@@ -4,6 +4,7 @@ import { shopPaused } from './shop-availability.js';
 import { routeShopStatus } from './shop-status.js';
 import { routeSupplierSignup, signupProjection, signupForShop, routeSignupSetup } from './supplier-signup.js';
 import { supplierPayoutStatus } from './supplier-payout-policy.js';
+import { supplierSupportsDocumentOrder } from './document-capabilities.js';
 import { routeShopFileAccess, recordShopFileAccess, fileAccessJobs } from './shop-file-access.js';
 import { isExpressDocumentOrder } from './express-offers.js';
 import { awardExpressFriendPass } from './express-rewards.js';
@@ -2221,6 +2222,10 @@ function eligibleSuppliersForOrder(store, order) {
       continue;
     }
     const reasons = [];
+    if(!supplierSupportsDocumentOrder(store,supplier.id,order)) {
+      results.push({supplier:publicUser(supplier),eligible:false,reasons:['document_capability_unavailable'],matchingServiceIds:[],services:[]});
+      continue;
+    }
     if (supplier.verificationStatus !== "approved") {
       results.push({
         supplier: publicUser(supplier),
