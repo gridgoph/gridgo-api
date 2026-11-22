@@ -54,6 +54,14 @@ function append(store,{supplierId,orderId=null,key,kind,amountMinor=0,data={}},{
     entityType:'user',entityId:supplierId,...(orderId?{orderId}:{}),detail:entry});
   return entry;
 }
+/** Shop-money counter receivables share the existing recovery reservation boundary. */
+export function recordShopRecovery(store,supplierId,sourceId,amountMinor,ctx,{debt=false}={}) {
+  const key=`shop-money:${debt?'due':'paid'}:${sourceId}`;
+  if((store.supplierVerificationLedger||[]).some(e=>e.payoutKey===key))return;
+  if(!Number.isSafeInteger(amountMinor)||amountMinor<0)fail('invalid_money');
+  if(amountMinor===0)return;
+  return append(store,{supplierId,key,kind:debt?'recovery_due':'recovered',amountMinor,data:{source:'shop_money'}},ctx);
+}
 function paidEvents(store,supplierId) {
   const recorded=new Map(ledgerFor(store,supplierId).filter(e=>e.kind==='released').map(e=>[e.payoutKey,e]));
   for(const o of store.orders||[]) {
@@ -123,7 +131,7 @@ export function assertVerificationReplay(store,order,key,{attemptId,reference,am
 }
 export function prepareVerificationPayout(store,order,{key,amountMinor,at,actor,id,attemptId,recording=false,sharedAttempt=false,reconciling=false}) {
   if(!Number.isSafeInteger(amountMinor)||amountMinor<0)fail('invalid_money');
-  if(order.cash)return {status:'ready',key,amountMinor,netAmountMinor:amountMinor,recoveryMinor:0,exempt:true};
+  if(order.cash&&!key.startsWith('bonus:'))return {status:'ready',key,amountMinor,netAmountMinor:amountMinor,recoveryMinor:0,exempt:true};
   const previous=latest(store,key);
   if(previous&&['released','reserved'].includes(previous.kind))assertPayoutIdentity(previous,order);
   if(previous?.kind==='released')return {status:'released',key,...previous.data,amountMinor:previous.amountMinor};

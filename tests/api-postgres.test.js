@@ -1796,7 +1796,7 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
     assert.equal(current.body.settings.productionNudge.afterValue, 4);
     assert.equal(current.body.settings.productionNudge.afterUnit, "hours");
 
-    assert.equal(current.body.settings.riderCommissionBps, 8500);
+    assert.equal(current.body.settings.riderCommissionBps, 8000);
     for (const riderCommissionBps of [null, "8500", 8500.5, -1, 10001]) {
       const invalid = await request(instance.api, "/settings", {
         method: "PATCH", subject: "clerk_super",

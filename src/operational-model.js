@@ -1,4 +1,5 @@
 import { verificationSettings, validateVerificationSettings, prepareVerificationPayout, completeVerificationPayout } from "./supplier-verification.js";
+import {shopMoneySettings,validateShopMoneySettings} from './shop-money-settings.js';
 import { publicShopFileAccesses } from './shop-file-access.js';
 import { expressRates, validateExpressRates, publicExpress, expressClientProjection } from './express-orders.js';
 import { validateCashSettings, cashAmounts } from './cash-policy.js';
@@ -280,7 +281,8 @@ export function defaultOperationalSettings() {
     expressRates: expressRates(),
     serviceFeeRateBps: 1_000,
     organizationDiscountRateBps: 500,
-    riderCommissionBps: 8_500,
+    riderCommissionBps: 8_000,
+    shopMoney: {...shopMoneySettings(),launchedAt:new Date().toISOString()},
     riderOfferTimeoutSeconds: 30,
     cash: { enabled: false, limitMinor: 150000, noShowWaitSeconds: 600 },
     clientRiderLocationRevealDistanceMeters: 1_000, // Deprecated; no longer controls visibility.
@@ -337,6 +339,7 @@ export function defaultOperationalSettings() {
 }
 
 export function validateOperationalSettings(settings) {
+  validateShopMoneySettings(settings);
   validateVerificationSettings(settings);
   validateExpressRates(Object.hasOwn(settings || {}, 'expressRates') ? settings.expressRates : expressRates());
   validateCashSettings(settings);
@@ -699,7 +702,7 @@ export function calculateOrderMoney({
     subtotalMinor: supplierSubtotal,
     serviceFeeRateBps,
     serviceFeeMinor,
-    ...deliverySplit(deliveryFeeMinor, settings.riderCommissionBps ?? 8_500),
+    ...deliverySplit(deliveryFeeMinor, settings.riderCommissionBps ?? 8_000),
     deliveryDistanceMeters: resolvedDistance,
     deliveryFeeMinor,
     totalMinor,
@@ -1595,7 +1598,7 @@ export function publicOrderFor(order, user, store = null) {
       if (entry.state === 'ready_for_dispatch') entry.note = 'Ready for rider pickup';
     }
     if (publicRecord.state === "payout_released") publicRecord.state = "completed";
-    for (const field of ["payoutMilestones", "payoutPlanVersion", "payoutHold", "fulfilmentProofFileIds", "productionPhotoFileIds"]) {
+    for (const field of ["shopLaunchBonus", "payoutMilestones", "payoutPlanVersion", "payoutHold", "fulfilmentProofFileIds", "productionPhotoFileIds"]) {
       delete publicRecord[field];
     }
   }

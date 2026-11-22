@@ -1,4 +1,6 @@
 import { verificationLedgerTable, verificationLedgerRows, loadVerificationLedgerRows } from "./supplier-verification-store.js";
+import {shopMoneyTables,shopMoneyRows,loadShopMoneyRows} from './shop-money-store.js';
+import {clientPaymentSnapshot} from './shop-payment-method.js';
 import { fileAccessTable, fileAccessRows, loadFileAccessRows } from './shop-file-access.js';
 import { shopTeamTables, emptyShopTeam, shopTeamRows, loadShopTeamRows, ensureShopOwners } from './shop-team-store.js';
 import { STAFF_LIST_PAGE, readStaffPage, staffPageRequested, staffListPlan, parseStaffPage, encodeStaffCursor } from './staff-list-pages.js';
@@ -155,6 +157,7 @@ const TABLES = [
   { name: "location_pings", keys: ["id"], columns: ["id", "order_id", "rider_id", "lat", "lng", "accuracy_meters", "at", "position", "data"] },
   { name: "escalations", keys: ["id"], columns: ["id", "order_id", "rider_id", "status", "created_at", "updated_at", "position", "data"] },
   verificationLedgerTable,
+  ...shopMoneyTables,
   { name: "device_tokens", keys: ["id"], columns: ["id", "user_id", "token", "platform", "created_at", "updated_at", "position", "data"] },
 ];
 
@@ -163,6 +166,8 @@ export function emptyStore() {
     ...emptyStaffStore(),
     ...emptyShopTeam(),
     supplierVerificationLedger: [],
+    shopMoneyLedger: [],
+    shopMoneyEvents: [],
     shopFileAccesses: [],
     ...emptyVoucherStore(),
     orderSurveys: [],
@@ -252,6 +257,7 @@ function rowsFromStore(store) {
   ensureShopOwners(store);
   shopTeamRows(store, rows);
   verificationLedgerRows(store, rows);
+  shopMoneyRows(store, rows);
   rows.shop_file_accesses = fileAccessRows(store);
   staffRows(store, rows);
   voucherRows(store, rows);
@@ -947,6 +953,7 @@ async function readIdentity(graph, userIds) {
   await graph.read('user_role_memberships', 'WHERE user_id = ANY($1::text[])', [userIds]);
   await graph.read('approval_cases', 'WHERE user_id = ANY($1::text[])', [userIds]);
   const pendingSuppliers=graph.loaded.approval_cases.filter(row=>row.kind==='supplier'&&row.status==='pending').map(row=>row.user_id);
+  await graph.read('shop_money_events', 'WHERE supplier_id = ANY($1::text[])', [userIds]);
   if(pendingSuppliers.length)await graph.read('supplier_verification_ledger', 'WHERE supplier_id = ANY($1::text[])', [pendingSuppliers]);
 }
 
@@ -2310,6 +2317,7 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
   store.legalPenaltyGate = legalPenaltyGate;
   loadShopTeamRows(store, loaded);
   loadVerificationLedgerRows(store, loaded);
+  loadShopMoneyRows(store, loaded);
   store.shopFileAccesses = loadFileAccessRows(loaded.shop_file_accesses);
   loadStaffRows(store, loaded);
   loadVoucherRows(store, loaded);
@@ -2886,6 +2894,7 @@ async function upsertChanged(database, table, before, current) {
 export async function saveStore(database, store) {
   if (notificationReadStores.has(store)) throw new Error('Projection stores are read-only');
   if (!database.inWriteTransaction()) throw new Error("saveStore requires an active write transaction");
+  for(const order of store.orders||[])order.clientPayment??=clientPaymentSnapshot(order);
   enforceReviewData(store, originalDomainStore(store));
   labelReviewNotifications(store, originalDomainStore(store));
   finalizeAuditEntries(store, originalDomainStore(store));

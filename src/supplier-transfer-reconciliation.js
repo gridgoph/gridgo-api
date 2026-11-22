@@ -46,6 +46,10 @@ export function recordPreparedSupplierTransfer(store,order,ctx) {
       if(row.status==='released'&&row.reference!==reference)fail('verification_transfer_reconciliation_required');
       if(row.status!=='released')updates.push(()=>Object.assign(row,{status:'released',reference,receiptFileId:receipt.fileId,releasedAt:ctx.paidAt,releasedBy:actor.id}));
       updates.push(()=>bindPayoutReceipt(order,{code:'refund_settlement'},receipt));
+    } else if(payout.key===`bonus:${order.id}:${order.supplierId}`) {
+      const award=(store.shopMoneyLedger||[]).find(e=>e.key===`bonus-award:${order.id}:${order.supplierId}`&&e.supplierId===order.supplierId);
+      if(!award||award.owedDeltaMinor!==payout.amountMinor)fail('verification_payout_changed');
+      updates.push(()=>bindPayoutReceipt(order,{code:'launch_bonus'},receipt));
     } else fail('verification_payout_identity_mismatch');
   }
   for(const update of updates)update();
