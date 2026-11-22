@@ -1,5 +1,5 @@
 import { supplierCanWork, verificationSettings, verificationSummary, assertVerificationPolicyChange,
-  prepareVerificationPayout, completeVerificationPayout, recordVerificationRecovery, cancelVerificationReservation, markVerificationTransferUnknown, verificationReservationsForOrder, assertVerificationReplay, reconcileVerificationHolds, remindSupplierVerification } from "./supplier-verification.js";
+  prepareVerificationPayout, completeVerificationPayout, recordVerificationRecovery, reconcileVerificationRecovery, cancelVerificationReservation, markVerificationTransferUnknown, verificationReservationsForOrder, assertVerificationReplay, reconcileVerificationHolds, remindSupplierVerification } from "./supplier-verification.js";
 import { supplierMatchBlockersFor } from "./supplier-eligibility.js";
 import {recordPreparedSupplierTransfer} from './supplier-transfer-reconciliation.js';
 import { changePaymentsFor, changePayoutsFor } from "./order-change-policy.js";
@@ -495,7 +495,8 @@ async function save(view, { notificationsOnly = false } = {}) {
     for(const order of store.orders||[]) {
       const previous=before?.orders?.find(o=>o.id===order.id);
       if(order.state==='cancelled' && previous && previous.state!=='cancelled'
-        && order.cancelledBy===order.supplierId)recordVerificationRecovery(store,order,{at:now(),actor:{id:order.cancelledBy,role:'supplier'},id});
+        && order.cancelledBy===order.supplierId)recordVerificationRecovery(store,order,{at:order.cancelledAt||now(),failureId:`cancelled:${order.cancelledAt||order.id}`,actor:{id:order.cancelledBy,role:'supplier'},id});
+      if(reconcileVerificationRecovery(store,order,{at:now(),actor:{role:'system'},id}))queueOrderInvalidate(store,order,['payouts']);
     }
     reconcileVerificationHolds(store,{at:now(),actor:{role:'system'},id});
   }

@@ -154,10 +154,10 @@ export function recordShopFailure(store, order, { kind, reason, at, createId, ac
   if(order.orderType === "express" && ["declined","timed_out"].includes(kind)) return declineExpress(store,order,{at,id:createId,kind,actorId,reason});
   assessProductionLapses(store, { at, createId, orderId: order.id });
   const fault = recoveryFault(kind);
-  if (fault === "shop") recordVerificationRecovery(store,order,{at,actor:{id:actorId,role:actorRole||"system"},id:createId});
   const event = { id: createId('shop_event'), supplierId: order.supplierId, kind, fault, stage: order.state, reason, reasonCode, at, actorId,
     exemption: SHOP_FAULT_KINDS.includes(kind) ? tightDeclineExemption(order, kind, reason) : null };
   (order.shopFailureEvents ||= []).push(event);
+  if (fault === "shop") recordVerificationRecovery(store,order,{at,actor:{id:actorId,role:actorRole||"system"},id:createId,failureId:event.id});
   order.declinedBy = [...new Set([...(order.declinedBy || []), order.supplierId])];
   if (order.shopAcceptance) order.shopAcceptance.status = kind;
   const jobs = (store.orderJobs || []).filter((job) => job.orderId === order.id);

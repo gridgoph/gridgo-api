@@ -1,4 +1,4 @@
-import {prepareVerificationPayout,completeVerificationPayout,verificationReservationsForOrder,assertVerificationReplay} from './supplier-verification.js';
+import {prepareVerificationPayout,completeVerificationPayout,verificationReservationsForOrder,assertVerificationReplay,reconcileVerificationRecovery} from './supplier-verification.js';
 import {bindPayoutReceipt} from './payout-receipt.js';
 import {privilegedAdminMemberships} from './notifications.js';
 import {changesFor} from './order-change-policy.js';
@@ -13,6 +13,7 @@ export function recordPreparedSupplierTransfer(store,order,ctx) {
     assertVerificationReplay(store,order,payoutKey,{attemptId,reference});
     const paid=(store.supplierVerificationLedger||[]).find(e=>e.payoutKey===payoutKey&&e.kind==='released');
     if(!paid||paid.data.attemptId!==attemptId||paid.data.transferAmountMinor!==amountMinor||paid.data.transferPaidAt!==ctx.paidAt)fail('verification_reservation_not_pending');
+    reconcileVerificationRecovery(store,order,ctx);
     return {replayed:true};
   }
   if(!reference||!receipt||ctx.fundsSentConfirmed!==true)fail('verification_actual_transfer_evidence_required');
@@ -49,6 +50,7 @@ export function recordPreparedSupplierTransfer(store,order,ctx) {
   }
   for(const update of updates)update();
   for(const payout of prepared)completeVerificationPayout(store,order,payout,{...ctx,reconciled:true,transferReference:reference,transferAmountMinor:amountMinor});
+  reconcileVerificationRecovery(store,order,ctx);
   store.auditLog.push({id:id('aud'),at,actorId:actor.id,actorRole:actor.role,action:'supplier_transfer.reconcile_paid',entityType:'order',entityId:order.id,orderId:order.id,
     reason:ctx.reason,detail:{attemptId,payerId:entry.data.payerId,amountMinor,paidAt:ctx.paidAt,reference,receiptFileId:receipt.fileId,payoutKeys:prepared.map(p=>p.key)}});
   for(const recipient of [{userId:order.supplierId,role:'supplier'},...privilegedAdminMemberships(store)])store.notifications.push({id:id('ntf'),at,userId:recipient.userId,appRole:recipient.role,

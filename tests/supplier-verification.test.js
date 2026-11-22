@@ -4,7 +4,7 @@ import { defaultOperationalSettings, validateOperationalSettings } from '../src/
 import { supplierMatchBlockersFor } from '../src/supplier-eligibility.js';
 import { supplierCanWork, verificationSummary, prepareVerificationPayout, completeVerificationPayout,
   recordVerificationRecovery, reconcileVerificationHolds, remindSupplierVerification, rankVerifiedWithinDistance,
-  assertVerifiedCashShop } from '../src/supplier-verification.js';
+  assertVerifiedCashShop, reconcileVerificationRecovery } from '../src/supplier-verification.js';
 
 const AT = '2026-11-01T00:00:00.000Z';
 const when = day => new Date(Date.parse(AT) + day * 86400000).toISOString();
@@ -200,4 +200,58 @@ test('cancelling a stage paid by recovery offset restores its full value instead
   assert.equal(verificationSummary(s,'shop',when(2)).recoveryDueMinor,0);
   b.state='cancelled';recordVerificationRecovery(s,b,{at:when(2),actor,id});
   assert.equal(verificationSummary(s,'shop',when(2)).recoveryDueMinor,100000);
+});
+
+test('late pre-fault stages add only their debt delta after verification, and collections never reset assessed totals',()=>{
+  const s=fixture(),a=order(s,'incremental',100000);pay(s,a);
+  const late=prepareVerificationPayout(s,a,{key:'change:incremental:late',amountMinor:50000,at:when(1),actor,id});
+  recordVerificationRecovery(s,a,{at:when(2),actor,id,failureId:'fault'});
+  assert.equal(verificationSummary(s,'shop',when(2)).recoveryDueMinor,100000);
+  Object.assign(s.approvalCases[0],{status:'approved',decidedAt:when(2.5)});
+  const ctx={at:when(3),paidAt:when(1),actor,id,reconciled:true,receipt:{fileId:'receipt'},transferReference:'LATE'};
+  completeVerificationPayout(s,a,late,ctx);reconcileVerificationRecovery(s,a,ctx);
+  assert.equal(verificationSummary(s,'shop',when(3)).recoveryDueMinor,150000);
+  assert.equal(s.supplierVerificationLedger.filter(e=>e.kind==='recovery_due').length,2);
+  reconcileVerificationRecovery(s,a,ctx);assert.equal(s.supplierVerificationLedger.filter(e=>e.kind==='recovery_due').length,2);
+  const b=order(s,'collector',150000),offset=prepareVerificationPayout(s,b,{key:'stage:collector:production',amountMinor:150000,at:when(4),actor,id});
+  assert.equal(offset.netAmountMinor,0);completeVerificationPayout(s,b,offset,{at:when(4),actor,id});b.payoutMilestones[0].status='released';
+  reconcileVerificationRecovery(s,a,{at:when(4),actor,id});assert.equal(verificationSummary(s,'shop',when(4)).recoveryDueMinor,0);
+  const later=prepareVerificationPayout(s,a,{key:'change:incremental:resumed-work',amountMinor:20000,at:when(5),actor,id});
+  completeVerificationPayout(s,a,later,{at:when(5),actor,id});
+  reconcileVerificationRecovery(s,a,{at:when(5),actor,id});assert.equal(verificationSummary(s,'shop',when(5)).recoveryDueMinor,0,'post-fault resumed work is not retroactively recoverable');
+  s.approvalCases[0].status='pending';recordVerificationRecovery(s,a,{at:when(6),actor,id,failureId:'second-fault'});
+  assert.equal(verificationSummary(s,'shop',when(6)).recoveryDueMinor,20000);
+  recordVerificationRecovery(s,a,{at:when(7),actor,id,failureId:'second-fault'});
+  assert.equal(verificationSummary(s,'shop',when(7)).recoveryDueMinor,20000);
+});
+
+test('a late bundled attempt creates one debt for the combined gross entitlement and retries do not add it again',()=>{
+  const s=fixture(),a=order(s,'bundle',100000),stage=prepare(s,a);
+  const extra=prepareVerificationPayout(s,a,{key:'change:bundle:extra',amountMinor:50000,at:when(1),actor,id,attemptId:stage.attemptId,sharedAttempt:true});
+  recordVerificationRecovery(s,a,{at:when(2),actor,id,failureId:'bundle-fault'});
+  assert.equal(verificationSummary(s,'shop',when(2)).recoveryDueMinor,0);
+  const ctx={at:when(3),paidAt:when(1),actor,id,reconciled:true,receipt:{fileId:'receipt'},transferReference:'BUNDLE',transferAmountMinor:150000};
+  for(const p of [stage,extra])completeVerificationPayout(s,a,p,ctx);
+  reconcileVerificationRecovery(s,a,ctx);assert.equal(verificationSummary(s,'shop',when(3)).recoveryDueMinor,150000);
+  for(const p of [stage,extra])completeVerificationPayout(s,a,p,ctx);
+  reconcileVerificationRecovery(s,a,ctx);assert.equal(s.supplierVerificationLedger.filter(e=>e.kind==='recovery_due').length,1);
+});
+
+test('legacy positive recovery remains covered when another pre-fault stage is recorded later',()=>{
+  const s=fixture(),a=order(s,'legacy',100000);pay(s,a);
+  const late=prepareVerificationPayout(s,a,{key:'change:legacy:late',amountMinor:30000,at:when(1),actor,id});
+  s.supplierVerificationLedger.push({id:'legacy-debt',supplierId:'shop',orderId:a.id,payoutKey:'recovery:legacy',kind:'recovery_due',amountMinor:100000,at:when(2),data:{}});
+  Object.assign(s.approvalCases[0],{status:'approved',decidedAt:when(2.5)});
+  const ctx={at:when(3),paidAt:when(1),actor,id,reconciled:true,receipt:{fileId:'receipt'},transferReference:'LATE'};
+  completeVerificationPayout(s,a,late,ctx);reconcileVerificationRecovery(s,a,ctx);
+  assert.equal(verificationSummary(s,'shop',when(3)).recoveryDueMinor,130000);
+  reconcileVerificationRecovery(s,a,ctx);assert.equal(s.supplierVerificationLedger.filter(e=>e.kind==='recovery_due').length,2);
+});
+
+test('a shop verified at the fault is not made retroactively eligible by a later approval reset',()=>{
+  const s=fixture(),a=order(s,'verified-fault');s.approvalCases[0].status='approved';const p=prepare(s,a);
+  recordVerificationRecovery(s,a,{at:when(2),actor,id,failureId:'verified-fault'});
+  s.approvalCases[0].status='pending';
+  completeVerificationPayout(s,a,p,{at:when(3),paidAt:when(1),actor,id,reconciled:true,receipt:{fileId:'receipt'}});
+  reconcileVerificationRecovery(s,a,{at:when(3),actor,id});assert.equal(verificationSummary(s,'shop',when(3)).recoveryDueMinor,0);
 });

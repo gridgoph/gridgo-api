@@ -171,12 +171,42 @@ export function completeVerificationPayout(store,order,payout,ctx) {
       beforeVerification:!supplierVerified(store,order.supplierId)||Boolean(ctx.paidAt&&approval?.decidedAt&&Date.parse(ctx.paidAt)<Date.parse(approval.decidedAt))}},ctx);
 }
 export function recordVerificationRecovery(store,order,ctx) {
-  if(order.cash||order.reviewData||supplierVerified(store,order.supplierId))return false;
-  const key=`recovery:${order.id}`;
-  if(ledgerFor(store,order.supplierId).some(e=>e.payoutKey===key))return false;
-  const amountMinor=sum(paidEvents(store,order.supplierId).filter(e=>e.orderId===order.id).map(e=>e.amountMinor));
-  if(!amountMinor)return false;
-  append(store,{supplierId:order.supplierId,orderId:order.id,key,kind:'recovery_due',amountMinor},ctx);return true;
+  if(order.cash||order.reviewData)return false;
+  // Capture the policy at the fault, before money may be recorded or identity approved.
+  // This zero-value fact is not debt and never changes eligibility by itself.
+  if(!supplierVerified(store,order.supplierId)) {
+    const key=`recovery-assessment:${order.id}:${order.supplierId}:${ctx.failureId||ctx.at}`;
+    if(!ledgerFor(store,order.supplierId).some(e=>e.payoutKey===key))append(store,{
+      supplierId:order.supplierId,orderId:order.id,key,kind:'recovery_assessment',
+      data:{failedAt:ctx.at,failureId:ctx.failureId||null,unverifiedAtFault:true,
+        paidKeys:paidEvents(store,order.supplierId).filter(e=>e.orderId===order.id).map(e=>e.payoutKey)}},ctx);
+  }
+  return reconcileVerificationRecovery(store,order,ctx);
+}
+/** Assess only pre-fault entitlements, including later-recorded gross offsets.
+ * Compare to lifetime assessed debt, not its remaining (possibly collected) balance. */
+export function reconcileVerificationRecovery(store,order,ctx) {
+  if(order.cash||order.reviewData)return false;
+  const ledger=(store.supplierVerificationLedger||[]).filter(e=>e.orderId===order.id);
+  const suppliers=new Set(ledger.filter(e=>e.kind==='recovery_assessment'||e.kind==='recovery_due').map(e=>e.supplierId));
+  let changed=false;
+  for(const supplierId of suppliers) {
+    const events=paidEvents(store,supplierId).filter(e=>e.orderId===order.id);
+    const debts=ledger.filter(e=>e.supplierId===supplierId&&e.kind==='recovery_due');
+    const assessments=ledger.filter(e=>e.supplierId===supplierId&&e.kind==='recovery_assessment'&&e.data.unverifiedAtFault)
+      .map(e=>({id:e.id,failedAt:e.data.failedAt,paidKeys:e.data.paidKeys||[]}));
+    // A legacy positive debt is immutable evidence that an eligible fault occurred.
+    for(const debt of debts.filter(e=>!e.data.assessmentIds))assessments.push({id:debt.id,failedAt:debt.at,
+      paidKeys:events.filter(e=>!e.at||Date.parse(e.at)<=Date.parse(debt.at)).map(e=>e.payoutKey)});
+    const covered=events.filter(e=>assessments.some(a=>a.paidKeys.includes(e.payoutKey)
+      ||Date.parse(e.data?.transferPaidAt||e.at)<=Date.parse(a.failedAt)));
+    const paidMinor=sum(covered.map(e=>e.amountMinor)),assessedMinor=sum(debts.map(e=>e.amountMinor));
+    if(paidMinor<=assessedMinor)continue;
+    append(store,{supplierId,orderId:order.id,key:`recovery:${order.id}:${supplierId}:${paidMinor}`,kind:'recovery_due',amountMinor:paidMinor-assessedMinor,
+      data:{assessmentIds:assessments.map(a=>a.id),paidEntitlementMinor:paidMinor,previouslyAssessedMinor:assessedMinor}},ctx);
+    changed=true;
+  }
+  return changed;
 }
 export function reconcileVerificationHolds(store,ctx) {
   let changed=false;
