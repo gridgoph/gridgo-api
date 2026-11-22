@@ -129,7 +129,7 @@ test("a shop sets up GCash with its plate in one write and reads it back", async
     version: 1,
     updatedAt: AT,
     holder:'mine',
-    consent:{accepted:true,wording:PAYOUT_CONSENT_WORDING,at:AT,actorUserId:'supplier'},
+    consent:{accepted:true,wording:PAYOUT_CONSENT_WORDING,at:AT,actorUserId:'supplier',qrFileId:'qr_one'},
     payoutStatus:{held:false,reason:null,ownerClaimRequired:false,pausedUntil:null},
   });
   assert.deepEqual(store.files[0].references, [{ type: "supplier_payout_account", id: "supplier", field: "qr" }]);

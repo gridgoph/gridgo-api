@@ -50,3 +50,10 @@ test('manager cannot set or change a QR; deleting and recreating the account nev
   store.shopMemberships[0].role='staff';
   assert.equal(supplierPayoutStatus(store,'shop',AT).reason,'shop_owner_claim_required');
 });
+test('saving account words before uploading its first QR does not impose a destination-change pause',async()=>{
+  const {store,call}=setup();
+  await call('PATCH',{provider:'other',accountName:'Recipient'});
+  const saved=await call('PATCH',{expectedVersion:1,qrFileId:'first',holder:'mine',consent});
+  assert.equal(saved.body.payoutAccount.payoutStatus.held,false);
+  assert.equal(store.supplierPayoutPolicies[0].consent.qrFileId,'first');
+});

@@ -306,15 +306,17 @@ export async function routePayoutAccount({ req, url, store, user, readBody, now,
   const hasQr = Object.hasOwn(body, "qrFileId");
   const qrFileId = hasQr && body.qrFileId != null ? requiredText(body.qrFileId, "qrFileId", 120) : null;
   const qrFile = qrFileId ? resolveQrFile(store, current, qrFileId, user) : null;
-  const destinationChanged=Boolean(current&&(provider!==current.provider||accountName!==current.accountName||accountNumber!==current.accountNumber
-    ||institution!==current.institution||(hasQr&&qrFileId!==current.qrFileId)||(Object.hasOwn(body,'holder')&&policy?.holder&&body.holder!==policy.holder)))||Boolean(!current&&policy);
+  const destinationEstablished=Boolean(current?.qrFileId||policy?.consent?.qrFileId||policy?.pausedUntil);
+  const destinationChanged=destinationEstablished&&(!current||provider!==current.provider||accountName!==current.accountName||accountNumber!==current.accountNumber
+    ||institution!==current.institution||(hasQr&&qrFileId!==current.qrFileId)||(Object.hasOwn(body,'holder')&&policy?.holder&&body.holder!==policy.holder));
   const needsConsent=Boolean(qrFile||destinationChanged&&current?.qrFileId||Object.hasOwn(body,'holder'));
   if(needsConsent&&(!['mine','family','friend','staff'].includes(body.holder)||body.consent?.accepted!==true||body.consent.wording!==PAYOUT_CONSENT_WORDING)) {
     fail(400,'payout_consent_required','Choose whose QR this is and accept the payout consent.',{wording:PAYOUT_CONSENT_WORDING});
   }
   if(needsConsent) {
     if(!policy){policy={supplierId:user.id,updatedAt:at};store.supplierPayoutPolicies.push(policy);}
-    policy.holder=body.holder;policy.consent={accepted:true,wording:PAYOUT_CONSENT_WORDING,at,actorUserId:actorId};policy.updatedAt=at;
+    policy.holder=body.holder;policy.consent={accepted:true,wording:PAYOUT_CONSENT_WORDING,at,actorUserId:actorId,
+      qrFileId:qrFileId??current?.qrFileId??policy.consent?.qrFileId??null};policy.updatedAt=at;
   }
   if(destinationChanged)pause();
   let account = current;
