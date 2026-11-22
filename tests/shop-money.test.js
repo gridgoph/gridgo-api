@@ -126,6 +126,9 @@ test('counter cash stays off, collection is audited once, and launch-week platfo
  const s=setup({bonus:true}),o=s.orders[0];o.paymentMethod='counter_cash';o.clientPayment=clientPaymentSnapshot(o);s.settings.paymentQrFileId='platform';
  const path='/ops/shop-money/shops/supplier/counter-cash',body={orderId:o.id,amountMinor:o.totalMinor,cashReceivedConfirmed:true,reason:'Counter collection'};
  await assert.rejects(call(s,path,body),e=>e.code==='counter_cash_disabled');
+ s.approvalCases.find(c=>c.userId==='supplier').status='pending';
+ await assert.rejects(call(s,'/ops/shop-money/shops/supplier/policy',{expectedVersion:0,counterCashEnabled:true,reason:'Controlled rollout'},actors.admin,AT,'PATCH'),e=>e.code==='cash_supplier_verification_required');
+ s.approvalCases.find(c=>c.userId==='supplier').status='approved';
  await call(s,'/ops/shop-money/shops/supplier/policy',{expectedVersion:0,counterCashEnabled:true,reason:'Controlled rollout'},actors.admin,AT,'PATCH');
  const collected=await call(s,path,body);assert.equal(collected.body.collection.data.shareMinor,0);assert.equal((await call(s,path,body)).body.replayed,true);
  assert.equal(shopMoneyBalances(s,'supplier',AT).owedMinor,6000);assert.equal(shopMoneyBalances(s,'supplier',AT).owingMinor,0);

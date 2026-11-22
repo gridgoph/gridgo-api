@@ -58,7 +58,7 @@ Existing individual `/orders/:id/milestones/:code/prepare`, `/release`, reservat
 
 ## Pay GRIDGO and future counter cash
 
-Counter cash remains off for every shop by default. `PATCH /ops/shop-money/shops/:supplierId/policy` takes `expectedVersion` (initially 0), `counterCashEnabled`, and `reason`. Enabling requires the platform receiving QR to be configured. This switch prepares financial collection and new-order holds; it does not add a client checkout option or change Express's existing all-online payment policy.
+Counter cash remains off for every shop by default. `PATCH /ops/shop-money/shops/:supplierId/policy` takes `expectedVersion` (initially 0), `counterCashEnabled`, and `reason`. Enabling requires a verified supplier and the platform receiving QR to be configured. This preserves the existing new-cash verification boundary. This switch prepares financial collection and new-order holds; it does not add a client checkout option or change Express's existing all-online payment policy.
 
 For a future checkout that has already snapshotted `counter_cash`, staff may `POST /ops/shop-money/shops/:supplierId/counter-cash` with `orderId`, the exact sale `amountMinor`, `cashReceivedConfirmed: true` and `reason`. It records the snapshotted GRIDGO service share once in the same recovery ledger used for payout netting. During the supplier's snapshotted launch week that counter service share is waived. It cannot reclassify an online order as counter cash.
 

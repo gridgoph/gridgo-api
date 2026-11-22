@@ -2,7 +2,7 @@ import {randomUUID} from 'node:crypto';
 import {appendAudit} from './audit.js';
 import {privilegedAdminMemberships,queueInvalidate} from './notifications.js';
 import {releaseMilestone,activePayoutHold} from './operational-model.js';
-import {prepareVerificationPayout,completeVerificationPayout,verificationSummary,verificationReservationsForOrder,cancelVerificationReservation,markVerificationTransferUnknown,recordShopRecovery} from './supplier-verification.js';
+import {prepareVerificationPayout,completeVerificationPayout,verificationSummary,verificationReservationsForOrder,cancelVerificationReservation,markVerificationTransferUnknown,recordShopRecovery,supplierVerified} from './supplier-verification.js';
 import {recordPreparedSupplierTransfer} from './supplier-transfer-reconciliation.js';
 import {resolvePayoutReceipt} from './payout-receipt.js';
 import {opsPayoutAccountProjection} from './payout-account.js';
@@ -265,7 +265,9 @@ export async function routeShopMoney({req,url,store,user,readBody,now,id}) {
   const policy=/^\/ops\/shop-money\/shops\/([^/]+)\/policy$/.exec(path);
   if(policy&&req.method==='PATCH') {
     if(!superAdmin)fail('forbidden',403);
+    if(!(store.userRoleMemberships||[]).some(m=>m.userId===policy[1]&&m.role==='supplier'))fail('supplier_not_found',404);
     if(typeof body.counterCashEnabled!=='boolean'||(typeof body.reason!=='string'||!body.reason.trim()))fail('invalid_shop_money_policy',400);
+    if(body.counterCashEnabled&&!supplierVerified(store,policy[1]))fail('cash_supplier_verification_required');
     if(body.expectedVersion!==events(store).filter(e=>e.supplierId===policy[1]&&e.kind==='policy').length)fail('shop_money_stale');
     if(body.counterCashEnabled&&!store.settings.paymentQrFileId)fail('payment_qr_required');
     const row=append(store,{key:`policy:${policy[1]}:${body.expectedVersion+1}`,supplierId:policy[1],kind:'policy',data:{counterCashEnabled:body.counterCashEnabled,reason:body.reason,version:body.expectedVersion+1}},c,true);
