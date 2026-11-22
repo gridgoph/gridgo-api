@@ -99,6 +99,8 @@ function readyQrFile(store, account) {
 export function payoutAccountProjection(store, account) {
   if (!account) return null;
   const file = readyQrFile(store, account);
+  const policy=(store.supplierPayoutPolicies||[]).find(p=>p.supplierId===account.supplierId);
+  const guided=(store.supplierSignups||[]).some(s=>s.supplierId===account.supplierId);
   return {
     supplierId: account.supplierId,
     provider: account.provider,
@@ -116,9 +118,7 @@ export function payoutAccountProjection(store, account) {
       : null,
     version: account.version || 1,
     updatedAt: account.updatedAt,
-    holder: (store.supplierPayoutPolicies||[]).find(p=>p.supplierId===account.supplierId)?.holder??null,
-    consent: (store.supplierPayoutPolicies||[]).find(p=>p.supplierId===account.supplierId)?.consent??null,
-    payoutStatus: supplierPayoutStatus(store,account.supplierId),
+    ...(policy||guided?{holder:policy?.holder??null,consent:policy?.consent??null,payoutStatus:supplierPayoutStatus(store,account.supplierId)}:{}),
   };
 }
 

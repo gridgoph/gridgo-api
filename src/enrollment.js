@@ -352,13 +352,15 @@ function notifySignupAndInvalidate(store, approvalCase, createId, at) {
 }
 
 export function enrollSupplier({ store, clerkUserId, clerkUser, body, idempotencyKey, createId, now }) {
+  const guidedRequest=Object.hasOwn(body||{},'signupVersion');
+  if(guidedRequest)rejectUnexpected(body,['signupVersion','jobsHandledBy','legalConsentVersion','legalConsent']);
+  const legacyInput=guidedRequest?null:validateSupplierInput(body);
   const existing = mappedUser(store, clerkUserId);
   if (existing && exactRetry(store, { kind: "supplier", user: existing, key: idempotencyKey, body })) {
     return retryResult(store, existing, "supplier", "supplier");
   }
-  const guided = Object.hasOwn(body || {}, 'signupVersion') ? signupEnrollment(store,clerkUserId,body.signupVersion) : null;
-  if (guided) rejectUnexpected(body,['signupVersion','jobsHandledBy','legalConsentVersion','legalConsent']);
-  const validated = validateSupplierInput(guided ? {...guided.body,jobsHandledBy:body.jobsHandledBy} : body);
+  const guided = guidedRequest ? signupEnrollment(store,clerkUserId,body.signupVersion) : null;
+  const validated = legacyInput||validateSupplierInput({...guided.body,jobsHandledBy:body.jobsHandledBy});
   const application = resolveSupplierCategories(store, validated);
   const at = now();
   const { user } = resolveOrCreateIdentity({

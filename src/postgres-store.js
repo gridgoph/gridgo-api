@@ -933,7 +933,30 @@ function readGraph(database) {
   async function read(name, where, values = [], options = {}) {
     const table = TABLES.find(table => table.name === name);
     if (!table) throw new Error(`Unknown read graph table: ${name}`);
-    loaded[name] = (await database.query(orderReadQuery(table, where, options), values)).rows;
+    const sql=orderReadQuery(table,where,options);
+    if(name!=='supplier_payout_accounts') {
+      loaded[name]=(await database.query(sql,values)).rows;
+      return;
+    }
+    // Keep the existing bounded account read and query budget. Private policy
+    // facts share its repeatable-read snapshot, rather than three extra reads.
+    const rows=(await database.query(`SELECT account.*,
+      (SELECT to_jsonb(s) FROM supplier_signups s WHERE s.supplier_id=account.supplier_id) AS signup_fact,
+      (SELECT to_jsonb(p) FROM supplier_payout_policies p WHERE p.supplier_id=account.supplier_id) AS policy_fact,
+      (SELECT jsonb_agg(to_jsonb(m)) FROM shop_memberships m WHERE m.shop_id=account.supplier_id AND m.role='owner' AND m.status='active') AS owner_facts
+      FROM (${sql}) account`,values)).rows;
+    const merge=(name,row,keys)=>{
+      if(!row)return;
+      for(const key of ['created_at','updated_at','last_used_at','paused_until'])if(row[key])row[key]=new Date(row[key]).toISOString();
+      const index=loaded[name].findIndex(existing=>keys.every(key=>existing[key]===row[key]));
+      if(index<0)loaded[name].push(row);else loaded[name][index]=row;
+    };
+    loaded[name]=rows.map(({signup_fact,policy_fact,owner_facts,...account})=>{
+      merge('supplier_signups',signup_fact,['clerk_user_id']);
+      merge('supplier_payout_policies',policy_fact,['supplier_id']);
+      for(const owner of owner_facts||[])merge('shop_memberships',owner,['shop_id','user_id']);
+      return account;
+    });
   }
   function finish(options = {}) {
     const store = storeFromRows(loaded, { ...options, writable: false });
@@ -1478,8 +1501,6 @@ async function readUserDirectory(graph, ids, pathname, params, role) {
   } else if (pathname.endsWith('/payout-account')) {
     await read('supplier_profiles', 'WHERE user_id = $1', [target]);
     await read('supplier_payout_accounts', 'WHERE supplier_id = $1', [target]);
-    for(const table of ['supplier_signups','supplier_payout_policies'])await read(table,'WHERE supplier_id=$1',[target]);
-    await read('shop_memberships','WHERE shop_id=$1',[target]);
     await read('files', 'WHERE file_id = ANY($1::text[])', [loaded.supplier_payout_accounts.map(row => row.qr_file_id)]);
   } else {
     const record = graph.finish().users.find(row => row.id === target);
@@ -1650,8 +1671,6 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
   const suppliers = [...new Set(loaded.orders.map(row => row.supplier_id).filter(Boolean))];
   await read('supplier_profiles', 'WHERE user_id = ANY($1::text[])', [suppliers]);
   await read('supplier_payout_accounts', 'WHERE supplier_id = ANY($1::text[])', [suppliers]);
-  for(const table of ['supplier_signups','supplier_payout_policies'])await read(table,'WHERE supplier_id=ANY($1::text[])',[suppliers]);
-  await read('shop_memberships','WHERE shop_id=ANY($1::text[])',[suppliers]);
   await read('zones', 'WHERE code = ANY($1::text[])', [loaded.orders.map(row => row.zone_code).filter(Boolean)]);
 
   // Include both attached evidence and IDs in immutable snapshots (legacy

@@ -4811,7 +4811,7 @@ async function handleAuditedRequest(req, res) {
           message: "A payout account is private. Open your own payout account or ask Operations for access.",
         });
       }
-      if (!identityHasMembership(target, "supplier") && target.role !== "supplier") {
+      if (!hasRole(store, target.id, "supplier")) {
         return send(res, 400, {
           error: "payout_account_requires_supplier",
           message: "Payout accounts apply only to supplier accounts. Choose a supplier profile.",

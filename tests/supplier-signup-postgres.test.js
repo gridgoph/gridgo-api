@@ -75,6 +75,10 @@ test('HTTP manager signup resumes across processes; owner claim enables private 
   ok(await api('other','PATCH','/me/payout-account',account,selected));
   const changed=ok(await api('other','PATCH','/me/payout-account',{...account,expectedVersion:1,qrFileId:'signup_qr_2'},selected)).payoutAccount;
   assert.equal(changed.payoutStatus.reason,'supplier_payout_paused');
+  const staffAccount=ok(await api('ops','GET','/users/client/payout-account')).payoutAccount;
+  assert.deepEqual(staffAccount.payoutStatus,changed.payoutStatus);
+  assert.equal(staffAccount.consent.at,changed.consent.at);
+  assert.equal(staffAccount.holder,'family');
   const state=await loadStore(db);
   assert.equal(state.shopMemberships.find(m=>m.shopId==='client'&&m.userId==='client').role,'staff');
   assert.equal(state.supplierPayoutPolicies.find(p=>p.supplierId==='client').pausedUntil,changed.payoutStatus.pausedUntil);

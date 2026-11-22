@@ -136,7 +136,8 @@ export function createExpressSnapshot(cart,lines,at) {
  return {version:1,originalSupplierId:lines[0].supplierId,location:structuredClone(cart.expressLocation),declines:0,declinedSupplierIds:[],
   pickupCode:String(randomInt(1000000)).padStart(6,'0'),events:[{state:'sending',at,supplierId:lines[0].supplierId}],
   printSettings:lines.map(line=>({fileId:line.artworkFileId,pages:structuredClone(line.documentPages),copies:line.quantity,
-    colour:line.expressPrint.colour,paper:line.expressPrint.paper,paperStock:line.expressPrint.paperStock,sides:line.expressPrint.sides,rateMinor:line.expressPrint.rateMinor,layout:line.printLayout,note:line.specialInstructions||'',acceptedWarnings:structuredClone(line.expressPrint.acceptedWarnings)}))};
+    colour:line.expressPrint.colour,paper:line.expressPrint.paper,paperStock:line.expressPrint.paperStock,sides:line.expressPrint.sides,
+    ...(line.expressPrint.paper==='a3'?{rateMinor:line.expressPrint.rateMinor}:{}),layout:line.printLayout,note:line.specialInstructions||'',acceptedWarnings:structuredClone(line.expressPrint.acceptedWarnings)}))};
 }
 const day=at=>new Date(Date.parse(at)+8*3600000).toISOString().slice(0,10);
 export function expressGuide(store,user,at) {
