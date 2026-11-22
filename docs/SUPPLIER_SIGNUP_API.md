@@ -120,6 +120,8 @@ and an **Ask your owner to claim the shop** action, using the safe status route.
   requires that verified phone. It makes this identity an active Owner, leaves
   the registering Manager as Manager, and grants no platform supplier/admin
   membership. An existing same-shop Staff member may explicitly claim too.
+  The registering Manager's own Clerk account cannot claim its owner invite,
+  even if another verified mobile is added (`shop_owner_separate_account_required`).
 - Wrong mobile, unverified mobile, expiry, revocation, consumed tokens and a
   second ownership claim are refused. A successful claim revokes sibling owner
   invites atomically. Claim, policy, audit and inbox changes use the domain lock.

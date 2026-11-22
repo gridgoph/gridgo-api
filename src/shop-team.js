@@ -165,6 +165,7 @@ export function claimShopInvite({ store, claims, clerkUser, body, id, at, audit 
   if (body.choice!==undefined && !(invite.kind==='owner' && body.choice==='not_right')) shopTeamError(400,'invalid_shop_invite_claim');
   if(invite.kind==='owner') {
     const signup=signupForShop(store,invite.shopId);
+    if(signup?.clerkUserId===claims.sub)shopTeamError(403,'shop_owner_separate_account_required');
     if(!signup || signup.steps.eligibility.registrantRole!=='manager' || signup.steps.shop.ownerPhone!==invite.identity
       || store.shopMemberships.some(m=>m.shopId===invite.shopId&&m.role==='owner'&&m.status==='active')) shopTeamError(409,'shop_owner_already_claimed');
     if(body.choice==='not_right') {

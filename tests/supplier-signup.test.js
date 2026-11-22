@@ -69,6 +69,8 @@ test('owner invite is tied to saved mobile, claims directly as Owner and never p
   const invitation=await issue();assert.equal(invitation.body.invite.kind,'owner');assert.equal(invitation.body.invite.identity,'+639170000002');
   const claim=(clerkUser,body)=>claimShopInvite({store:f.store,claims:{sub:clerkUser.id},clerkUser,body,id:f.id,at:AT,audit:()=>{}});
   assert.throws(()=>claim(f.clerkUser,{token:invitation.body.token}),e=>e.code==='shop_invite_identity_mismatch');
+  assert.throws(()=>claim({...f.clerkUser,phoneNumbers:[{phoneNumber:'+639170000002',verification:{status:'verified'}}]},
+    {token:invitation.body.token}),e=>e.code==='shop_owner_separate_account_required');
   const owner={...f.clerkUser,id:'clerk_owner',emailAddresses:[{id:'email',emailAddress:'owner@example.invalid'}],phoneNumbers:[{phoneNumber:'+639170000002',verification:{status:'verified'}}]};
   assert.equal(discoverShopInvites(f.store,owner,AT)[0].kind,'owner');
   const claimed=claim(owner,{token:invitation.body.token});
