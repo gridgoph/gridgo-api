@@ -1,3 +1,6 @@
+import {routeShopMoney,syncShopMoney,sweepShopMoney,shopMoneySettings,shopMoneyWorkDue,shopMoneyChanged} from './shop-money.js';
+import {validateShopMoneySettings} from './shop-money-settings.js';
+import {activeShopTransferForKey} from './shop-money-policy.js';
 import { supplierCanWork, verificationSettings, verificationSummary, assertVerificationPolicyChange,
   prepareVerificationPayout, completeVerificationPayout, recordVerificationRecovery, reconcileVerificationRecovery, cancelVerificationReservation, markVerificationTransferUnknown, verificationReservationsForOrder, assertVerificationReplay, reconcileVerificationHolds, remindSupplierVerification } from "./supplier-verification.js";
 import { supplierMatchBlockersFor } from "./supplier-eligibility.js";
@@ -589,6 +592,7 @@ async function save(view, { notificationsOnly = false } = {}) {
     }
   }
   if (!scope) { await hydrateCashWallets(database,store); reconcileDispatchOffers(store, { at: now(), id, audit }); }
+  if(!scope&&shopMoneyChanged(store,originalDomainStore(store)))syncShopMoney(store,{at:now(),id});
   deriveMissingAudit(store, originalDomainStore(store));
   recordOrderActions(store, originalDomainStore(store));
   deriveDomainEvents(store, originalDomainStore(store), {createId:id,at:now()});
@@ -973,7 +977,8 @@ function publicOperationalSettings(settings, store = null, user = null) {
     testerSignupFormUrlTemplate: rest.testerSignupFormUrlTemplate ?? null,
     colourDetection: colourSettings(settings),
     operatingHours: operatingHours(settings),
-    riderCommissionBps: rest.riderCommissionBps ?? 8_500,
+    shopMoney: shopMoneySettings(settings),
+    riderCommissionBps: rest.riderCommissionBps ?? 8_000,
     riderOfferTimeoutSeconds: offerTimeoutSeconds(rest),
     shopEarlyAccessEnabled: rest.shopEarlyAccessEnabled === true,
     clientRiderLocationRevealDistanceMeters: rest.clientRiderLocationRevealDistanceMeters ?? 1_000,
@@ -3217,6 +3222,9 @@ async function handleAuditedRequest(req, res) {
       return send(res, riderProfileResponse.status, riderProfileResponse.body);
     }
 
+    const moneyResponse=await routeShopMoney({req,url,store,user,readBody,now,id,database});
+    if(moneyResponse){res.setHeader('Cache-Control','private, no-store');if(moneyResponse.mutated)await save(store);return send(res,moneyResponse.status,moneyResponse.body);}
+
     const payoutAccountResponse = await routePayoutAccount({
       req,
       url,
@@ -4504,8 +4512,13 @@ async function handleAuditedRequest(req, res) {
           && !identityHasMembership(user, "super_admin")) {
         return send(res, 403, { error: "forbidden" });
       }
+      if(Object.hasOwn(body,'shopMoney')) {
+        validateShopMoneySettings({shopMoney:body.shopMoney&&typeof body.shopMoney==='object'&&!Array.isArray(body.shopMoney)?{...shopMoneySettings(store.settings),...body.shopMoney}:body.shopMoney});
+        if(Object.hasOwn(body.shopMoney,'launchedAt')&&body.shopMoney.launchedAt!==shopMoneySettings(store.settings).launchedAt)return send(res,400,{error:'shop_money_launch_immutable'});
+      }
       const next = {
         ...store.settings,
+        shopMoney: Object.hasOwn(body,"shopMoney") ? {...shopMoneySettings(store.settings),...body.shopMoney,launchedAt:shopMoneySettings(store.settings).launchedAt} : shopMoneySettings(store.settings),
         supplierVerification: Object.hasOwn(body,"supplierVerification") ? body.supplierVerification : verificationSettings(store.settings),
         expressRates: Object.hasOwn(body,"expressRates") ? body.expressRates : expressRates(store.settings),
         cash: Object.hasOwn(body,'cash') ? (body.cash && typeof body.cash==='object' && !Array.isArray(body.cash)
@@ -4534,7 +4547,7 @@ async function handleAuditedRequest(req, res) {
         hubPickup: Object.hasOwn(body, "hubPickup") ? body.hubPickup : hubPickupSettings(store.settings),
         productionPenalty: Object.hasOwn(body, "productionPenalty") ? body.productionPenalty : productionPenaltySettings(store.settings),
         riderCommissionBps: Object.hasOwn(body, "riderCommissionBps")
-          ? body.riderCommissionBps : (store.settings.riderCommissionBps ?? 8_500),
+          ? body.riderCommissionBps : (store.settings.riderCommissionBps ?? 8_000),
         // New checkouts only: every order keeps the split it was placed under.
         downpaymentPercent: Object.hasOwn(body, "downpaymentPercent")
           ? body.downpaymentPercent : downpaymentPercentSetting(store.settings),
@@ -6260,6 +6273,7 @@ async function handleAuditedRequest(req, res) {
       const order=store.orders.find(o=>o.id===pathname.split('/')[2]);if(!order)return send(res,404,{error:'order_not_found'});
       const body=await readBody(req);
       const unknown=pathname.endsWith('/reconcile')&&body.outcome==='unknown',paid=pathname.endsWith('/reconcile')&&body.outcome==='paid';
+      if(activeShopTransferForKey(store,body.payoutKey||`stage:${order.id}:${pathname.split('/')[4]}`))return send(res,409,{error:'shop_money_transfer_route_required'});
       if(pathname.endsWith('/reconcile')&&!['unknown','not_sent','paid'].includes(body.outcome))return send(res,400,{error:'invalid_verification_transfer_outcome'});
       if((!unknown&&!paid&&body.noFundsSentConfirmed!==true)||typeof body.reason!=='string'||!body.reason.trim())return send(res,400,{error:'verification_reservation_confirmation_required'});
       const code=pathname.split('/')[4],ctx={at:now(),actor:user,id,attemptId:body.attemptId,reason:body.reason.trim()};
@@ -6288,6 +6302,7 @@ async function handleAuditedRequest(req, res) {
       assertReviewMoneyAllowed(order);
       const body = await readBody(req);
       const existing=order.payoutMilestones.find(stage=>stage.code===milestoneCode);
+      if(activeShopTransferForKey(store,`stage:${order.id}:${milestoneCode}`))return send(res,409,{error:'shop_money_transfer_route_required'});
       if(existing?.status==='released') {
         if(pathname.endsWith('/prepare'))return send(res,200,{payout:{status:'released'},milestone:existing});
         if(verificationReservationsForOrder(store,order).some(e=>e.payoutKey===`stage:${order.id}:${milestoneCode}`))return send(res,409,{error:'verification_transfer_reconciliation_required'});
@@ -8466,6 +8481,7 @@ async function runLifecycleWork() {
   try {
     await continueAfterStepFailure([
       () => runPlayOptinReminders({ database, broadcast: broadcastPlayOptin, now }),
+      async () => {if(await shopMoneyWorkDue(database,now()))await enqueueMutation(async()=>{const s=await load();if(sweepShopMoney(s,{at:now(),id}))await save(s);});},
       sweepRescheduleRequests,
       () => sweepDispatchOffers(true),
       async () => {

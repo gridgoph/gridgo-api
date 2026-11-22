@@ -265,7 +265,7 @@ export async function routeCash({req,url,db,store,user,readBody,id,now,audit,sto
       const pickup=gridgoOfficePoint(), distanceMeters=distanceMetersBetween(pickup,order.dropoff);
       const feeMinor=deliveryFeeForDistance(distanceMeters,store.settings);
       p.redelivery={id:id('redelivery'),pickup,dropoff:structuredClone(order.dropoff),distanceMeters,feeMinor,
-        ...deliverySplit(feeMinor,store.settings.riderCommissionBps??8500),quotedAt:at,expiresAt:new Date(Date.parse(at)+15*60000).toISOString()};
+        ...deliverySplit(feeMinor,store.settings.riderCommissionBps??8000),quotedAt:at,expiresAt:new Date(Date.parse(at)+15*60000).toISOString()};
     } else if (action==='redelivery-payment') {
       const leg=p.redelivery;
       if (!leg || leg.id!==body.redeliveryId || leg.payment || Date.parse(at)>=Date.parse(leg.expiresAt)) fail('cash_redelivery_quote_stale');

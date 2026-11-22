@@ -28,6 +28,8 @@ Staff invitations, QR/OTP handovers, hub reminders and receipt scans are documen
 
 The authoritative mobile contracts are [Operational Model v2](docs/OPERATIONAL_MODEL_V2_API.md), [Client refunds](docs/REFUNDS_API.md), [Storage API](docs/STORAGE_API.md), and [Taxonomy API](docs/TAXONOMY_API.md). Production setup, cutover, backup, and recovery are in [Deployment](docs/DEPLOYMENT.md).
 
+Daily shop settlement, Owner money reads, launch bonuses and manual Pay GRIDGO confirmation: [Shop money](docs/SHOP_MONEY_API.md).
+
 Pending-shop online work, verification limits and the payout desk prepare calls: [Supplier verification](docs/SUPPLIER_VERIFICATION_API.md).
 
 ## Architecture decisions
