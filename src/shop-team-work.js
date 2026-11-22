@@ -15,6 +15,8 @@ export function memberPreferences(store, shopId, userId, create=false) {
 export const effectiveShopRole = (store, member) => member.role === 'owner' ? 'owner'
   : memberPreferences(store,member.shopId,member.userId)?.manager ? 'manager' : 'staff';
 export function managerRouteAllowed(method,path) {
+  if(method==='POST'&&path==='/me/supplier-signup/setup-help')return true;
+  if(method==='GET'&&['/me/supplier-signup','/me/payout-status'].includes(path))return true;
   if (['GET','PATCH'].includes(method) && path === '/me/shop-hours') return true;
   if (method === 'GET' && ['/listing-starters','/me/supplier-readiness','/me/supplier-services'].includes(path)) return true;
   if (['GET','POST'].includes(method) && path === '/me/catalog-items') return true;

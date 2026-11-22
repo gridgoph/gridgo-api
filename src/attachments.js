@@ -58,6 +58,7 @@ const CONTENT_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "applica
 export const VERIFICATION_DOCUMENT_TYPES = Object.freeze(["business_permit", "valid_id", "sample_work"]);
 const VERIFICATION_DOCUMENT_TYPE_SET = new Set(VERIFICATION_DOCUMENT_TYPES);
 export const PURPOSE_POLICIES = Object.freeze({
+  supplier_price_list: {roles:['supplier'],maxBytes:15*1024*1024,contentTypes:['image/jpeg','image/png','image/webp','application/pdf']},
   cash_topup_proof: { roles: ['rider'], maxBytes: 15*1024*1024, contentTypes: ['image/jpeg','image/png','image/webp'] },
   cash_shop_receipt: { roles: ['rider'], maxBytes: 15*1024*1024, contentTypes: ['image/jpeg','image/png','image/webp'] },
   cash_no_show_photo: { roles: ['rider'], maxBytes: 15*1024*1024, contentTypes: ['image/jpeg','image/png','image/webp'] },
@@ -817,6 +818,7 @@ export function resolveFileTarget(store, purpose, body, user = null) {
       "The payment QR is the platform wallet plate. It is not attached to an order.",
     );
   }
+  if(purpose==='supplier_price_list')fail(400,'supplier_price_list_not_attachable','Send price-list file IDs to POST /me/supplier-signup/setup-help.');
   if (purpose === "supplier_payout_qr") {
     fail(
       400,
@@ -1485,7 +1487,7 @@ export function authorizeFileRead(user, store, file) {
     if (file.ownerId === user.id) return;
     forbidden();
   }
-  if (file.purpose === "verification_document" || file.purpose === "supplier_payout_qr") {
+  if (file.purpose === "verification_document" || file.purpose === "supplier_payout_qr" || file.purpose==='supplier_price_list') {
     if (hasRole(user, "supplier") && file.ownerId === user.id) return;
     forbidden();
   }

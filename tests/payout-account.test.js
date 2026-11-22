@@ -6,6 +6,7 @@ import { authorizeFileRead, markFileDeletePending } from "../src/attachments.js"
 import { retentionDecision } from "../src/file-retention-policy.js";
 import { publicOrderFor } from "../src/operational-model.js";
 import { resolveAuthorizationContext, selectActorRole } from "../src/authorization-context.js";
+import { PAYOUT_CONSENT_WORDING } from '../src/supplier-signup.js';
 
 const AT = "2026-09-15T00:00:00.000Z";
 const LATER = "2026-09-15T01:00:00.000Z";
@@ -72,7 +73,7 @@ function call(store, { method, userId = "supplier", body = {}, headers = {}, at 
     url: new URL(`http://127.0.0.1/me/payout-account${search}`),
     store,
     user: actor(store, userId),
-    readBody: async () => body,
+    readBody: async () => body && typeof body === 'object' ? {holder:'mine',consent:{accepted:true,wording:PAYOUT_CONSENT_WORDING},...body} : body,
     now: () => at,
     audit,
   });
@@ -127,6 +128,9 @@ test("a shop sets up GCash with its plate in one write and reads it back", async
     qr: { fileId: "qr_one", originalFilename: "qr_one.png", detectedContentType: "image/png", size: 10, readyAt: AT },
     version: 1,
     updatedAt: AT,
+    holder:'mine',
+    consent:{accepted:true,wording:PAYOUT_CONSENT_WORDING,at:AT,actorUserId:'supplier'},
+    payoutStatus:{held:false,reason:null,ownerClaimRequired:false,pausedUntil:null},
   });
   assert.deepEqual(store.files[0].references, [{ type: "supplier_payout_account", id: "supplier", field: "qr" }]);
   assert.deepEqual(actions.map((entry) => [entry.action, entry.entityType, entry.entityId]), [

@@ -6,6 +6,7 @@ import { identityHasMembership, selectActorRole } from './authorization-context.
 import { ensureShopOwners } from './shop-team-store.js';
 import { queueInvalidate, privilegedAdminMemberships } from './notifications.js';
 import { canReadOrderArtwork } from './order-file-access.js';
+import { signupForShop } from './supplier-signup.js';
 
 export const shopTeamError = (status, code) => { throw Object.assign(new Error(code), { status, code }); };
 export const inviteHash = token => createHash('sha256').update(token).digest('hex');
@@ -94,7 +95,7 @@ export function assertStaffFile(user, store, file, { upload = false, purpose = f
     if (upload || teamPhotoReadable(store,file,user,user.id)) return;
     shopTeamError(403,'forbidden');
   }
-  if (user.shopRole === 'manager' && purpose === 'catalog_item_photo') {
+  if (user.shopRole === 'manager' && ['catalog_item_photo','supplier_price_list'].includes(purpose)) {
     if (upload || file?.ownerId === user.id) return;
     shopTeamError(403,'forbidden');
   }
@@ -141,14 +142,14 @@ function issueShopInvite({ store, user, shopId, kind, identity, at, id, audit })
   const token = randomBytes(32).toString('base64url');
   const invite = { id: id('shi'), shopId, kind, identity, tokenHash: inviteHash(token), createdBy: user.id,
     createdAt: at, lifetimeHours: 24, expiresAt: new Date(Date.parse(at) + 24 * 3600000).toISOString() };
-  store.shopInvites.push(invite);
+  (store.shopInvites||=[]).push(invite);
   audit(store, { actor: user, action: 'shop_team.invite_created', entityType: 'shop_invite', entityId: invite.id, detail: { shopId, kind } });
   return { status: 201, mutated: true, body: { invite: publicInvite(invite, at), token, delivery: 'share_link' } };
 }
 export function discoverShopInvites(store, clerkUser, at = isoNow()) {
   const verified = verifiedIdentities(clerkUser);
   return (store.shopInvites || []).filter(row => !row.claimedAt && !row.revokedAt && Date.parse(row.expiresAt) > Date.parse(at)
-    && verified[row.kind]?.includes(row.identity)).map(row => ({ ...publicInvite(row, at), shop: shopSummary(store, { shopId: row.shopId, role: 'staff', status: 'pending' }) }));
+    && verified[row.kind==='owner'?'phone':row.kind]?.includes(row.identity)).map(row => ({ ...publicInvite(row, at), shop: shopSummary(store, { shopId: row.shopId, role: 'staff', status: 'pending' }) }));
 }
 export function claimShopInvite({ store, claims, clerkUser, body, id, at, audit }) {
   if (!claims?.sub) shopTeamError(401, 'unauthorized');
@@ -156,11 +157,29 @@ export function claimShopInvite({ store, claims, clerkUser, body, id, at, audit 
   if (!clerkUser || clerkUser.id !== claims.sub) shopTeamError(502, 'clerk_unavailable');
   const invite = typeof body.token === 'string' && /^[A-Za-z0-9_-]{43}$/.test(body.token)
     ? store.shopInvites.find(row => row.tokenHash === inviteHash(body.token))
-    : typeof body.inviteId === 'string' ? store.shopInvites.find(row => row.id === body.inviteId && ['email', 'phone'].includes(row.kind)) : null;
+    : typeof body.inviteId === 'string' ? store.shopInvites.find(row => row.id === body.inviteId && ['email', 'phone','owner'].includes(row.kind)) : null;
   inviteAvailable(invite, at);
-  if (['email', 'phone'].includes(invite.kind) && !verifiedIdentities(clerkUser)[invite.kind].includes(invite.identity)) shopTeamError(403, 'shop_invite_identity_mismatch');
+  if (['email', 'phone','owner'].includes(invite.kind) && !verifiedIdentities(clerkUser)[invite.kind==='owner'?'phone':invite.kind].includes(invite.identity)) shopTeamError(403, 'shop_invite_identity_mismatch');
   let user = store.users.find(row => row.clerkUserId === claims.sub);
   if (user && (user.accountStatus || 'active') !== 'active') shopTeamError(403, 'forbidden');
+  if (body.choice!==undefined && !(invite.kind==='owner' && body.choice==='not_right')) shopTeamError(400,'invalid_shop_invite_claim');
+  if(invite.kind==='owner') {
+    const signup=signupForShop(store,invite.shopId);
+    if(!signup || signup.steps.eligibility.registrantRole!=='manager' || signup.steps.shop.ownerPhone!==invite.identity
+      || store.shopMemberships.some(m=>m.shopId===invite.shopId&&m.role==='owner'&&m.status==='active')) shopTeamError(409,'shop_owner_already_claimed');
+    if(body.choice==='not_right') {
+      const profile=store.supplierProfiles.find(p=>p.userId===invite.shopId);
+      profile.isClosed=true;profile.version=(profile.version||1)+1;profile.updatedAt=at;
+      signup.steps.ownerClaim={status:'disputed',at};signup.updatedAt=at;signup.version++;
+      invite.revokedAt=at;
+      audit(store,{actor:store.users.find(u=>u.clerkUserId===claims.sub)||null,action:'shop_team.ownership_disputed',entityType:'shop_invite',entityId:invite.id,detail:{shopId:invite.shopId}});
+      for(const recipient of [{userId:invite.shopId,appRole:'supplier'},...privilegedAdminMemberships(store).map(m=>({userId:m.userId,appRole:m.role}))]) {
+        store.notifications.push({id:id('ntf'),...recipient,type:'shop_ownership_disputed',shopId:invite.shopId,title:'Shop ownership needs review',body:'The invited owner reported that the shop details are not right. New jobs are paused.',at,read:false});
+      }
+      queueInvalidate(store,{resource:'catalog',userIds:[invite.shopId]});
+      return {paused:true,shopId:invite.shopId};
+    }
+  }
   if (!user) {
     if (['link','qr'].includes(invite.kind) && !verifiedIdentities(clerkUser).phone.length) shopTeamError(403,'shop_mobile_verification_required');
     if (body.name !== undefined && (typeof body.name!=='string' || !body.name.trim() || body.name.trim().length>100)) shopTeamError(400,'invalid_shop_member_name');
@@ -175,12 +194,17 @@ export function claimShopInvite({ store, claims, clerkUser, body, id, at, audit 
   }
   ensureShopOwners(store);
   const existing = store.shopMemberships.find(row => row.shopId === invite.shopId && row.userId === user.id);
-  if (existing && existing.status !== 'removed') shopTeamError(409, 'shop_member_exists');
+  if (existing && existing.status !== 'removed' && invite.kind!=='owner') shopTeamError(409, 'shop_member_exists');
   const member = existing || { shopId: invite.shopId, userId: user.id, createdAt: at };
-  Object.assign(member, { role: 'staff', status: 'pending', updatedAt: at, decidedBy: null });
+  Object.assign(member, { role: invite.kind==='owner'?'owner':'staff', status: invite.kind==='owner'?'active':'pending', updatedAt: at, decidedBy: null });
   if (!existing) store.shopMemberships.push(member);
   const oldPreferences=memberPreferences(store,invite.shopId,user.id);if(oldPreferences) oldPreferences.manager=false;
   invite.claimedAt = at; invite.claimedBy = user.id;
+  if(invite.kind==='owner') {
+    const signup=signupForShop(store,invite.shopId);
+    signup.steps.ownerClaim={status:'claimed',userId:user.id,at};signup.updatedAt=at;signup.version++;
+    for(const pending of store.shopInvites)if(pending!==invite&&pending.shopId===invite.shopId&&pending.kind==='owner'&&!pending.claimedAt&&!pending.revokedAt)pending.revokedAt=at;
+  }
   audit(store, { actor: user, action: 'shop_team.invite_claimed', entityType: 'shop_invite', entityId: invite.id, detail: { shopId: invite.shopId } });
   const recipients = [
     ...store.shopMemberships.filter(row => row.shopId === invite.shopId && row.role === 'owner' && row.status === 'active')
@@ -189,7 +213,7 @@ export function claimShopInvite({ store, claims, clerkUser, body, id, at, audit 
   ];
   for (const recipient of recipients) store.notifications.push({
     id: id('ntf'), ...recipient, type: 'shop_invite_claimed', shopId: invite.shopId,
-    title: 'Shop invitation claimed', body: 'A teammate is waiting for owner approval in the shop team.',
+    title: 'Shop invitation claimed', body: invite.kind==='owner'?'The invited owner has claimed the shop. The manager keeps Manager access.':'A teammate is waiting for owner approval in the shop team.',
     occurrenceKey: `shop-invite-claimed:${invite.id}:${recipient.userId}:${recipient.appRole}`, at, read: false,
   });
   queueInvalidate(store, { resource: 'identity', userIds: [invite.shopId, user.id] });
@@ -255,8 +279,16 @@ export async function routeShopTeam({ req, url, store, user, readBody, id, now, 
   if (!operations && own?.[1] === 'invites' && req.method === 'POST' && !own[2]) {
     const body = await readBody(req);
     if (!body || typeof body !== 'object' || Array.isArray(body)) shopTeamError(400, 'invalid_invite_kind');
-    if (!['email', 'phone', 'qr', 'link'].includes(body.kind)) shopTeamError(400, 'invalid_invite_kind');
+    if (!['email', 'phone', 'qr', 'link','owner'].includes(body.kind)) shopTeamError(400, 'invalid_invite_kind');
     let identity = null;
+    if(body.kind==='owner') {
+      const signup=signupForShop(store,shopId);
+      if(!signup||signup.steps.eligibility.registrantRole!=='manager'||!signup.steps.shop.ownerPhone
+        ||store.shopMemberships.some(m=>m.shopId===shopId&&m.role==='owner'&&m.status==='active'))shopTeamError(409,'shop_owner_already_claimed');
+      if(body.identity!==undefined&&body.identity!==signup.steps.shop.ownerPhone)shopTeamError(400,'invalid_invite_identity');
+      identity=signup.steps.shop.ownerPhone;
+      if((store.shopInvites||[]).some(i=>i.shopId===shopId&&i.kind==='owner'&&!i.claimedAt&&!i.revokedAt&&Date.parse(i.expiresAt)>Date.parse(at)))shopTeamError(409,'shop_owner_invite_exists');
+    }
     if (body.kind === 'email') {
       identity = String(body.identity || '').trim().toLowerCase();
       if (identity.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(identity)) shopTeamError(400, 'invalid_invite_identity');

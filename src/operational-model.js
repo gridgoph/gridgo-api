@@ -1,3 +1,4 @@
+import { assertSupplierPayoutAllowed, supplierPayoutStatus } from './supplier-payout-policy.js';
 import { publicShopFileAccesses } from './shop-file-access.js';
 import { expressRates, validateExpressRates, publicExpress, expressClientProjection } from './express-orders.js';
 import { validateCashSettings, cashAmounts } from './cash-policy.js';
@@ -1021,6 +1022,7 @@ export function releaseMilestone(order, code, actor, at, store = null) {
     fail(404, "milestone_not_found", "That payout milestone does not exist. Refresh the order and try again.");
   }
   if (milestone.status === "released") return milestone;
+  assertSupplierPayoutAllowed(store,order.supplierId,at);
   if (refundSettlementFor(store, order)) {
     fail(409, "refund_settlement_payout_hold", "The refund settlement replaces the remaining payout entitlement. Operations must reconcile the settlement before a shop payment.");
   }
@@ -1864,7 +1866,7 @@ function closeIssueWindow(store, order, at, { by, note }) {
   order.timeline.push({ at, state: "completed", by, note });
   if (isReviewData(order) || payoutPlanVersionOf(order) !== LEGACY_PAYOUT_PLAN_VERSION || supplementTotals(store, order).totalMinor > 0) return;
   const retention = (order.payoutMilestones || []).find((item) => item.code === "retention");
-  if (retention?.pofFileIds?.length) {
+  if (retention?.pofFileIds?.length && !supplierPayoutStatus(store,order.supplierId,at).held) {
     releaseMilestone(order, "retention", { id: "system", role: "system" }, at, store);
     order.timeline.push({
       at,

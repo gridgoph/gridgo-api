@@ -1,4 +1,5 @@
 import { shopPaused } from './shop-availability.js';
+import { assertDocumentRequest } from './document-capabilities.js';
 import { pingPrinterDemand } from './printer-demand.js';
 import { isDeepStrictEqual } from 'node:util';
 import { expressRates, expressLinePrice, expressPoint, expressShopList, assertExpressNightJob, expressGuide, updateExpressGuide, createExpressSnapshot, publicExpress, expressClientProjection, expressCatalogOptions } from './express-orders.js';
@@ -632,6 +633,7 @@ function publicCartListingStub(store, item, optionIds) {
 }
 
 function assertPrinterCap(store, item, request) {
+  assertDocumentRequest(store,item,request.line||request);
   if (listingFitsPrinterCap(item, request, store)) return;
   fail(409, "printer_cap_exceeded", "This shop's printer cannot print that width.", {
     field: "printerMaxWidthFeet",
@@ -1181,6 +1183,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   // Snapshotted here, like the rider delivery split: the setting moving later
   // never changes what this client owes.
   const cash = body.payment?.method === 'cash';
+  const paymentAfterAcceptance=cart.orderType==='express'&&cartLines.some(line=>line.expressPrint?.paper==='a3');
   const downpaymentPercent = cash || basketId ? 100 : downpaymentPercentSetting(store.settings);
   const order = {
     id: orderId,
@@ -1482,6 +1485,12 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
     order.timeline = [{ at, state: 'needs_qa', by: user.id, note: 'Cash order placed; collection remains due at delivery' }];
   } else if (zeroCashBoundary) {
     if (!voucher || order.payments.initial.amountMinor !== 0) fail(409, 'voucher_zero_cash_boundary_required', 'Refresh the checkout payment amount.');
+  } else if(paymentAfterAcceptance) {
+    if(body.payment!=null)fail(409,'express_payment_after_acceptance','Pay for A3 Express after the shop accepts.');
+    order.expressOrder.paymentTiming='after_acceptance';
+    order.payments.initial.status='not_submitted';
+    order.state='needs_qa';
+    order.timeline=[{at,state:'needs_qa',by:user.id,note:'A3 Express placed; artwork review and shop acceptance precede client payment.'}];
   } else {
     const payment = record(body.payment, 'payment');
     if (payment.method !== 'qr_manual') fail(400, 'payment_method_not_allowed', 'Checkout accepts QR Ph manual payment only.', { allowed: ['qr_manual'] });
@@ -1566,7 +1575,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   for (const { item } of [...grouped.values()].flat()) if (isQuoteListing(item)) markQuoteOrdered(store, item, order, { user, at, createId });
   if (!zeroCashBoundary) notifyOpsJobNeedsQa(store, order, { createId, at });
   if (!basketId) {
-    if (!zeroCashBoundary && !cash) notifyOpsPaymentSubmitted(store, order, { createId, at });
+    if (!zeroCashBoundary && !cash && !paymentAfterAcceptance) notifyOpsPaymentSubmitted(store, order, { createId, at });
     notifyClientReceiptReady(store, order, { createId, at });
   }
   queueOrderInvalidate(store, order, ["orders"]);
@@ -2677,17 +2686,19 @@ function createExpressDraft(store,user,body,id,at) {
    serviceLevel:'standard',fulfillmentMode:body.fulfillmentMode,defaultDropoff:body.fulfillmentMode==='delivery'?point(body.dropoff,'dropoff',{required:true,requireLabel:true}):null,createdAt:at,updatedAt:at};
  const lines=body.files.map((input,index)=>{
    record(input,'file');
-   const item=store.catalogItems.find(i=>i.id===(input.catalogItemId||shop.catalogItemIds[0]));
+   const item=input.catalogItemId?store.catalogItems.find(i=>i.id===input.catalogItemId):shop.catalogItemIds.map(id=>store.catalogItems.find(i=>i.id===id)).find(i=>{
+     try{expressCatalogOptions(store,i,input);return true;}catch(error){if(error.status)return false;throw error;}
+   });
    if(!item||!shop.catalogItemIds.includes(item.id))fail(409,'express_listing_unavailable','Choose an Express document listing.');
    fileFor(store,user,input.fileId,'artwork','fileId');
-   if(!['bw','colour'].includes(input.colour)||!['a4','short','long'].includes(input.paper)||!['one','two'].includes(input.sides)) fail(400,'invalid_express_print','Choose colour, paper and sides.');
+   if(!['bw','colour'].includes(input.colour)||!['a4','short','long','a3'].includes(input.paper)||!['one','two'].includes(input.sides)) fail(400,'invalid_express_print','Choose colour, paper and sides.');
    if(!Array.isArray(input.acceptedWarnings)||input.acceptedWarnings.length>20||input.acceptedWarnings.some(w=>!['paper_size_mismatch','rgb_colour'].includes(w))) fail(400,'invalid_express_warnings','Send accepted warning codes.');
    if(input.optionIds != null)fail(400,'express_options_managed','Express selects standard print options from the print settings.');
-   const standard=expressCatalogOptions(store,item,{colour:input.colour,paper:input.paper});
+   const standard=expressCatalogOptions(store,item,input);
    const line={id:id('line'),cartId:cart.id,supplierId:shop.supplierId,catalogItemId:item.id,quantity:positiveInteger(input.copies,'copies'),
      optionIds:standard.optionIds,artworkFileId:input.fileId,printLayout:parseCartPrintLayout(item,input.layout,fail),sortOrder:index,createdAt:at,updatedAt:at,
      specialInstructions:specialInstructions(input.note),
-     expressPrint:{colour:input.colour,paper:input.paper,paperStock:standard.paperStock,sides:input.sides,rateMinor:expressRates(store.settings)[input.colour==='bw'?'bwMinor':'colourMinor'],acceptedWarnings:[...new Set(input.acceptedWarnings)]},
+     expressPrint:{colour:input.colour,paper:input.paper,paperStock:standard.paperStock,sides:input.sides,rateMinor:standard.rateMinor,acceptedWarnings:[...new Set(input.acceptedWarnings)]},
      structuredSpec:{size:input.paper,colourMode:input.colour,sides:input.sides}};
    line.documentPages=documentPagesFor(store,item,line,input.pageRange??null,{required:true});line.measurement={pages:line.documentPages.printed};
    expressLinePrice(line);assertListingArtwork(store,item,line);
@@ -2701,5 +2712,5 @@ function createExpressDraft(store,user,body,id,at) {
  if(!tester){tester={clientId:user.id};store.foundingTesters.push(tester);}tester.addedAt ||= at;
  const quote=clientCartQuote(store,cart,lines,at);
  delete quote.voucherGroups; delete quote.downpaymentPercent;
- return {status:201,body:{cartId:cart.id,confirmation:expressConfirmation(cart,lines),quote,shop},mutated:true};
+ return {status:201,body:{cartId:cart.id,confirmation:expressConfirmation(cart,lines),paymentTiming:lines.some(l=>l.expressPrint.paper==='a3')?'after_acceptance':'checkout',quote,shop},mutated:true};
 }

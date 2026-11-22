@@ -80,6 +80,8 @@ const TABLES = [
   { name: "client_match_preferences", keys: ["client_id"], columns: ["client_id", "ranking", "version", "updated_at"] },
   { name: "client_saved_addresses", keys: ["id"], columns: ["id", "client_id", "label", "address_line", "lat", "lng", "is_default", "version", "created_at", "updated_at", "deleted_at"] },
   { name: "supplier_profiles", keys: ["user_id"], columns: ["user_id", "shop_name", "contact_name", "shop_lat", "shop_lng", "shop_label", "pickup_available", "is_closed", "express_enabled", "availability", "schedule", "version", "updated_at"] },
+  { name: 'supplier_signups', keys: ['clerk_user_id'], columns: ['clerk_user_id','supplier_id','version','steps','updated_at'] },
+  { name: 'supplier_payout_policies', keys: ['supplier_id'], columns: ['supplier_id','holder','consent','paused_until','updated_at'] },
   { name: "shop_reviews", keys: ["id"], columns: ["id", "order_id", "supplier_id", "client_id", "quality_stars", "speed_stars", "value_stars", "comment", "created_at"] },
   { name: "supplier_payment_terms", keys: ["supplier_id"], columns: ["supplier_id", "delivery_downpayment_rate_bps", "pickup_full_online_enabled", "pickup_downpayment_store_enabled", "pickup_downpayment_rate_bps", "version", "updated_at"] },
   { name: "rider_profiles", keys: ["user_id"], columns: ["user_id", "vehicle_type", "plate_number", "license_number", "version", "updated_at"] },
@@ -185,6 +187,8 @@ export function emptyStore() {
     matchSelections: [],
     clientAddresses: [],
     supplierProfiles: [],
+    supplierSignups: [],
+    supplierPayoutPolicies: [],
     supplierPaymentTerms: [],
     riderProfiles: [],
     approvalCases: [],
@@ -337,6 +341,8 @@ function rowsFromStore(store) {
   for (const profile of (store.supplierProfiles || [])) {
     rows.supplier_profiles.push({ user_id: profile.userId, shop_name: profile.shopName, contact_name: profile.contactName, shop_lat: profile.shop.lat, shop_lng: profile.shop.lng, shop_label: profile.shop.label, pickup_available: Boolean(profile.pickupAvailable), is_closed: Boolean(profile.isClosed), express_enabled: profile.expressEnabled !== false, availability: profile.availability ?? null, schedule: profile.schedule ?? null, version: profile.version || 1, updated_at: profile.updatedAt });
   }
+  rows.supplier_signups=(store.supplierSignups||[]).map(s=>({clerk_user_id:s.clerkUserId,supplier_id:s.supplierId,version:s.version,steps:s.steps,updated_at:s.updatedAt}));
+  rows.supplier_payout_policies=(store.supplierPayoutPolicies||[]).map(p=>({supplier_id:p.supplierId,holder:p.holder??null,consent:p.consent??null,paused_until:p.pausedUntil??null,updated_at:p.updatedAt}));
   for (const review of (store.shopReviews || [])) {
     rows.shop_reviews.push({
       id: review.id,
@@ -1472,6 +1478,8 @@ async function readUserDirectory(graph, ids, pathname, params, role) {
   } else if (pathname.endsWith('/payout-account')) {
     await read('supplier_profiles', 'WHERE user_id = $1', [target]);
     await read('supplier_payout_accounts', 'WHERE supplier_id = $1', [target]);
+    for(const table of ['supplier_signups','supplier_payout_policies'])await read(table,'WHERE supplier_id=$1',[target]);
+    await read('shop_memberships','WHERE shop_id=$1',[target]);
     await read('files', 'WHERE file_id = ANY($1::text[])', [loaded.supplier_payout_accounts.map(row => row.qr_file_id)]);
   } else {
     const record = graph.finish().users.find(row => row.id === target);
@@ -1642,6 +1650,8 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
   const suppliers = [...new Set(loaded.orders.map(row => row.supplier_id).filter(Boolean))];
   await read('supplier_profiles', 'WHERE user_id = ANY($1::text[])', [suppliers]);
   await read('supplier_payout_accounts', 'WHERE supplier_id = ANY($1::text[])', [suppliers]);
+  for(const table of ['supplier_signups','supplier_payout_policies'])await read(table,'WHERE supplier_id=ANY($1::text[])',[suppliers]);
+  await read('shop_memberships','WHERE shop_id=ANY($1::text[])',[suppliers]);
   await read('zones', 'WHERE code = ANY($1::text[])', [loaded.orders.map(row => row.zone_code).filter(Boolean)]);
 
   // Include both attached evidence and IDs in immutable snapshots (legacy
@@ -2372,6 +2382,8 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
     if (row.schedule) item.schedule = row.schedule;
     return item;
   });
+  store.supplierSignups=loaded.supplier_signups.map(s=>({clerkUserId:s.clerk_user_id,supplierId:s.supplier_id,version:s.version,steps:s.steps,updatedAt:s.updated_at}));
+  store.supplierPayoutPolicies=loaded.supplier_payout_policies.map(p=>({supplierId:p.supplier_id,holder:p.holder,consent:p.consent,pausedUntil:p.paused_until,updatedAt:p.updated_at}));
   store.shopReviews = orderedBy(loaded.shop_reviews, "supplier_id", "created_at", "id").map((row) => ({
     id: row.id,
     orderId: row.order_id,

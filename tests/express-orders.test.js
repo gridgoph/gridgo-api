@@ -159,7 +159,7 @@ test('standard catalogue choices follow print settings and cannot include paid c
  const {store}=setup();const item=store.catalogItems[0];
  store.catalogOptionGroups=[{id:'colour',catalogItemId:item.id,name:'Colour',kind:'spec',required:true},{id:'size',catalogItemId:item.id,name:'Paper size',kind:'spec',required:true},{id:'paper',catalogItemId:item.id,name:'Paper',kind:'spec',required:true},{id:'extra',catalogItemId:item.id,name:'Add-ons',kind:'addon',required:false}];
  store.catalogOptions=[['bw','colour','Black and white'],['colour_choice','colour','Colour'],['a4','size','A4'],['stock','paper','70gsm bond'],['binding','extra','Binding']].map(([id,optionGroupId,label])=>({id,optionGroupId,label,priceModifierMinor:200,active:true}));
- assert.deepEqual(expressCatalogOptions(store,item,{colour:'bw',paper:'a4'}),{optionIds:['bw','stock','a4'],paperStock:'70gsm bond'});
+ assert.deepEqual(expressCatalogOptions(store,item,{colour:'bw',paper:'a4'}),{optionIds:['bw','stock','a4'],paperStock:'70gsm bond',rateMinor:300});
  assert.throws(()=>expressCatalogOptions(store,item,{colour:'bw',paper:'long'}),e=>e.code==='express_listing_configuration_required');
 });
 test('Express status projection maps every client state without exposing credentials before ready',async()=>{

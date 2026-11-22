@@ -2,6 +2,9 @@
 
 My shop status, expiring pauses and night Express documents: [Express API](docs/EXPRESS_API.md#my-shop-status-and-night-documents).
 
+Resumable supplier sign-up, document capabilities, owner invitations and payout
+consent/pauses: [Supplier sign-up API](docs/SUPPLIER_SIGNUP_API.md).
+
 Custom backend for GRIDGO clients, suppliers, riders, Operations, and Super Admin. The API uses PostgreSQL 17 for all domain data, MinIO for private file bytes, Clerk for every authenticated request, and optional push delivery. Notification delivery and privacy rules are in [Realtime events](docs/REALTIME_EVENTS.md).
 
 Exact cancellation quotes, gathered problem evidence and manual fault decisions are documented in [Refunds and fault](docs/REFUNDS_AND_FAULT_API.md).

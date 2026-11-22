@@ -7,6 +7,8 @@ import { ensureShopOwners } from "./shop-team-store.js";
 import { notifyOpsSignupSubmitted } from "./client-order-notifications.js";
 import { queueInvalidate } from "./notifications.js";
 import { resolveCategoryCode } from "./taxonomy.js";
+import { signupEnrollment, completeSignupEnrollment } from './supplier-signup.js';
+import { createSignupDocuments } from './document-capabilities.js';
 
 const VEHICLE_TYPES = new Set(["motorcycle", "car", "van", "truck", "bicycle"]);
 const REAPPLY_KINDS = new Map([
@@ -350,11 +352,13 @@ function notifySignupAndInvalidate(store, approvalCase, createId, at) {
 }
 
 export function enrollSupplier({ store, clerkUserId, clerkUser, body, idempotencyKey, createId, now }) {
-  const validated = validateSupplierInput(body);
   const existing = mappedUser(store, clerkUserId);
   if (existing && exactRetry(store, { kind: "supplier", user: existing, key: idempotencyKey, body })) {
     return retryResult(store, existing, "supplier", "supplier");
   }
+  const guided = Object.hasOwn(body || {}, 'signupVersion') ? signupEnrollment(store,clerkUserId,body.signupVersion) : null;
+  if (guided) rejectUnexpected(body,['signupVersion','jobsHandledBy','legalConsentVersion','legalConsent']);
+  const validated = validateSupplierInput(guided ? {...guided.body,jobsHandledBy:body.jobsHandledBy} : body);
   const application = resolveSupplierCategories(store, validated);
   const at = now();
   const { user } = resolveOrCreateIdentity({
@@ -378,7 +382,8 @@ export function enrollSupplier({ store, clerkUserId, clerkUser, body, idempotenc
   };
   if (currentProfile) Object.assign(currentProfile, profile);
   else store.supplierProfiles.push(profile);
-  const supplierServices = application.categoryCodes.map((categoryCode) => ({
+  const supplierServices = guided ? (guided.signup.steps.prints.documents
+    ? createSignupDocuments(store,user.id,guided.signup.steps.prints.documents,{id:createId,at}) : []) : application.categoryCodes.map((categoryCode) => ({
     id: createId("svc"),
     supplierId: user.id,
     categoryCode,
@@ -401,7 +406,8 @@ export function enrollSupplier({ store, clerkUserId, clerkUser, body, idempotenc
     createdAt: at,
     updatedAt: at,
   }));
-  store.supplierServices.push(...supplierServices);
+  if (!guided) store.supplierServices.push(...supplierServices);
+  if (guided) completeSignupEnrollment(store,guided.signup,user.id,at);
   const approvalCase = addInitialCase(store, {
     user, kind: "supplier", submittedAt: at, key: idempotencyKey, body, createId, at,
     snapshot: { shopName: application.shopName, serviceCategories: application.categoryCodes },
