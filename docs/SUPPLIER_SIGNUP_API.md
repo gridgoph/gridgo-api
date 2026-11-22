@@ -153,8 +153,12 @@ number/institution, `qrFileId` and `expectedVersion` fields. Add:
 ```
 
 `holder` is `mine | family | friend | staff`; `accountName` is the name on the QR
-and remains required. There is no name-match rule. Consent is required when
-binding a QR, changing an existing QR destination, or changing holder details.
+and remains required. There is no name-match rule. Guided shops, and existing
+shops that opt into holder/consent fields, require consent when binding a QR,
+changing an existing QR destination, or changing holder details. Released callers
+without guided sign-up or prior consent retain their old payout-account payload
+contract; their destination changes still receive the same 24-hour hold and owner
+notifications. Do not invent a consent record for those older screens.
 The API stores exact wording, receipt time and consenting identity. Account reads
 include `holder`, `consent` and `payoutStatus` for the owning shop and authorized
 staff only.

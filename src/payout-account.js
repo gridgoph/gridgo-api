@@ -309,7 +309,9 @@ export async function routePayoutAccount({ req, url, store, user, readBody, now,
   const destinationEstablished=Boolean(current?.qrFileId||policy?.consent?.qrFileId||policy?.pausedUntil);
   const destinationChanged=destinationEstablished&&(!current||provider!==current.provider||accountName!==current.accountName||accountNumber!==current.accountNumber
     ||institution!==current.institution||(hasQr&&qrFileId!==current.qrFileId)||(Object.hasOwn(body,'holder')&&policy?.holder&&body.holder!==policy.holder));
-  const needsConsent=Boolean(qrFile||destinationChanged&&current?.qrFileId||Object.hasOwn(body,'holder'));
+  const optsIntoConsent=Object.hasOwn(body,'holder')||Object.hasOwn(body,'consent');
+  const consentRequired=optsIntoConsent||Boolean(policy?.consent)||(store.supplierSignups||[]).some(s=>s.supplierId===user.id);
+  const needsConsent=optsIntoConsent||consentRequired&&Boolean(qrFile||destinationChanged&&current?.qrFileId);
   if(needsConsent&&(!['mine','family','friend','staff'].includes(body.holder)||body.consent?.accepted!==true||body.consent.wording!==PAYOUT_CONSENT_WORDING)) {
     fail(400,'payout_consent_required','Choose whose QR this is and accept the payout consent.',{wording:PAYOUT_CONSENT_WORDING});
   }

@@ -8,6 +8,7 @@ const AT='2026-11-22T01:00:00.000Z';
 function setup() {
   const user={id:'shop',role:'supplier'};
   const store={users:[user,{id:'ops',role:'ops_admin'}],userRoleMemberships:[{userId:'shop',role:'supplier'},{userId:'ops',role:'ops_admin'}],
+    supplierSignups:[{supplierId:'shop',steps:{eligibility:{registrantRole:'owner'}}}],
     shopMemberships:[{shopId:'shop',userId:'shop',role:'owner',status:'active'}],supplierProfiles:[{userId:'shop'}],
     supplierPayoutAccounts:[],files:['first','second'].map(fileId=>({fileId,ownerId:'shop',purpose:'supplier_payout_qr',state:'ready',objectKey:fileId,references:[]})),notifications:[],orders:[]};
   const call=(method,body,at=AT,actor=user)=>routePayoutAccount({req:{method,headers:method==='DELETE'?{'if-match':String(body.expectedVersion)}:{}},url:new URL('http://test/me/payout-account'),store,user:actor,readBody:async()=>body,now:()=>at,id:p=>`${p}_${store.notifications.length}`,audit:()=>{}});
@@ -56,4 +57,10 @@ test('saving account words before uploading its first QR does not impose a desti
   const saved=await call('PATCH',{expectedVersion:1,qrFileId:'first',holder:'mine',consent});
   assert.equal(saved.body.payoutAccount.payoutStatus.held,false);
   assert.equal(store.supplierPayoutPolicies[0].consent.qrFileId,'first');
+});
+test('released payout-account callers retain their payload contract while QR replacement still pauses payouts',async()=>{
+  const {store,call}=setup();store.supplierSignups=[];
+  assert.equal((await call('PATCH',{provider:'other',accountName:'Recipient',qrFileId:'first'})).status,201);
+  assert.equal((await call('PATCH',{expectedVersion:1,qrFileId:'second'})).body.payoutAccount.payoutStatus.reason,'supplier_payout_paused');
+  assert.equal(store.supplierPayoutPolicies[0].consent??null,null);
 });
