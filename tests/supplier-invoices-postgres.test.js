@@ -206,6 +206,10 @@ test('database membership and approval govern Finance and shop intake, ignoring 
     store.approvalCases.find(row => row.userId === 'supplier').status = 'pending';
     await saveStore(db, store);
   });
+  assert.equal((await api('supplier', 'GET', `${own}/order`)).status, 200);
+  await attach(api);
+  assert.equal((await api('supplier', 'PUT', `${own}/order`, details)).status, 200);
+  assert.equal((await api('admin','POST','/users/supplier/verification',{status:'suspended',reason:'Verification review'})).status,200);
   assert.equal((await api('supplier', 'GET', `${own}/order`)).status, 403);
   assert.equal((await api('supplier', 'PUT', `${own}/order`, details)).status, 403);
 });

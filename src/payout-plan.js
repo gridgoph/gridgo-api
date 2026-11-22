@@ -45,6 +45,10 @@ const DELIVERY_REFUSAL = Object.freeze({
    anywhere else.
 */
 export const PAYOUT_PLANS = Object.freeze({
+  4: Object.freeze({version:4,stages:Object.freeze([Object.freeze({
+    code:'delivered',label:'Express delivered',shareBps:10000,proofBy:'rider',requiresProof:false,
+    releaseRequires:'delivery_proof',states:HANDED_TO_CLIENT,refusal:DELIVERY_REFUSAL,
+  })])}),
   3: Object.freeze({ version: 3, stages: Object.freeze([Object.freeze({
     code: 'cash_shop', label: 'Cash paid at shop', shareBps: 10000, proofBy: 'rider', requiresProof: true,
     releaseRequires: 'cash_shop_receipt', states: EVERY_STATE_FROM_PRODUCTION,

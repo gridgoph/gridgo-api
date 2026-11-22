@@ -1,3 +1,5 @@
+import { supplierVerified, verificationSummary } from "./supplier-verification.js";
+import { supplierMatchBlockersFor } from "./supplier-eligibility.js";
 import { effectiveProductionTime, productionTimeReview } from './production-time.js';
 import { supplierAccountIsActive } from "./supplier-eligibility.js";
 import { publicColourListing, publicColourQuote } from './colour-projection.js';
@@ -358,7 +360,7 @@ export function validateSpecBinding(store, service, specBinding) {
   };
 }
 
-export function catalogItemBlockers(store, item, { publicOnly = false } = {}) {
+export function catalogItemBlockers(store, item, { publicOnly = false, at } = {}) {
   const blockers = [];
   const service = (store.supplierServices || []).find((candidate) => candidate.id === item?.supplierServiceId);
   if (!item || !service || service.supplierId !== item.supplierId) return ["owning_service"];
@@ -390,10 +392,11 @@ export function catalogItemBlockers(store, item, { publicOnly = false } = {}) {
       (row) => row.userId === item.supplierId && row.role === "supplier",
     );
     if (!membership) blockers.push("supplier_membership");
+    if (!supplierVerified(store,item.supplierId) && verificationSummary(store,item.supplierId,at).recoveryDueMinor>0) blockers.push("verification_recovery");
     const approval = (store.approvalCases || []).find(
       (candidate) => candidate.userId === item.supplierId && candidate.kind === "supplier",
     );
-    if (approval?.status !== "approved") blockers.push("supplier_not_approved");
+    if (approval?.status !== "approved") blockers.push(...supplierMatchBlockersFor(store, {at})(item.supplierId, (store.supplierProfiles||[]).find(p=>p.userId===item.supplierId)));
   }
   return blockers;
 }
@@ -514,7 +517,7 @@ function clientModifierMinor(store, amount) {
 export function publicCatalogItem(store, item, { selectedOptionIds, at } = {}) {
   store = approvedCatalogView(store);
   item = (store.catalogItems || []).find(row => row.id === item.id) || item;
-  if (catalogItemBlockers(store, item, { publicOnly: true }).length) return null;
+  if (catalogItemBlockers(store, item, { publicOnly: true, at }).length) return null;
   const service = store.supplierServices.find((candidate) => candidate.id === item.supplierServiceId);
   const groups = catalogGroupsForItem(store, item.id, { includeInactiveOptions: false }).map((group) => ({
     id: group.id,
@@ -542,6 +545,7 @@ export function publicCatalogItem(store, item, { selectedOptionIds, at } = {}) {
   const fromPriceMinor = minimumCatalogPrice(store, item);
   const rating = publicShopRating(store, item.supplierId);
   return {
+    verified: supplierVerified(store,item.supplierId),
     shopHours: shopHoursStatus((store.supplierProfiles || []).find(row => row.userId === item.supplierId), store.settings, at),
     distanceZone: null,
     ...(rating ? { rating } : {}),
@@ -613,9 +617,10 @@ export function publicSupplierShop(store, supplierId) {
   const approval = (store.approvalCases || []).find(
     (candidate) => candidate.userId === supplierId && candidate.kind === "supplier",
   );
-  if (!membership || approval?.status !== "approved") return null;
+  if (!membership) return null;
   const profile = (store.supplierProfiles || []).find((candidate) => candidate.userId === supplierId);
   if (!profile) return null;
+  if(approval?.status!=='approved'&&supplierMatchBlockersFor(store)(supplierId,profile).length)return null;
   const services = (store.supplierServices || [])
     .filter((service) => service.supplierId === supplierId && service.state === "live")
     .sort(compareSortOrder)
@@ -646,6 +651,7 @@ export function publicSupplierShop(store, supplierId) {
   if (services.length === 0) return null;
   return {
     supplierId,
+    verified:supplierVerified(store,supplierId),
     shopName: profile.shopName,
     hours: shopHoursStatus(profile, store.settings),
     shop: profile.shop,
@@ -670,6 +676,7 @@ export function publicSupplierShops(store, { categoryCode, cursor, limit = 20 } 
     if (resolved && !shop.categories.includes(resolved)) continue;
     shops.push({
       supplierId: shop.supplierId,
+      verified:shop.verified,
       shopName: shop.shopName,
       hours: shop.hours,
       shop: shop.shop,

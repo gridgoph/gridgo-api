@@ -249,6 +249,7 @@ export async function readStaffDesk(database, graph, actorIds, path, params, hel
     const users = loaded.users.map(r => r.id);
     for (const table of ['organization_accounts','client_profiles']) await read(table, 'WHERE user_id = ANY($1::text[])', [users]);
     await read('approval_case_events', 'WHERE approval_case_id = ANY($1::text[])', [loaded.approval_cases.map(r => r.id)]);
+    await read('platform_settings', 'WHERE singleton');
     if (path.endsWith('/statements')) {
       await read('orders', "WHERE client_id=$1 AND state IN ('completed','payout_released') AND NOT review_data", [text(id)]);
       await parents();
@@ -269,11 +270,19 @@ export async function readStaffDesk(database, graph, actorIds, path, params, hel
     await identities(owners);
     for (const table of ['supplier_profiles','rider_profiles','client_profiles','organization_accounts']) await read(table, 'WHERE user_id = ANY($1::text[])', [owners]);
     await read('approval_case_events', 'WHERE approval_case_id = ANY($1::text[])', [loaded.approval_cases.map(r => r.id)]);
+    await read('platform_settings', 'WHERE singleton');
+    await read('supplier_verification_ledger', 'WHERE supplier_id = ANY($1::text[])', [owners]);
+    await read('orders','WHERE supplier_id = ANY($1::text[])',[owners]);
+    await read('payout_milestones','WHERE order_id = ANY($1::text[])',[loaded.orders.map(r=>r.id)]);
+    for(const table of ['refund_supplier_payouts','order_change_payouts']) await read(table,'WHERE supplier_id = ANY($1::text[])',[owners]);
+    const supplierDocuments=loaded.users.flatMap(r=>r.data?.verificationDocumentFileIds||[]);
+    await read('files','WHERE file_id = ANY($1::text[])',[supplierDocuments]);
+    await read('file_references','WHERE file_id = ANY($1::text[])',[supplierDocuments]);
     if (id) {
       await read('supplier_services', 'WHERE supplier_id = ANY($1::text[])', [owners]);
       for (const table of ['supplier_service_file_formats','supplier_service_price_tiers']) await read(table, 'WHERE supplier_service_id = ANY($1::text[])', [loaded.supplier_services.map(r => r.id)]);
       await read('rider_documents', 'WHERE rider_id = ANY($1::text[])', [owners]);
-      await read('files', 'WHERE file_id = ANY($1::text[])', [loaded.rider_documents.map(r => r.file_id)]);
+      await read('files', 'WHERE file_id = ANY($1::text[])', [[...supplierDocuments,...loaded.rider_documents.map(r => r.file_id)]]);
       for (const table of ['taxonomy_categories','taxonomy_category_aliases']) await read(table, '');
       await read('platform_settings', 'WHERE singleton');
     }

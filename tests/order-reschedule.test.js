@@ -8,6 +8,11 @@ import { assertRefundWorkAllowed } from '../src/refund-policy.js';
 import { assessProductionLapses } from '../src/production-penalties.js';
 
 const code = (expected) => (error) => error.code === expected;
+test('suspended supplier standing refuses current and historical deadline reads and the supplier queue',async()=>{
+  const s=fixture();await request(s);s.approvalCases.find(c=>c.userId==='supplier').status='suspended';
+  await assert.rejects(call(s,'supplier','',{}, {method:'GET'}),code('forbidden'));
+  await assert.rejects(call(s,'supplier','',{}, {method:'GET',path:'/me/reschedule-requests'}),code('forbidden'));
+});
 test('acceptance changes effective dates, preserves money and starts the issue window at actual handover', async () => {
   const store = fixture(), order = store.orders[0];
   const payments = structuredClone(order.payments);

@@ -1,7 +1,8 @@
+import { supplierCanWork, hasSupplierTransferExposure } from './supplier-verification.js';
 import { staffPageBody, STAFF_LIST_PAGE } from './staff-list-pages.js';
-import { changesFor, supplementTotals } from './order-change-policy.js';
+import { changesFor } from './order-change-policy.js';
 import { recoveryHeld, startShopAcceptance } from './shop-recovery.js';
-import { approvedRole, hasRole, privilegedAdminMemberships, queueOrderInvalidate, queueInvalidate } from './notifications.js';
+import { hasRole, privilegedAdminMemberships, queueOrderInvalidate, queueInvalidate } from './notifications.js';
 import { writeDraft } from './client-order-notifications.js';
 import { refundHold, refundSettlementFor, assertRefundWorkAllowed } from './refund-policy.js';
 import { routeRefunds } from './refunds.js';
@@ -29,8 +30,7 @@ function archiveWarning(store, order) {
   order.rescheduleRequest.priorLapse = structuredClone(lapse);
   store.productionLapses = store.productionLapses.filter((row) => row.id !== lapse.id);
 }
-const hasReleasedShare = (store, order) => supplementTotals(store, order).totalMinor > 0 || (order.payoutMilestones || []).some((stage) => stage.status === 'released')
-  || (store.refundSupplierPayouts || []).some((row) => row.orderId === order.id && row.status === 'released');
+const hasReleasedShare = hasSupplierTransferExposure;
 
 function event(store, order, kind, actor, at, id) {
   const request = order.rescheduleRequest;
@@ -79,6 +79,7 @@ export async function routeOrderReschedule({ req, url, store, user, readBody, no
   if (queue) {
     if (req.method !== 'GET') return null;
     if (url.pathname.startsWith('/ops/') ? !ops(user) : user.role !== 'supplier') fail(403, 'forbidden', 'This queue is not available to this role.');
+    if(!ops(user)&&!supplierCanWork(store,user.id))fail(403,'forbidden','A current supplier work membership is required.');
     const rows = store.orders.filter((order) => order.rescheduleRequest && (ops(user) || order.rescheduleRequest.supplierId === user.id));
     const supplierId = ops(user) ? url.searchParams.get('supplierId') : user.id;
     const status = url.searchParams.get('status');
@@ -91,8 +92,8 @@ export async function routeOrderReschedule({ req, url, store, user, readBody, no
   const order = store.orders.find((row) => row.id === match[1]);
   if (!order) fail(404, 'order_not_found', 'Order not found.');
   const client = user.role === 'client' && user.id === order.clientId;
-  const supplier = user.role === 'supplier' && user.id === order.supplierId && approvedRole(store, user.id, 'supplier');
-  const historicalSupplier = user.role === 'supplier' && user.id === order.rescheduleRequest?.supplierId;
+  const supplier = user.role === 'supplier' && user.id === order.supplierId && supplierCanWork(store, user.id);
+  const historicalSupplier = user.role === 'supplier' && user.id === order.rescheduleRequest?.supplierId && supplierCanWork(store,user.id);
   if (!ops(user) && !client && !supplier && !(req.method === 'GET' && historicalSupplier)) fail(403, 'forbidden', 'This is another party’s order.');
   const action = match[2];
   if (req.method === 'GET' && !action) return { status: 200, body: { request: publicReschedule(order, user) } };

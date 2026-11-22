@@ -38,6 +38,12 @@ Upload evidence through the existing private storage flow, with the purpose list
 
 `wallet` contains `balanceMinor`, `reservedMinor`, `availableMinor`, `lowBalance` (available below PHP 100), and `topupAmountsMinor`. Activity includes `balanceDeltaMinor`, `availableDeltaMinor`, `reservedDeltaMinor`, type, order/time and top-up reference where appropriate. Pending top-ups do not increase spendable funds. References are trimmed/uppercase and confirmed incoming references cannot be reused across top-ups, repayments or redelivery payments. Confirm/reject is audited and notifies the rider and every current Operations/Super Admin membership.
 
+## Supplier verification boundary
+
+New cash checkout requires every selected shop to be verified, even when cash is enabled globally. Unverified shops use online checkout under the [verification cap and deadline](SUPPLIER_VERIFICATION_API.md). Cash eligibility cannot be enabled for an unverified shop. Once verified, normal cash settings apply.
+
+Cash orders already accepted before this release keep their frozen plan-3 cash protocol and finish as before. They are excluded from the unverified-shop payout cap and cancellation recovery; their rider shop advance, pickup gate, reservations and cash accounting are unchanged. This avoids stranding an accepted cash order behind a verification payout hold.
+
 ## Offer, shop payment and signed client delivery
 
 Wallet coverage is one extra check **inside the existing fair exclusive-offer rotation**, for cash only. It uses available funds, including reservations for other orders. It introduces no proximity, presence or active-trip filter. Offers show the exact shop payment, exact client collection, GRIDGO share and rider earnings. A rider with insufficient funds receives no cash offer.

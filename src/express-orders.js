@@ -1,3 +1,4 @@
+import { supplierVerified, rankVerifiedWithinDistance } from "./supplier-verification.js";
 import { staffExpressProjection } from './shop-staff-order.js';
 import { listingAcceptsArtwork } from './file-formats.js';
 import { randomInt } from 'node:crypto';
@@ -5,7 +6,7 @@ import { approvedCatalogView } from './catalog-review-state.js';
 import { publicCatalogItem, catalogGroupsForItem, selectedCatalogPrice } from './supplier-catalog.js';
 import { supplierMatchBlockersFor } from './supplier-eligibility.js';
 import { publicShopRating } from './shop-rating.js';
-import { distanceMetersBetween, deliveryFeeForDistance } from './operational-model.js';
+import { distanceMetersBetween, distanceZoneForDistance, deliveryFeeForDistance } from './operational-model.js';
 import { sameReviewData } from './review-data.js';
 import { expressAvailability } from './shop-availability.js';
 import { isOpenAt } from './availability.js';
@@ -53,23 +54,23 @@ export function expressShopList(source,user,{location,sort='nearest',fulfillment
     const availability=expressAvailability(profile,store.settings,at,fulfillmentMode);
     if(!availability || !supplier || !sameReviewData(user,supplier) || blockers(supplierId,profile).length) continue;
     const listings=(store.catalogItems||[]).filter(item=>item.supplierId===supplierId && item.express===true
-      && item.pricingUnit==='per_page' && item.subcategoryCode==='document_printing' && publicCatalogItem(store,item));
+      && item.pricingUnit==='per_page' && item.subcategoryCode==='document_printing' && publicCatalogItem(store,item,{at}));
     if(!listings.length) continue;
     const jobsAhead=(store.orders||[]).filter(o=>o.supplierId===supplierId && ['supplier_assigned','payment_authorized','production','supplier_self_qc'].includes(o.state)).length;
-    const hours=Math.min(...listings.map(item=>publicCatalogItem(store,item).turnaroundHours||1));
+    const hours=Math.min(...listings.map(item=>publicCatalogItem(store,item,{at}).turnaroundHours||1));
     let projection;
     try { projection=(projectExpressNightFinish(store,supplierId,hours,at) || projectShopFinish(store,{supplierId,turnaroundHours:hours,units:1,now:at})).projection; }
     catch(error) { if(error.code==='express_night_capacity')continue;throw error; }
     if(availability.nightWindow && fulfillmentMode==='delivery' && !isOpenAt(operatingHours(store.settings).schedule,projection.promiseBy))continue;
     const createdAt=(store.approvalCases||[]).find(c=>c.userId===supplierId&&c.kind==='supplier'&&c.status==='approved')?.decidedAt||supplier.createdAt, age=Date.parse(at)-Date.parse(createdAt);
-    rows.push({supplierId,catalogItemIds:listings.map(item=>item.id),name:profile.shopName||supplier.name||'Shop',address:profile.shop.label||'',
-      location:structuredClone(profile.shop),distanceMeters:distanceMetersBetween(location,profile.shop),rating:publicShopRating(store,supplierId),jobsAhead,
+    rows.push({supplierId,verified:supplierVerified(store,supplierId),catalogItemIds:listings.map(item=>item.id),name:profile.shopName||supplier.name||'Shop',address:profile.shop.label||'',
+      location:structuredClone(profile.shop),distanceMeters:distanceMetersBetween(location,profile.shop),distanceZone:distanceZoneForDistance(distanceMetersBetween(location,profile.shop),store.settings),rating:publicShopRating(store,supplierId),jobsAhead,
       readyAt:projection.promiseBy,deliveryAvailable:availability.deliveryAvailable,nightWindow:availability.nightWindow,busy:jobsAhead>=3,isNew:Number.isFinite(age)&&age>=0&&age<7*86400000});
   }
   rows.sort((a,b)=>(sort==='top_rated'?(b.rating?.average||0)-(a.rating?.average||0):sort==='fewest_jobs'?a.jobsAhead-b.jobsAhead:0)
     ||a.distanceMeters-b.distanceMeters||a.supplierId.localeCompare(b.supplierId));
   if(sort!=='nearest'&&rows.length>1) {const index=rows.findIndex(r=>r.isNew);if(index>=0){const [row]=rows.splice(index,1);rows.splice(1,0,row);}}
-  return rows;
+  return rankVerifiedWithinDistance(rows);
 }
 export function expressStatus(order) {
   if(order.state==='cancelled')return 'cancelled';
