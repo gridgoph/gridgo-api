@@ -17,7 +17,7 @@ import { supplierSupportsDocumentOrder } from './document-capabilities.js';
 import { routeShopFileAccess, recordShopFileAccess, fileAccessJobs } from './shop-file-access.js';
 import { isExpressDocumentOrder } from './express-offers.js';
 import { awardExpressFriendPass } from './express-rewards.js';
-import { expressRates, expressEvent, expressStatus } from './express-orders.js';
+import { expressRates, expressEvent, expressStatus, assertExpressPaymentSubmission, expireExpressPayments } from './express-orders.js';
 import { routeExpressOrders } from './express-routes.js';
 import { reconcileDispatchOffers, declineDispatchOffer, requireDispatchOffer, offerTimeoutSeconds } from './dispatch-offers.js';
 import { routeCash, collectCash, cashRequest, settleCashRedelivery } from './cash-routes.js';
@@ -6467,6 +6467,7 @@ async function handleAuditedRequest(req, res) {
           state: order.state,
         });
       }
+      if(installmentCode==='initial')assertExpressPaymentSubmission(order,now());
       if (
         installmentCode === "final_online" &&
         order.payments?.initial?.status !== "confirmed"
@@ -8525,6 +8526,13 @@ async function runLifecycleWork() {
       () => runPlayOptinReminders({ database, broadcast: broadcastPlayOptin, now }),
       async () => {if(await shopMoneyWorkDue(database,now()))await enqueueMutation(async()=>{const s=await load();if(sweepShopMoney(s,{at:now(),id}))await save(s);});},
       sweepRescheduleRequests,
+      async () => {
+        const candidate=await database.query(`SELECT 1 FROM orders o JOIN order_payments p ON p.order_id=o.id AND p.code='initial' WHERE ${activeOrderSql('o.id')} AND o.state='awaiting_initial_payment'
+          AND o.data#>>'{expressOrder,paymentTiming}'='after_acceptance'
+          AND p.status='not_submitted'
+          AND (o.data#>>'{expressOrder,payBy}')::timestamptz <= now() LIMIT 1`);
+        if(candidate.rowCount)await enqueueMutation(async()=>{const store=await load();if(expireExpressPayments(store,{at:now(),id}))await save(store);});
+      },
       () => sweepDispatchOffers(true),
       async () => {
         const candidate = await database.query(`SELECT 1 FROM orders

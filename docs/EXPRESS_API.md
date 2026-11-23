@@ -56,18 +56,102 @@ Sort is `nearest | top_rated | fewest_jobs`. Response:
 }
 ```
 
-Only active, approved suppliers open now under their shop calendar qualify.
+Active Verified shops and eligible Starter shops use the existing supplier
+verification gates. Open shops follow their shop calendar.
 They must have a public, approved `document_printing`, `per_page` listing with
 `express: true`, and the shop-wide `expressEnabled` must not be false.
 The listing switch remains its individual opt-in; staff
 visibility/approval holds still apply. Shop setup must offer the print layouts
 and option selections it accepts. Busy means at least three assigned/accepted/
 printing jobs. New means less than seven elapsed days since supplier approval
-(falling back to account creation for legacy rows). The first New shop is put
-second in `top_rated` and `fewest_jobs`; nearest remains strictly distance sorted.
+(falling back to account creation for legacy rows). New/Busy are informational
+badges; the printer-choice sorts below determine the displayed order.
 Rating uses the existing public rating threshold; it is null below that threshold.
 Ready time uses the existing queue/calendar projection, not an invented rush SLA.
 Review-data suppliers never mix with ordinary clients.
+
+### Who prints it? (B26328C8)
+
+After Preview, call **`POST /express/shops`** with the same `location`,
+`fulfillmentMode`, delivery `dropoff`, and `files` body used by `/express/drafts`,
+omitting `supplierId`. This is an authenticated client read: it persists no draft,
+mission progress, voucher reservation or notification. File ownership, detected
+page counts, approved listings, supported settings and actual job readiness are
+checked with the same draft/checkout builders. Each selectable card adds its
+exact `quote` and `paymentTiming`. Do not add display prices to estimate checkout.
+
+Optional fields:
+
+- `sort`: `nearby` (default; `nearest` is an alias), `all_davao`, `fastest`,
+  `top_rated`, `lowest_price`, or the retained `fewest_jobs`.
+- `shopsOnly`, `verifiedOnly`: booleans, default false. Filtering precedes
+  expansion. `lowest_price` compares the complete printing subtotal and is
+  available for A3 and plans.
+- `productType`: `documents` (default) or `plans`. Plans use approved Express
+  `blueprint_cad_plotting` listings priced `per_unit` (one sheet) or `per_page`.
+  Supported plan papers are `a4 | a3 | a2 | a1 | a0 | 30x40`; the listing's size
+  and standard stock options must support the choice. A readable uploaded page
+  count times copies determines sheets. Per-unit order/invoice quantities record
+  sheets, while `expressOrder.printSettings[].copies` retains the original copies.
+  Area/length/colour-coverage/custom quoted listings stay
+  in ordinary ordering. Plans use daytime scheduling.
+
+The response is `{shops,sort,expanded,expandedZones,expansionReason,fareBands,
+walkingEstimateSource}`. Nearby starts with zone A, adds B if fewer than three
+selectable printers remain, then C if still fewer than three. It never fabricates
+three printers or expands beyond C. `expandedZones` contains the added letters;
+`expansionReason:"fewer_than_three_open_printers"` supports the widening notice.
+Closed cards stay visible after open choices, with `selectable:false`,
+`isOpenNow:false`, `openStatus:"closed"`, and no current quote/readiness promise.
+An open shop outside rider hours may have `isOpenNow:true` but `selectable:false`
+for delivery. Never enable its select button from the open label alone.
+
+Cards add `printerType:"shop"|"home"`, `verificationLevel:"verified"|"starter"`,
+`isOpenNow`, `selectable`, `openStatus:"open"|"night"|"closed"`, `readyAt`,
+`zone:{code:"A"|"B"|"C"|null,key,label}`, and `deliveryFeeMinor` (null for pickup).
+Pickup cards use `walkingTimeMinutes`, a straight-line estimate at 80 metres per
+minute, identified by `walkingEstimateSource`; this is not a routed walking ETA.
+`deliveryFareMinor` on quoted cards is the prospective delivery fare used for
+the fare-limit choice even for pickup. Display walking time for pickup.
+Home cards expose `barangay` as their name/address, `location:null`, rounded-up
+500 m distance estimates and `distanceApproximate:true`. Shop cards retain their
+public location. This release supplies the discriminator/privacy projection;
+home-printer enrollment, persistence and operational rules remain API issue 412.
+Its future profile adapter must supply `supplierType:"home"` and `barangay`.
+
+The existing shared `settings.deliveryFeeBands` remains the only fare source.
+Zone A maps to `nearby`, B to `away`, C to `long_distance`; bounds are inclusive.
+Current repository defaults already match 5/10/15 km and PHP 89/149/229. Existing
+saved settings are preserved. Beyond C is `out_of_zone` (null letter), using the
+existing editable `baseFeeMinor + perKmMinor × ceil(distanceMeters/1000)` formula.
+Super Admin reads `GET /settings` and patches the complete `deliveryFeeBands`
+array with `expectedVersion` and `reason`; no new fee table, seed or migration is
+needed. “All Davao”/“Any” can show that out-of-zone charge. Nearby never does.
+
+For **Just print it**, call **`POST /express/drafts`** with that same preview body,
+`selection:"just_print_it"` and a required `fareLimit`, omitting `supplierId`:
+
+- `nearby`: zone A only, using the saved band limit;
+- `up_to_149`: the live prospective delivery fare must be at most 14,900 centavos;
+- `any`: any quoted, open, eligible printer, including Out of Zone.
+
+Optional shop/verification filters apply. The server chooses the earliest actual
+job `readyAt`, then nearest on a tie, and returns the normal draft/quote. Missing
+or invalid limits return `400 invalid_express_fare_limit`; no candidate returns
+`409 express_shop_unavailable`. A3/plans return `409
+express_manual_selection_required`: the client must choose each shop's price.
+For a manual choice, use the existing `POST /express/drafts` with `supplierId`.
+Draft creation and checkout independently recheck current eligibility. Automatic
+drafts persist the client's fare permission with their print snapshot and refuse
+checkout if a later settings change takes the printer above that permission.
+
+The retained `GET /express/shops?lat=...&lng=...&fulfillmentMode=...` preserves
+its default `nearest` and legacy `top_rated | fewest_jobs` open-only list with
+additive card metadata. Those legacy sorts keep their existing ranking behavior.
+Explicit new sorts (`nearby | all_davao | fastest`) opt into the new card policy;
+query booleans `shopsOnly=true|false`, `verifiedOnly=true|false` are supported.
+It cannot quote `lowest_price`. The new screen should use the POST read with its
+files to avoid counting printers that cannot accept that Preview.
 
 ## Files, Preview and Pay
 
@@ -169,9 +253,13 @@ Only the assigned, approved supplier may call:
   idempotent. It does not charge, release money or skip artwork/approval gates.
 - `POST /orders/:id/express/decline` with `{reason:"Printer unavailable"}`.
   A decline or timeout increments the counter and chooses the nearest open,
-  eligible Express shop not already tried. The order and job assignment move
+  eligible document Express shop not already tried. The order and job assignment move
   together; original print/money snapshots remain. A delivery replacement must
-  fall in the same delivery-fee band. The replacement gets a fresh five minutes.
+  fall in the original zone and retain exactly the accepted delivery fee.
+  Pickup document replacements also stay in their original distance zone.
+  New orders snapshot the band limits; later settings edits cannot widen that
+  accepted rerouting area or change the paid fare.
+  The replacement gets a fresh five minutes.
   The old shop loses order/file access through the normal assigned-job scoping.
 - **It's ready:** `POST /orders/:id/transition` with
   `{"state":"ready_for_dispatch"}` works directly from accepted
@@ -212,6 +300,31 @@ Reassignment is automatic and notified to the client; the app can show the moved
 event and the existing cancellation action. There is no extra move-approval state.
 No automatic shop pausing is introduced. Delivery rider offers begin at the
 existing ready-for-dispatch boundary. Pickup orders never enter rider offers.
+
+**A3 and plans are manual choices.** They never automatically move, even when a
+second shop has an equal price. A decline or shop timeout cancels that unpaid
+choice and sets `expressOrder.repickRequired:true`; show the printer picker again
+and create a new draft. Each price still comes from the shop's approved listing.
+Checkout omits `payment`, returns `paymentTiming:"after_acceptance"`, and uses
+the existing artwork review and shop acceptance. On acceptance, `expressOrder.payBy`
+is five elapsed minutes later. The client submits payment evidence through
+`POST /orders/:id/payments/initial/submit` strictly before that deadline; late
+submissions return `409 express_payment_expired`. Timely submitted evidence keeps
+the accepted price while Operations reviews it; the five minutes do not limit
+Operations confirmation time. Unsubmitted payments expire to cancellation with
+the same repick flag through the existing lifecycle/save boundary. Production
+and readiness still require confirmed payment. Legacy accepted orders without a
+`payBy` keep their existing behavior. This changes no payout shares or releases.
+
+Client follow-up call sequence: upload/read Preview files; `POST /express/shops`;
+`POST /express/drafts` (manual or Just print it); existing cart quote/voucher
+calls if needed; `POST /me/carts/:cartId/checkout` with its confirmation; observe
+`GET /orders/:id`/realtime for acceptance, `payBy`, moves or `repickRequired`;
+submit initial payment only after acceptance for A3/plans. Standard documents
+retain checkout payment. Supplier calls remain `/orders/:id/express/accept` and
+`/decline`. The client app screen is a separate release; no UI ships here.
+Enable the new screen after every API process runs this version, so older
+processes cannot apply the earlier A3 reassignment/payment-window behavior.
 
 ## Shop counter code
 
