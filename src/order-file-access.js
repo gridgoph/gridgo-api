@@ -8,6 +8,7 @@ export function orderFileReadStore(store) {
 // Shared by order projections and file metadata/download authorization.
 export function canReadOrderArtwork(user, store, order, fileId, purpose, file = null) {
   if (!user || !order || !["artwork", "mockup"].includes(purpose)) return false;
+  if(order.groupOrder&&user.role==='client')return (file||(store.files||[]).find(f=>f.fileId===fileId))?.ownerId===user.id;
   if (["ops_admin", "super_admin"].includes(user.role)
       || (user.role === "client" && order.clientId === user.id)) return true;
   if (!["supplier", "rider"].includes(user.role)) return false;

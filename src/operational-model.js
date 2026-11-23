@@ -280,6 +280,7 @@ export function defaultOperationalSettings() {
     testerSignupFormUrlTemplate: null,
     operatingHours: defaultOperatingHours(),
     expressRates: expressRates(),
+    groupPaymentTimeoutMinutes: 10,
     serviceFeeRateBps: 1_000,
     organizationDiscountRateBps: 500,
     riderCommissionBps: 8_000,
@@ -1174,7 +1175,8 @@ function productionItemsFor(store, order, user) {
     || (user?.role === "rider" && job.riderId === user.id)
   )).map((job) => job.id));
   return (store?.orderLineItems || [])
-    .filter((line) => line.orderId === order.id && (allLines || jobIds.has(line.jobId)))
+    .filter((line) => line.orderId === order.id && (allLines || jobIds.has(line.jobId))
+      && (!order.groupOrder||user?.role!=='client'||line.expressPrint?.groupMemberId===user.id))
     .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || String(a.id).localeCompare(String(b.id)))
     .map((line) => {
       const spec = line.structuredSpecSnapshot || {};
@@ -1189,6 +1191,7 @@ function productionItemsFor(store, order, user) {
       const production = ["client", "supplier", "ops_admin", "super_admin"].includes(user?.role);
       return {
         id: line.id, itemName: line.itemNameSnapshot || "", quantity: line.quantity,
+        ...(order.groupOrder&&['supplier','ops_admin','super_admin'].includes(user?.role)?{groupMember:{id:line.expressPrint?.groupMemberId,name:line.expressPrint?.groupMemberName}}:{}),
         ...(user?.role === "client" && order.clientId === user.id ? {
           // Use only the immutable line snapshot, never today's listing or taxonomy.
           subcategoryCode: typeof line.artworkGuidance?.subcategoryCode === "string"
@@ -1279,6 +1282,8 @@ export function publicOrderFor(order, user, store = null) {
   if (!order) return null;
   const publicRecord = clone(order);
   delete publicRecord.expressOrder;
+  delete publicRecord.groupOrder;
+  if(order.groupOrder)publicRecord.groupOrder={id:order.groupOrder.id,memberCount:order.groupOrder.memberCount,hostName:order.groupOrder.hostName};
   if(order.orderType === "express") publicRecord.expressOrder = publicExpress(order,user);
   delete publicRecord.actions;
   delete publicRecord.deliveryReminder;
@@ -1367,7 +1372,7 @@ export function publicOrderFor(order, user, store = null) {
   if (changesFor(store, order).some(row => row.status === 'applied' && row.data.proposedReadyBy) || order.rescheduleRequest?.status === 'accepted' || order.rescheduleRequest?.resolution === 'rematched') {
     publicRecord.promisedDate = user?.role === 'supplier' ? order.readyBy : order.promiseBy;
   }
-  if (["supplier", "rider"].includes(user?.role)) {
+  if (["supplier", "rider"].includes(user?.role) || order.groupOrder && user?.role==='client') {
     const artworkIds = publicRecord.artworkFileIds || [];
     for (const purpose of ["artwork", "mockup"]) {
       const field = `${purpose}FileIds`;

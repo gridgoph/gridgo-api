@@ -453,6 +453,12 @@ function fileFor(store, user, fileId, purpose, field) {
   return file;
 }
 
+function groupFileFor(store,user,cart,fileId) {
+  const group=(store.expressGroups||[]).find(g=>g.cartId===cart.id&&g.hostId===user.id&&g.state==='checkout_open');
+  const member=group&&(store.expressGroupMembers||[]).find(m=>m.groupId===group.id&&m.active&&m.files.some(f=>f.fileId===fileId));
+  return fileFor(store,member?{id:member.userId}:user,fileId,'artwork','artworkFileId');
+}
+
 function assertListingArtwork(store, item, line) {
   for (const fileId of artworkFileIdsFor(line)) {
     const file = (store.files || []).find(row => row.fileId === fileId);
@@ -764,7 +770,7 @@ export function lockCartFeeSchedules(store, cart, at) {
   }
 }
 
-function cartVoucherPlan(store, cart, lines, at) {
+export function cartVoucherPlan(store, cart, lines, at) {
   const grouped = cartGroups(cart, lines);
   const pickupShares = splitBasketFee(cart.requestFulfillment?.fulfillmentMode === "pickup" ? publicHubPickup(store.settings).feeMinor : 0, grouped.length);
   const money = grouped.map((group, index) => {
@@ -1021,7 +1027,7 @@ function publicCart(store, cart, at, { compactListings = false } = {}) {
     requestFulfillment: cart.requestFulfillment ? structuredClone(cart.requestFulfillment) : null,
     ...(cart.requestFulfillment?.fulfillmentMode === "pickup" ? { hubPickup: publicHubPickup(store.settings) } : {}),
     defaultDropoff: cart.defaultDropoff ? { ...cart.defaultDropoff } : null,
-    lines: publicLines,
+    lines: publicLines.filter(row=>!lines.find(line=>line.id===row.id)?.expressPrint?.groupMemberId||lines.find(line=>line.id===row.id).expressPrint.groupMemberId===cart.clientId),
     shops: groups.length > 1 ? groups.map(({ id, label }) => ({ id, label })) : cartShops(store, lines),
     groups,
     ...(cart.checkedOutOrderId && basketForOrder(store, cart.checkedOutOrderId) ? { basketId: basketForOrder(store, cart.checkedOutOrderId).id } : {}),
@@ -1185,6 +1191,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   const orderId = createId("ord");
   // Snapshotted here, like the rider delivery split: the setting moving later
   // never changes what this client owes.
+  const group=(store.expressGroups||[]).find(g=>g.cartId===cart.id&&g.state==='checkout_open'&&g.hostId===user.id);
   const cash = body.payment?.method === 'cash';
   const paymentAfterAcceptance=cart.orderType==='express'&&cartLines.some(line=>line.expressPrint?.paper==='a3'||line.expressPrint?.productType==='plans');
   if(paymentAfterAcceptance&&!zeroCashBoundary&&body.payment!=null)fail(409,'express_payment_after_acceptance','Pay for this Express order after the shop accepts.');
@@ -1192,6 +1199,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   const order = {
     id: orderId,
     ...(cart.orderType === "express" ? {orderType:"express", expressOrder:createExpressSnapshot(cart,cartLines,at)} : {}),
+    ...(group?{groupOrder:{id:group.id,hostId:group.hostId,hostName:user.name,memberCount:(store.expressGroupMembers||[]).filter(m=>m.groupId===group.id&&m.active).length,backupReceiver:structuredClone(group.backupReceiver)}}:{}),
     shopClockVersion: 1,
     operatingClock: operatingClockSnapshot(store.settings, store.version),
     reviewSchedule: reviewTiming(store.settings, at),
@@ -1278,7 +1286,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
       fail(409, "artwork_required", "Upload artwork or add a publicly viewable design link before checkout.", { lineId: line.id, field: "artwork" });
     }
     for (const fileId of artworkFileIdsFor(line)) {
-      const file = fileFor(store, user, fileId, "artwork", "artworkFileId");
+      const file = groupFileFor(store, user, cart, fileId);
       if (file.artworkCheck?.status !== "passed") fail(409, "artwork_file_check_failed",
         file.artworkCheck?.message || "This artwork has not passed its file check. Upload the original file again and replace the cart artwork.",
         { lineId: line.id, fileId: file.fileId, field: "artwork", reason: file.artworkCheck?.reason || "file_check_required" });
@@ -1526,7 +1534,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   for (const snapshot of snapshots) {
     store.orderLineItems.push(snapshot.lineItem);
     store.orderLineItemOptions.push(...snapshot.options);
-    for (const fileId of artworkFileIdsFor(snapshot.lineItem)) attachOrderFile(fileFor(store, user, fileId, "artwork", "artworkFileId"), orderId, `line:${snapshot.lineItem.id}:artwork`);
+    for (const fileId of artworkFileIdsFor(snapshot.lineItem)) attachOrderFile(groupFileFor(store, user, cart, fileId), orderId, `line:${snapshot.lineItem.id}:artwork`);
     if (snapshot.lineItem.mockupFileId) attachOrderFile(fileFor(store, user, snapshot.lineItem.mockupFileId, "mockup", "mockupFileId"), orderId, `line:${snapshot.lineItem.id}:mockup`);
   }
   if (proof) attachOrderFile(proof, orderId, "payment:initial:proof");
@@ -1535,6 +1543,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   const invoice = {
     ...fee,
     ...(order.orderType === "express" ? {orderType:"express"} : {}),
+    ...(order.groupOrder?{groupOrderId:order.groupOrder.id}:{}),
     invoiceNumber: order.invoiceNumber,
     organizationOfficer: structuredClone(order.organizationOfficer),
     orderId,
@@ -1717,7 +1726,7 @@ function linkSampleFirstOrder(store, user, order, cartLines, { at, createId }) {
   notifyAdmins(store, "sample_batch_ordered", "Batch ordered from an approved sample", order, `sample_batch_ordered:${draft.id}`, { createId, at });
 }
 
-function checkoutBasket(store, user, cart, body, createId, at, req) {
+export function checkoutBasket(store, user, cart, body, createId, at, req) {
   if (cart.orderType === 'express') {
     const lines=store.cartLines.filter(l=>l.cartId===cart.id);
     const productType=lines.some(line=>line.expressPrint?.productType==='plans')?'plans':'documents';
@@ -1738,6 +1747,9 @@ function checkoutBasket(store, user, cart, body, createId, at, req) {
     if(body.looksRight!==true || body.expressConfirmation!==expressConfirmation(cart,lines)) fail(409,'express_preview_required','Review the current print settings and accept the preview.');
   }
   const cash = body.payment?.method === 'cash';
+  const group=(store.expressGroups||[]).find(g=>g.cartId===cart.id);
+  if(group && (group.state!=='checkout_open'||Date.parse(at)>=Date.parse(group.payBy)))fail(409,'group_locked');
+  if(group && cash && clientCartQuote(store,cart,store.cartLines.filter(l=>l.cartId===cart.id),at).totalMinor>=150000)fail(409,'group_cash_limit_exceeded');
   if (cash) {
     requireCashCheckout(store.settings, user, 0);
     if (isReviewData(user)) cashFail('review_data_money_forbidden');
@@ -2434,6 +2446,7 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
   const specialCartMatch = /^\/me\/carts\/([^/]+)\/(fulfillment|dropoffs|checkout)$/.exec(pathname);
   if (specialCartMatch && specialCartMatch[2] === "checkout" && req.method === "POST") {
     const cart = ownCart(store, user, decodeURIComponent(specialCartMatch[1]), { draft: true });
+    if((store.cartLines||[]).some(line=>line.cartId===cart.id&&line.expressPrint?.groupMemberId))fail(409,'group_checkout_required');
     const result = checkoutBasket(store, user, cart, record(await readBody(req)), id, now(), req);
     result.invoice = clientInvoice(result.invoice, { hideSupplierAmounts: Boolean(cart.orderType === "express" || result.basket || result.invoice.organizationDiscountRateBps > 0 || result.invoice.serviceFeeSchedule?.version === 2) });
     return { status: 201, body: cart.orderType === "express" ? expressClientProjection(result) : result, mutated: true };
@@ -2709,7 +2722,7 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
   return null;
 }
 
-function expressConfirmation(cart,lines) {
+export function expressConfirmation(cart,lines) {
  return createHash('sha256').update(JSON.stringify({cartId:cart.id,fulfillmentMode:cart.fulfillmentMode,dropoff:cart.defaultDropoff ?? null,
    lines:lines.map(l=>({id:l.id,catalogItemId:l.catalogItemId,optionIds:l.optionIds,dropoff:l.dropoff ?? null,supplierId:l.supplierId,fileId:l.artworkFileId,quantity:l.quantity,documentPages:l.documentPages,print:l.expressPrint,layout:l.printLayout,note:l.specialInstructions || ''}))},
    // JSONB sorts object keys; omitted nullable fields also return as absent.
@@ -2717,7 +2730,7 @@ function expressConfirmation(cart,lines) {
    (_key,value)=>value && !Array.isArray(value) && typeof value==='object'
      ? Object.fromEntries(Object.keys(value).sort().map(key=>[key,value[key]])) : value)).digest('hex');
 }
-function createExpressDraft(store,user,body,id,at,selectionPolicy=null) {
+export function createExpressDraft(store,user,body,id,at,selectionPolicy=null,groupOwners=null) {
  const location=expressPoint(body.location);
  const matchingPoint=body.fulfillmentMode==='delivery'&&body.dropoff?expressPoint(body.dropoff):location;
  if(!['pickup','delivery'].includes(body.fulfillmentMode)) fail(400,'invalid_fulfillment_mode','Choose pickup or delivery.');
@@ -2732,7 +2745,7 @@ function createExpressDraft(store,user,body,id,at,selectionPolicy=null) {
  }
  const shop=expressShopList(store,user,{location:matchingPoint,fulfillmentMode:body.fulfillmentMode,productType},at).find(s=>s.supplierId===body.supplierId);
  if(!shop)fail(409,'express_shop_unavailable','Choose an open Express shop.');
- if(!Array.isArray(body.files)||!body.files.length||body.files.length>20)fail(400,'invalid_express_files','Send one to twenty files.');
+ if(!Array.isArray(body.files)||!body.files.length||body.files.length>(groupOwners?300:20))fail(400,'invalid_express_files','Send one to twenty files.');
  const cart={id:id('cart'),clientId:user.id,state:'draft',version:1,orderType:'express',expressLocation:location,
    serviceLevel:'standard',fulfillmentMode:body.fulfillmentMode,defaultDropoff:body.fulfillmentMode==='delivery'?point(body.dropoff,'dropoff',{required:true,requireLabel:true}):null,createdAt:at,updatedAt:at};
  const lines=body.files.map((input,index)=>{
@@ -2741,7 +2754,7 @@ function createExpressDraft(store,user,body,id,at,selectionPolicy=null) {
      try{expressCatalogOptions(store,i,{...input,productType});return true;}catch(error){if(error.status)return false;throw error;}
    });
    if(!item||!shop.catalogItemIds.includes(item.id))fail(409,'express_listing_unavailable','Choose an Express document listing.');
-   fileFor(store,user,input.fileId,'artwork','fileId');
+   fileFor(store,groupOwners?.get(input.fileId)||user,input.fileId,'artwork','fileId');
    if(!['bw','colour'].includes(input.colour)||!(productType==='plans'?['a4','a3','a2','a1','a0','30x40']:['a4','short','long','a3']).includes(input.paper)||!['one','two'].includes(input.sides)) fail(400,'invalid_express_print','Choose colour, paper and sides.');
    if(!Array.isArray(input.acceptedWarnings)||input.acceptedWarnings.length>20||input.acceptedWarnings.some(w=>!['paper_size_mismatch','rgb_colour'].includes(w))) fail(400,'invalid_express_warnings','Send accepted warning codes.');
    if(input.optionIds != null)fail(400,'express_options_managed','Express selects standard print options from the print settings.');

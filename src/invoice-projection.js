@@ -15,6 +15,7 @@ export function clientInvoice(snapshot, { exposeWorking = false, hideSupplierAmo
       ? splitVoucherMinor(section.grossServiceFeeMinor ?? section.serviceFeeMinor, (section.lines || []).map(line => line.amountMinor)) : null;
     section.lines = (section.lines || []).map((source, index) => {
       const line = { ...source };
+      if(invoice.groupOrderId) {delete line.artworkFileId;delete line.artworkLinks;delete line.artworkAttachments;delete line.artworkPreviewFileId;}
       line.clientUnitPriceMinor = clientMoneyMinor(pricing, line.unitPriceMinor);
       line.clientAmountMinor = shares ? line.amountMinor + shares[index] : clientMoneyMinor(pricing, line.amountMinor);
       if (source.colourPricing) line.colourPricing = publicColourQuote(source.colourPricing,exposeWorking ? "ops_admin" : "client",line.clientAmountMinor);

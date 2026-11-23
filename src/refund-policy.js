@@ -74,6 +74,7 @@ export function supplierRefundPayouts(store, order) {
 }
 
 export function assertRefundWorkAllowed(store, order) {
+  if(order.groupOrder?.shopDecision?.status==='pending')refundFail(409,'group_shop_decision_pending','The host is reviewing the replacement shop.');
   if (rescheduleHold(order)) refundFail(409, 'reschedule_fulfillment_stopped', 'Resolve the deadline request before continuing production or fulfillment.');
   if (order.shopRecovery && order.shopRecovery.status !== 'accepted') {
     refundFail(409, 'shop_recovery_pending', 'Resolve the shop replacement or refund before continuing.');

@@ -1100,6 +1100,7 @@ function hasApprovedWorkRole(user, role, store) {
 export function authorizeFileAttach(user, file, target, store = null) {
   authorizeFileAttachOwner(user, file);
   const record = target?.record;
+  if(record?.groupOrder&&user.role==='client'&&['artwork','mockup'].includes(file.purpose))fail(409,'group_locked','Group files are locked after checkout.');
   if (file.purpose === 'supplier_invoice') {
     const supplierId = store?.supplierInvoices?.find(row => row.orderId === record?.id)?.supplierId || record?.supplierId;
     if (target?.type !== 'order' || !hasApprovedWorkRole(user, 'supplier', store) || supplierId !== user.id) forbidden();
@@ -1392,6 +1393,7 @@ function canReadReference(user, store, reference, file) {
   }
   const order = (store.orders || []).find((item) => item.id === reference.id);
   if (!order) return false;
+  if(order.groupOrder&&user.role==='client'&&['artwork','mockup'].includes(file.purpose))return canReadOrderArtwork(user,store,order,file.fileId,file.purpose,file);
   const relatedJob = (store.orderJobs || []).some(
     (job) => job.orderId === order.id
       && ((user.role === "supplier" && job.supplierId === user.id)
