@@ -1,7 +1,8 @@
+import { documentPagesFor } from './document-pages.js';
 import { approvedRole } from './notifications.js';
 import { createGroup, joinGroup, removeGroupMember, lookupGroupInvite, groupMembers, assertGroupHost, assertGroupMember, assertGroupEditable, openGroupCheckout, cancelGroup, groupAmounts, groupNotice, groupTracking, backupReceiver, formatGroupMinor } from './express-groups.js';
 import { createExpressDraft, checkoutBasket, expressConfirmation, clientCartQuote, cartVoucherPlan } from './order-match-routes.js';
-import { expressFail as fail, expressShopList, expressLinePrice, expressStatus } from './express-orders.js';
+import { expressFail as fail, expressShopList, expressLinePrice, expressStatus, expressRates } from './express-orders.js';
 import { approvedCatalogView } from './catalog-review-state.js';
 import { clientRiderLocationPing, currentRiderPings, latestPing, clientTracking, deliveryMilestones } from './rider-tracking.js';
 import { cancelGroupExpressOrder } from './group-express-recovery.js';
@@ -10,7 +11,7 @@ const FILE_FIELDS=['fileId','copies','pageRange','paper','colour','sides','layou
 function filesInput(files) {
   if(!Array.isArray(files)||files.length>20)fail(400,'invalid_express_files');
   return files.map(f=>{
-    if(!f||typeof f!=='object'||Array.isArray(f)||Object.keys(f).some(k=>!FILE_FIELDS.includes(k))||!['a4','short','long'].includes(f.paper))fail(400,'invalid_express_files');
+    if(!f||typeof f!=='object'||Array.isArray(f)||Object.keys(f).some(k=>!FILE_FIELDS.includes(k))||!['a4','short','long'].includes(f.paper)||!Number.isSafeInteger(f.copies)||f.copies<1||!['bw','colour'].includes(f.colour)||!['one','two'].includes(f.sides)||!['fit_to_paper','actual_size_centered','actual_size_original_position'].includes(f.layout)||!Array.isArray(f.acceptedWarnings)||f.acceptedWarnings.length>20||f.acceptedWarnings.some(w=>!['paper_size_mismatch','rgb_colour'].includes(w))||f.note!=null&&(typeof f.note!=='string'||f.note.length>300))fail(400,'invalid_express_files');
     return structuredClone(f);
   });
 }
@@ -20,7 +21,9 @@ export function buildGroupDraft(store,g,{supplierId=null,id,at,preview=false}={}
   const host=hostUser(store,g),members=groupMembers(store,g),owners=new Map(),fileMembers=[];
   const files=members.flatMap(m=>m.files.map(f=>{
     const file=store.files.find(row=>row.fileId===f.fileId);
-    if(!file||file.ownerId!==m.userId)fail(409,'file_not_ready');
+    if(!file||file.ownerId!==m.userId||file.state!=='ready'||file.purpose!=='artwork'||!file.objectKey||file.savedFileDeletionRequestedAt)fail(409,'file_not_ready');
+    const pages=documentPagesFor(store,{pricingUnit:'per_page'},{artworkFileId:f.fileId},f.pageRange??null,{required:true});
+    expressLinePrice({documentPages:pages,quantity:f.copies,expressPrint:{rateMinor:expressRates(store.settings)[f.colour==='bw'?'bwMinor':'colourMinor']}});
     owners.set(f.fileId,{id:m.userId});fileMembers.push(m);return f;
   }));
   if(!files.length)fail(409,'group_files_required');
@@ -53,8 +56,18 @@ export function buildGroupDraft(store,g,{supplierId=null,id,at,preview=false}={}
 }
 export function recalculateGroup(store,g,{id,at,draft=null,order=null}={}) {
   const members=groupMembers(store,g);
-  if(!members.some(m=>m.files.length)){g.amounts=members.map(m=>({userId:m.userId,fileCount:0,pageCount:0,printSubtotalMinor:0,deliveryShareMinor:0,amountOwedMinor:0}));g.totalMinor=0;return;}
-  const result=draft||buildGroupDraft(store,g,{id,at,preview:true});
+  if(!members.some(m=>m.files.length)){g.quoteStatus='priced';g.amounts=members.map(m=>({userId:m.userId,fileCount:0,pageCount:0,printSubtotalMinor:0,deliveryShareMinor:0,amountOwedMinor:0}));g.totalMinor=0;g.deliveryFeeMinor=0;return;}
+  let result;
+  try { result=draft||buildGroupDraft(store,g,{id,at,preview:true}); }
+  catch(error) {
+    if(order||error.code!=='express_shop_unavailable')throw error;
+    // Membership and validated file edits must not depend on a printer staying
+    // open. No checkout is possible while the ordinary quote is unavailable.
+    g.quoteStatus='pending';g.totalMinor=0;g.deliveryFeeMinor=0;
+    g.amounts=members.map(m=>({userId:m.userId,fileCount:m.files.length,pageCount:m.files.reduce((n,f)=>n+documentPagesFor(store,{pricingUnit:'per_page'},{artworkFileId:f.fileId},f.pageRange??null,{required:true}).printed*f.copies,0),printSubtotalMinor:0,deliveryShareMinor:0,amountOwedMinor:0}));
+    return;
+  }
+  g.quoteStatus='priced';
   const quote=order?{clientItemSubtotalMinor:order.supplierSubtotalMinor+order.serviceFeeMinor,deliveryFeeMinor:order.deliveryFeeMinor,totalMinor:order.totalMinor}:result.quote;
   const voucher=order?null:cartVoucherPlan(store,result.cart,result.lines,at);
   const payableDelivery=order?Math.max(0,order.deliveryFeeMinor-(order.voucherDeliveryMinor||0)):(voucher?.groups[0]?.clientDeliveryFeeMinor??quote.deliveryFeeMinor);
@@ -65,11 +78,11 @@ export function recalculateGroup(store,g,{id,at,draft=null,order=null}={}) {
 }
 export function publicGroup(store,g,user,at) {
   const own=assertGroupMember(store,g,user),host=g.hostId===user.id;
-  const summary=m=>({...g.amounts?.find(a=>a.userId===m.userId),userId:m.userId,name:store.users.find(u=>u.id===m.userId)?.name||'Group member',paidBack:!!m.paidBack});
+  const summary=m=>({...g.amounts?.find(a=>a.userId===m.userId),...(g.quoteStatus==='pending'?{printSubtotalMinor:null,deliveryShareMinor:null,amountOwedMinor:null}:{}),userId:m.userId,name:store.users.find(u=>u.id===m.userId)?.name||'Group member',paidBack:!!m.paidBack});
   return {id:g.id,host:{id:g.hostId,name:store.users.find(u=>u.id===g.hostId)?.name||'Host'},state:g.state,status:g.orderId?expressStatus(store.orders.find(o=>o.id===g.orderId)||{}):g.state,version:g.version,fulfillmentMode:g.fulfillmentMode,closesAt:g.closesAt,checkoutOpenedAt:g.checkoutOpenedAt||null,payBy:g.payBy||null,
-    people:groupMembers(store,g).length,printingPeople:groupMembers(store,g).filter(m=>m.files.length).length,cancelReason:g.cancelReason||null,
+    quoteStatus:g.quoteStatus||'priced',people:groupMembers(store,g).length,printingPeople:groupMembers(store,g).filter(m=>m.files.length).length,cancelReason:g.cancelReason||null,
     me:{...summary(own),files:structuredClone(own.files),review:structuredClone(own.review||null)},
-    ...(host?{members:groupMembers(store,g).map(summary),totalMinor:g.totalMinor??0,deliveryFeeMinor:g.deliveryFeeMinor??null,location:g.location,dropoff:g.dropoff,backupReceiver:g.backupReceiver,cartId:g.cartId}:{}),
+    ...(host?{members:groupMembers(store,g).map(summary),totalMinor:g.quoteStatus==='pending'?null:g.totalMinor??0,deliveryFeeMinor:g.quoteStatus==='pending'?null:g.deliveryFeeMinor??null,location:g.location,dropoff:g.dropoff,backupReceiver:g.backupReceiver,cartId:g.cartId}:{}),
     tracking:groupTracking(store,g,user,at)};
 }
 export async function routeExpressGroups({req,url,store,user,readBody,id,now,database}) {
@@ -109,7 +122,7 @@ export async function routeExpressGroups({req,url,store,user,readBody,id,now,dat
       joinGroup(store,g,user,ctx);recalculateGroup(store,g,ctx);
       return {status:200,body:{group:publicGroup(store,g,user,ctx.at)},mutated:true};
     }
-    if(!invite[2]&&req.method==='GET')return {status:200,body:{group:{id:g.id,hostName:store.users.find(u=>u.id===g.hostId)?.name||'Host',people:groupMembers(store,g).length,closesAt:g.closesAt,fulfillmentMode:g.fulfillmentMode}}};
+    if(!invite[2]&&req.method==='GET')return {status:200,body:{group:{id:g.id,hostName:store.users.find(u=>u.id===g.hostId)?.name||'Host',quoteStatus:g.quoteStatus||'priced',people:groupMembers(store,g).length,closesAt:g.closesAt,fulfillmentMode:g.fulfillmentMode}}};
     return null;
   }
   const match=/^\/express\/groups\/([^/]+)(?:\/(files|leave|close|cancel|prepare|checkout|shop-decision|tracking|review|members\/([^/]+)(?:\/(paid-back))?))?$/.exec(path);
@@ -145,7 +158,7 @@ export async function routeExpressGroups({req,url,store,user,readBody,id,now,dat
     assertGroupEditable(g,ctx.at);member.files=filesInput((await read()).files);
     recalculateGroup(store,g,ctx);g.version++;
     const amount=g.amounts.find(a=>a.userId===user.id);
-    groupNotice(store,g,'files_added',{host:`Group files changed: ${amount.pageCount} pages; client total PHP ${formatGroupMinor(amount.amountOwedMinor)}.`,member:null},ctx,{userIds:[g.hostId]});
+    groupNotice(store,g,'files_added',{host:g.quoteStatus==='pending'?'Group files changed. No printer quote is available yet.':`Group files changed: ${amount.pageCount} pages; client total PHP ${formatGroupMinor(amount.amountOwedMinor)}.`,member:null},ctx,{userIds:[g.hostId]});
     return response();
   }
   if(action==='leave'&&req.method==='POST') {removeGroupMember(store,g,user,user.id,ctx);recalculateGroup(store,g,ctx);return {status:200,body:{ok:true},mutated:true};}

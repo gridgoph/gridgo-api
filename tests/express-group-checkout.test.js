@@ -87,3 +87,8 @@ test('member optional ratings stay own-only and do not change the solo shop revi
  await assert.rejects(call(member,'POST',`/express/groups/${g.id}/review`,{qualityStars:5,speedStars:5,valueStars:5}),e=>e.code==='already_rated');
  assert.equal((await call(client,'GET',`/express/groups/${g.id}`)).body.group.me.review,null);
 });
+test('an unavailable printer quote cannot prevent a member leaving before checkout',async()=>{
+ const {store,client,member,call,g}=await groupFixture();for(const p of store.supplierProfiles)p.isClosed=true;
+ assert.equal((await call(member,'POST',`/express/groups/${g.id}/leave`)).status,200);
+ const read=await call(client,'GET',`/express/groups/${g.id}`);assert.equal(read.body.group.people,1);assert.equal(read.body.group.quoteStatus,'pending');assert.equal(read.body.group.totalMinor,null);
+});

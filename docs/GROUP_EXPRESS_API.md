@@ -101,8 +101,10 @@ printing person's share up to a whole peso. The host receives the remainder:
 PHP 89 across three printing people is 30, 30, 29 for the host. If the host has
 no files, its contribution can be a negative rounding adjustment, balancing the
 others' whole-peso reimbursements; this is display arithmetic, never a wallet.
-Pickup shares are zero. Prior to preparation a nearest-capable-shop quote is
-indicative; the selected checkout quote is authoritative.
+Pickup shares are zero. When no capable open shop can quote, membership/file changes remain available;
+`quoteStatus:"pending"` returns null monetary projections until a normal quote is
+available. Checkout still refuses without that quote. Prior to preparation a
+nearest-capable-shop quote is indicative; the selected checkout quote is authoritative.
 
 Cash retains today's solo eligibility and enablement gates, with an additional
 group restriction: the **full payable order total including delivery must be
