@@ -92,3 +92,10 @@ test('an unavailable printer quote cannot prevent a member leaving before checko
  assert.equal((await call(member,'POST',`/express/groups/${g.id}/leave`)).status,200);
  const read=await call(client,'GET',`/express/groups/${g.id}`);assert.equal(read.body.group.people,1);assert.equal(read.body.group.quoteStatus,'pending');assert.equal(read.body.group.totalMinor,null);
 });
+test('group checkout uses approved listing controls while a private revision waits',async()=>{
+ const {store,client,call,g}=await groupFixture();const {listingSnapshot}=await import('../src/catalog-review-state.js');
+ for(const item of store.catalogItems){item.approvedSnapshot=listingSnapshot(store,item);item.reviewStatus='pending';item.printLayouts=['actual_size_centered'];}
+ await call(client,'POST',`/express/groups/${g.id}/close`);const draft=await call(client,'POST',`/express/groups/${g.id}/prepare`);
+ const paid=await call(client,'POST',`/express/groups/${g.id}/checkout`,{looksRight:true,expressConfirmation:draft.body.confirmation,payment:{method:'qr_manual',reference:'GROUP-APPROVED',proofFileId:'file_qr'}});
+ assert.equal(paid.status,201);assert.ok(store.catalogItems.every(item=>item.reviewStatus==='pending'&&item.printLayouts[0]==='actual_size_centered'));
+});

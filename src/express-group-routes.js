@@ -3,7 +3,8 @@ import { approvedRole } from './notifications.js';
 import { createGroup, joinGroup, removeGroupMember, lookupGroupInvite, groupMembers, assertGroupHost, assertGroupMember, assertGroupEditable, openGroupCheckout, cancelGroup, groupAmounts, groupNotice, groupTracking, backupReceiver, formatGroupMinor } from './express-groups.js';
 import { createExpressDraft, checkoutBasket, expressConfirmation, clientCartQuote, cartVoucherPlan } from './order-match-routes.js';
 import { expressFail as fail, expressShopList, expressLinePrice, expressStatus, expressRates } from './express-orders.js';
-import { approvedCatalogView } from './catalog-review-state.js';
+import { approvedCatalogView, CATALOG_REVIEW_TABLES } from './catalog-review-state.js';
+import { reviewCatalogView, REVIEW_CATALOG_TABLES } from './review-data.js';
 import { clientRiderLocationPing, currentRiderPings, latestPing, clientTracking, deliveryMilestones } from './rider-tracking.js';
 import { cancelGroupExpressOrder } from './group-express-recovery.js';
 
@@ -85,7 +86,19 @@ export function publicGroup(store,g,user,at) {
     ...(host?{members:groupMembers(store,g).map(summary),totalMinor:g.quoteStatus==='pending'?null:g.totalMinor??0,deliveryFeeMinor:g.quoteStatus==='pending'?null:g.deliveryFeeMinor??null,location:g.location,dropoff:g.dropoff,backupReceiver:g.backupReceiver,cartId:g.cartId}:{}),
     tracking:groupTracking(store,g,user,at)};
 }
-export async function routeExpressGroups({req,url,store,user,readBody,id,now,database}) {
+export async function routeExpressGroups(args) {
+  const path=args.url.pathname;
+  if(!path.startsWith('/express/groups')&&!path.startsWith('/me/express-groups')&&!/^\/dispatch\/[^/]+\/group-/.test(path))return null;
+  const {store}=args,view=reviewCatalogView(approvedCatalogView(store),args.user);
+  if(view===store)return routeExpressGroupsApproved(args);
+  const fields=[...new Set([...CATALOG_REVIEW_TABLES,...REVIEW_CATALOG_TABLES])];
+  const original=Object.fromEntries(fields.map(key=>[key,store[key]]));
+  try {
+    for(const key of fields)store[key]=view[key];
+    return await routeExpressGroupsApproved(args);
+  } finally {Object.assign(store,original);}
+}
+async function routeExpressGroupsApproved({req,url,store,user,readBody,id,now,database}) {
   const path=url.pathname;
   const backup=/^\/dispatch\/([^/]+)\/(group-backup|group-arrival-estimate)$/.exec(path);
   if(backup) {
