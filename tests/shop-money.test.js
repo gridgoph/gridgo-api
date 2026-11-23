@@ -180,3 +180,32 @@ test('disabling future counter cash retains an issued overdue hold until payment
  await call(s,`/ops/shop-money/payments/${request.id}/confirm`,{amountMinor:15000,reference:'CASH-DISABLED-RECEIPT',reason:'Bank verified'},actors.ops,'2026-11-23T10:01:00Z');
  assert.equal(shopMoneyPaused(s,'supplier','2026-11-23T10:01:00Z'),false);
 });
+
+function heldSettlementFixture(kind) {
+ const s=setup({amount:100000,bonus:true});syncShopMoney(s,ctx);const o=s.orders[0];
+ o.state='completed';o.payoutMilestones.forEach(m=>m.status='superseded');
+ s.refundSettlements.push({id:'terminal',orderId:'order',sequence:1,disposition:'fulfilled_with_refund',shopEntitlementMinor:50000});
+ s.refundSupplierPayouts.push({id:'remainder',orderId:'order',settlementId:'terminal',supplierId:'supplier',status:kind==='bonus'?'released':'pending',amountMinor:50000,releasedAt:kind==='bonus'?AT:undefined});
+ return s;
+}
+const signupHolds=[
+ ['shop_owner_claim_required',s=>{s.supplierSignups=[{supplierId:'supplier',steps:{eligibility:{registrantRole:'manager'}}}];s.shopMemberships=[];}],
+ ['supplier_payout_paused',s=>{s.supplierPayoutPolicies=[{supplierId:'supplier',pausedUntil:'2026-11-24T08:00:00.000Z'}];}],
+ ['supplier_payout_account_required',s=>{s.supplierSignups=[{supplierId:'supplier',steps:{eligibility:{registrantRole:'owner'}}}];}]
+];
+test('daily settlement previews preserve signup holds on remainders and retained bonuses',()=>{
+ for(const kind of ['remainder','bonus'])for(const [reason,hold] of signupHolds) {
+  const s=heldSettlementFixture(kind);hold(s);
+  const row=rowFor(runShopSettlement(s,ctx));
+  assert.equal(row.availableMinor,0,`${kind}: ${reason}`);
+  assert.ok(row.held.some(item=>item.reason===reason),`${kind}: ${reason}`);
+ }
+});
+test('daily transfer preparation rechecks signup holds after the settlement run was created',async()=>{
+ for(const [reason,hold] of signupHolds) {
+  const s=heldSettlementFixture('remainder'),run=runShopSettlement(s,ctx);
+  assert.ok(rowFor(run).availableMinor>0);hold(s);
+  await assert.rejects(call(s,`/ops/shop-money/runs/${run.id}/shops/supplier/prepare`),e=>e.code===reason);
+  assert.equal(s.shopMoneyEvents.some(e=>e.kind==='transfer_reserved'),false);
+ }
+});

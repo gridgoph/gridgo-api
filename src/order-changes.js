@@ -1,3 +1,4 @@
+import { assertSupplierPayoutAllowed } from './supplier-payout-policy.js';
 import { supplierCanWork } from './supplier-verification.js';
 import { parseColourCorrection } from './colour-correction.js';
 import crypto from 'node:crypto';
@@ -188,6 +189,7 @@ export function releaseChangePayouts(store, order, code, { user, reference, rece
   if (code !== finalCode) return 0;
   const payments = changePaymentsFor(store, order).filter(p => !changePayoutsFor(store, order).some(r => r.changeId === p.changeId));
   if (!payments.length) return 0;
+  assertSupplierPayoutAllowed(store,order.supplierId,at);
   if ((!reference || !receipt) && !verificationOffset) fail(400, 'supplement_payout_receipt_required');
   const expected = order.payoutMilestones.find(stage => stage.code === code).amountMinor + payments.reduce((sum, p) => sum + p.principalMinor, 0);
   if (amountMinor !== expected) fail(409, 'supplement_payout_amount_mismatch');

@@ -1,3 +1,4 @@
+import { documentRequestSupported } from './document-capabilities.js';
 import { supplierVerified, rankVerifiedWithinDistance } from "./supplier-verification.js";
 import { sameReviewData, reportOrderAllowed } from './review-data.js';
 import { isQuoteListing } from "./quote-listings.js";
@@ -368,6 +369,7 @@ function candidateRows(store, { subcategoryCode, supplierId: onlySupplierId, dro
     if (subcategoryCode ? item.subcategoryCode !== subcategoryCode : !activeSubcategories.has(item.subcategoryCode)) continue;
     if (onlySupplierId && item.supplierId !== onlySupplierId) continue;
     if (excluded.has(item.supplierId) || !shops.has(item.supplierId)) continue;
+    if(!documentRequestSupported(store,item,widthRequest||{}))continue;
     const held = itemsBySupplier.get(item.supplierId);
     if (held) held.push(item);
     else itemsBySupplier.set(item.supplierId, [item]);

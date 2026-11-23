@@ -1,3 +1,4 @@
+import { assertSupplierPayoutAllowed } from './supplier-payout-policy.js';
 import { prepareVerificationPayout, completeVerificationPayout, hasVerificationReservation } from "./supplier-verification.js";
 import {activeShopTransferForKey} from './shop-money-policy.js';
 import { staffPageBody } from './staff-list-pages.js';
@@ -391,6 +392,7 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
     request.status = body.outcome === 'unknown' ? 'payment_unknown' : 'approved';
     eventKind = body.outcome; eventData = { attemptId: attempt.id };
   } else if (action === 'supplier-payout' || action === 'supplier-payout-prepare') {
+    assertSupplierPayoutAllowed(store,order.supplierId,at);
     const settlement = settlementFor(store, request);
     const payout = store.refundSupplierPayouts.find((row) => row.settlementId === settlement?.id && row.status === 'pending');
     if (!payout) fail(409, 'refund_supplier_payout_not_pending', 'No remaining shop settlement payout is pending.');

@@ -11,6 +11,9 @@ import { enforceShopWorkerBoundary } from './shop-worker-boundary.js';
 import { bindShopDeviceRequest, effectiveShopRole, resolveShopWorker, managerRouteAllowed } from './shop-team-work.js';
 import { shopPaused } from './shop-availability.js';
 import { routeShopStatus } from './shop-status.js';
+import { routeSupplierSignup, signupProjection, signupForShop, routeSignupSetup } from './supplier-signup.js';
+import { supplierPayoutStatus } from './supplier-payout-policy.js';
+import { supplierSupportsDocumentOrder } from './document-capabilities.js';
 import { routeShopFileAccess, recordShopFileAccess, fileAccessJobs } from './shop-file-access.js';
 import { isExpressDocumentOrder } from './express-offers.js';
 import { awardExpressFriendPass } from './express-rewards.js';
@@ -1240,8 +1243,9 @@ async function verifyClerkBeforeMutation(req, pathname) {
     "/auth/clerk/activate",
     "/auth/clerk/enroll/supplier",
     "/auth/clerk/enroll/rider",
+    '/auth/clerk/supplier-signup',
   ].includes(pathname);
-  if (req.method === "POST" && needsClerkProfile && verified?.claims?.sub) {
+  if (["POST","PATCH"].includes(req.method) && needsClerkProfile && verified?.claims?.sub) {
     try {
       req.gridgoClerkUser = { clerkUser: await clerkBackend.users.getUser(verified.claims.sub) };
     } catch {
@@ -2243,6 +2247,10 @@ function eligibleSuppliersForOrder(store, order) {
       continue;
     }
     const reasons = [];
+    if(!supplierSupportsDocumentOrder(store,supplier.id,order)) {
+      results.push({supplier:publicUser(supplier),eligible:false,reasons:['document_capability_unavailable'],matchingServiceIds:[],services:[]});
+      continue;
+    }
     if (supplierMatchBlockersFor(store)(supplier.id,store.supplierProfiles.find(p=>p.userId===supplier.id)).length) {
       results.push({
         supplier: publicUser(supplier),
@@ -2767,6 +2775,19 @@ async function handleAuditedRequest(req, res) {
       await save(store);
       return send(res, 200, result);
     }
+    if(req.method==='GET'&&pathname==='/auth/clerk/supplier-signup/document-sample') {
+      if(!(await verifiedClerkClaimsFor(req))?.claims?.sub)return send(res,401,{error:'unauthorized'});
+      const bytes=await fs.promises.readFile(new URL('./seed-assets/document-signup-sample.png',import.meta.url));
+      res.writeHead(200,{'Content-Type':'image/png','Content-Length':bytes.length,'Cache-Control':'private, max-age=3600'});
+      return res.end(bytes);
+    }
+    const signupResponse=pathname==='/auth/clerk/supplier-signup'?await routeSupplierSignup({req,url,store,claims:(await verifiedClerkClaimsFor(req))?.claims,
+      clerkUser:req.gridgoClerkUser?.clerkUser,readBody,now,id}):null;
+    if(signupResponse){
+      if(signupResponse.mutated)await save(store);
+      res.setHeader('Cache-Control','private, no-store');
+      return send(res,signupResponse.status,signupResponse.body);
+    }
     // ---- auth ----
     if (req.method === "POST" && ["/auth/login", "/auth/signup"].includes(pathname)) {
       return send(res, 404, { error: "not_found", path: pathname });
@@ -2911,6 +2932,7 @@ async function handleAuditedRequest(req, res) {
       const response = fixedAuthProjection(store, refreshed, role);
       if (role === "supplier") {
         response.supplierServices = (result.supplierServices || []).map(service => summarizeService(service, store));
+        response.shop=shopSummary(store,selectedShop(store,result.user));
       }
       return send(res, result.status, response);
     }
@@ -3231,6 +3253,13 @@ async function handleAuditedRequest(req, res) {
       return send(res, riderProfileResponse.status, riderProfileResponse.body);
     }
 
+    const signupSetup=await routeSignupSetup({req,url,store,user,readBody,now,id,audit});
+    if(signupSetup){if(signupSetup.mutated)await save(store);res.setHeader('Cache-Control','private, no-store');return send(res,signupSetup.status,signupSetup.body);}
+    if(req.method==='GET'&&['/me/supplier-signup','/me/payout-status'].includes(pathname)) {
+      if(!user||user.role!=='supplier'||user.shopRole==='staff')return send(res,403,{error:'shop_owner_or_manager_required'});
+      res.setHeader('Cache-Control','private, no-store');
+      return send(res,200,{...(pathname==='/me/supplier-signup'?{signup:signupProjection(store,signupForShop(store,user.id))}:{}),payoutStatus:supplierPayoutStatus(store,user.id,now())});
+    }
     const moneyResponse=await routeShopMoney({req,url,store,user,readBody,now,id,database});
     if(moneyResponse){res.setHeader('Cache-Control','private, no-store');if(moneyResponse.mutated)await save(store);return send(res,moneyResponse.status,moneyResponse.body);}
 
@@ -3242,6 +3271,7 @@ async function handleAuditedRequest(req, res) {
       readBody,
       now,
       audit,
+      id,
     });
     if (payoutAccountResponse) {
       if (payoutAccountResponse.mutated) await save(store);
@@ -4855,7 +4885,7 @@ async function handleAuditedRequest(req, res) {
           message: "A payout account is private. Open your own payout account or ask Operations for access.",
         });
       }
-      if (!identityHasMembership(target, "supplier") && target.role !== "supplier") {
+      if (!hasRole(store, target.id, "supplier")) {
         return send(res, 400, {
           error: "payout_account_requires_supplier",
           message: "Payout accounts apply only to supplier accounts. Choose a supplier profile.",
@@ -6618,7 +6648,8 @@ async function handleAuditedRequest(req, res) {
         // transfer hands the order to quality control rather than to the shop.
         // Older orders were quoted and approved long before payment, so for
         // them a confirmed payment really is the last gate.
-        order.state = order.moneyModelVersion === 3 ? "needs_qa" : "payment_authorized";
+        order.state = order.expressOrder?.paymentTiming==='after_acceptance'&&order.shopAcceptance?.status==='accepted'&&order.fileCheck?.status==='passed'
+          ? 'payment_authorized' : order.moneyModelVersion === 3 ? "needs_qa" : "payment_authorized";
         // Paid up front, the one confirmation settles the whole order.
         order.paymentStatus = order.payments?.final_online?.status === "not_required"
           ? "paid" : "initial_payment_confirmed";
@@ -6942,6 +6973,8 @@ async function handleAuditedRequest(req, res) {
       const order = store.orders.find((o) => o.id === orderId);
       if (!order) return send(res, 404, { error: "order_not_found" });
       const next = body.state;
+      if(order.expressOrder?.paymentTiming==='after_acceptance'&&['supplier_accepted','payment_authorized','production','supplier_self_qc','ready_for_dispatch'].includes(next)
+        && !paymentSettled(order.payments?.initial))return send(res,409,{error:'payment_required',message:'The shop must accept A3 Express through its accept action, then the client pays before work starts.'});
       if(order.orderType==='express' && order.fulfillmentMode==='pickup' && ['rider_assigned','picked_up','out_for_delivery','awaiting_collection','delivered','issue_window_open','completed'].includes(next)) {
         return send(res,409,{error:'express_pickup_code_required'});
       }

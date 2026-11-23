@@ -292,6 +292,9 @@ The existing Operations/Super Admin `GET /users/:id` approval response is now `{
 
 ## Supplier payout account
 
+Guided sign-up adds required QR-holder consent, owner-only setup and independent
+24-hour destination-change holds. See [Supplier sign-up](SUPPLIER_SIGNUP_API.md#existing-payout-account-added-consent-and-destination-pause).
+
 Payout release is a person in Operations scanning the shop's own receiving QR with a wallet app. This record is that plate plus the words needed to check the right shop is being paid. It is private to the shop and to Operations / Super Admin; it never appears in any client, rider, or public catalogue projection.
 
 ### `GET /me/payout-account`

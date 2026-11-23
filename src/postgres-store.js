@@ -84,6 +84,8 @@ const TABLES = [
   { name: "client_match_preferences", keys: ["client_id"], columns: ["client_id", "ranking", "version", "updated_at"] },
   { name: "client_saved_addresses", keys: ["id"], columns: ["id", "client_id", "label", "address_line", "lat", "lng", "is_default", "version", "created_at", "updated_at", "deleted_at"] },
   { name: "supplier_profiles", keys: ["user_id"], columns: ["user_id", "shop_name", "contact_name", "shop_lat", "shop_lng", "shop_label", "pickup_available", "is_closed", "express_enabled", "availability", "schedule", "version", "updated_at"] },
+  { name: 'supplier_signups', keys: ['clerk_user_id'], columns: ['clerk_user_id','supplier_id','version','steps','updated_at'] },
+  { name: 'supplier_payout_policies', keys: ['supplier_id'], columns: ['supplier_id','holder','consent','paused_until','updated_at'] },
   { name: "shop_reviews", keys: ["id"], columns: ["id", "order_id", "supplier_id", "client_id", "quality_stars", "speed_stars", "value_stars", "comment", "created_at"] },
   { name: "supplier_payment_terms", keys: ["supplier_id"], columns: ["supplier_id", "delivery_downpayment_rate_bps", "pickup_full_online_enabled", "pickup_downpayment_store_enabled", "pickup_downpayment_rate_bps", "version", "updated_at"] },
   { name: "rider_profiles", keys: ["user_id"], columns: ["user_id", "vehicle_type", "plate_number", "license_number", "version", "updated_at"] },
@@ -196,6 +198,8 @@ export function emptyStore() {
     matchSelections: [],
     clientAddresses: [],
     supplierProfiles: [],
+    supplierSignups: [],
+    supplierPayoutPolicies: [],
     supplierPaymentTerms: [],
     riderProfiles: [],
     approvalCases: [],
@@ -352,6 +356,8 @@ function rowsFromStore(store) {
   for (const profile of (store.supplierProfiles || [])) {
     rows.supplier_profiles.push({ user_id: profile.userId, shop_name: profile.shopName, contact_name: profile.contactName, shop_lat: profile.shop.lat, shop_lng: profile.shop.lng, shop_label: profile.shop.label, pickup_available: Boolean(profile.pickupAvailable), is_closed: Boolean(profile.isClosed), express_enabled: profile.expressEnabled !== false, availability: profile.availability ?? null, schedule: profile.schedule ?? null, version: profile.version || 1, updated_at: profile.updatedAt });
   }
+  rows.supplier_signups=(store.supplierSignups||[]).map(s=>({clerk_user_id:s.clerkUserId,supplier_id:s.supplierId,version:s.version,steps:s.steps,updated_at:s.updatedAt}));
+  rows.supplier_payout_policies=(store.supplierPayoutPolicies||[]).map(p=>({supplier_id:p.supplierId,holder:p.holder??null,consent:p.consent??null,paused_until:p.pausedUntil??null,updated_at:p.updatedAt}));
   for (const review of (store.shopReviews || [])) {
     rows.shop_reviews.push({
       id: review.id,
@@ -946,7 +952,30 @@ function readGraph(database) {
     const table = TABLES.find(table => table.name === name);
     if (!table) throw new Error(`Unknown read graph table: ${name}`);
     const projection=name==='supplier_profiles'?{...options,select:[...(options.select||table.columns),`(${shopMoneyDeadlineSql}) AS shop_money_deadline_at`]}:options;
-    loaded[name] = (await database.query(orderReadQuery(table, where, projection), values)).rows;
+    const sql=orderReadQuery(table,where,projection);
+    if(name!=='supplier_payout_accounts') {
+      loaded[name]=(await database.query(sql,values)).rows;
+      return;
+    }
+    // Keep the existing bounded account read and query budget. Private policy
+    // facts share its repeatable-read snapshot, rather than three extra reads.
+    const rows=(await database.query(`SELECT account.*,
+      (SELECT to_jsonb(s) FROM supplier_signups s WHERE s.supplier_id=account.supplier_id) AS signup_fact,
+      (SELECT to_jsonb(p) FROM supplier_payout_policies p WHERE p.supplier_id=account.supplier_id) AS policy_fact,
+      (SELECT jsonb_agg(to_jsonb(m)) FROM shop_memberships m WHERE m.shop_id=account.supplier_id AND m.role='owner' AND m.status='active') AS owner_facts
+      FROM (${sql}) account`,values)).rows;
+    const merge=(name,row,keys)=>{
+      if(!row)return;
+      for(const key of ['created_at','updated_at','last_used_at','paused_until'])if(row[key])row[key]=new Date(row[key]).toISOString();
+      const index=loaded[name].findIndex(existing=>keys.every(key=>existing[key]===row[key]));
+      if(index<0)loaded[name].push(row);else loaded[name][index]=row;
+    };
+    loaded[name]=rows.map(({signup_fact,policy_fact,owner_facts,...account})=>{
+      merge('supplier_signups',signup_fact,['clerk_user_id']);
+      merge('supplier_payout_policies',policy_fact,['supplier_id']);
+      for(const owner of owner_facts||[])merge('shop_memberships',owner,['shop_id','user_id']);
+      return account;
+    });
   }
   function finish(options = {}) {
     const store = storeFromRows(loaded, { ...options, writable: false });
@@ -2406,6 +2435,8 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
     if (row.schedule) item.schedule = row.schedule;
     return item;
   });
+  store.supplierSignups=loaded.supplier_signups.map(s=>({clerkUserId:s.clerk_user_id,supplierId:s.supplier_id,version:s.version,steps:s.steps,updatedAt:s.updated_at}));
+  store.supplierPayoutPolicies=loaded.supplier_payout_policies.map(p=>({supplierId:p.supplier_id,holder:p.holder,consent:p.consent,pausedUntil:p.paused_until,updatedAt:p.updated_at}));
   store.shopReviews = orderedBy(loaded.shop_reviews, "supplier_id", "created_at", "id").map((row) => ({
     id: row.id,
     orderId: row.order_id,

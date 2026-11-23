@@ -1,5 +1,6 @@
 import { supplierVerified, rankVerifiedWithinDistance } from "./supplier-verification.js";
 import { staffExpressProjection } from './shop-staff-order.js';
+import { assertDocumentRequest } from './document-capabilities.js';
 import { listingAcceptsArtwork } from './file-formats.js';
 import { randomInt } from 'node:crypto';
 import { approvedCatalogView } from './catalog-review-state.js';
@@ -78,18 +79,19 @@ export function expressStatus(order) {
   if(['delivered','issue_window_open','completed','payout_released'].includes(order.state))return 'delivered';
   if(['ready_for_dispatch','rider_assigned','picked_up','out_for_delivery','awaiting_collection'].includes(order.state))return 'ready';
   if(['production','supplier_self_qc'].includes(order.state))return 'printing';
-  if(['supplier_accepted','payment_authorized'].includes(order.state))return 'accepted';
+  if(['supplier_accepted','payment_authorized','awaiting_initial_payment'].includes(order.state)||order.shopAcceptance?.status==='accepted')return 'accepted';
   return 'sending';
 }
 export function publicExpress(order,user) {
   const e=order.expressOrder;if(!e)return null;
   const own=user?.id===order.clientId, staff=['ops_admin','super_admin'].includes(user?.role), shop=user?.id===order.supplierId;
   if(!own&&!staff&&!shop&&user?.id!==order.riderId)return null;
-  const result = {status:expressStatus(order),originalSupplierId:e.originalSupplierId,currentSupplierId:order.supplierId,declineCount:e.declines,
+  const result = {status:expressStatus(order),paymentTiming:e.paymentTiming||'checkout',originalSupplierId:e.originalSupplierId,currentSupplierId:order.supplierId,declineCount:e.declines,
     acceptBy:order.shopAcceptance?.status==='pending'?order.shopAcceptance.deadlineAt:null,
     events:structuredClone(e.events||[]),refundRequired:e.refundRequired===true,
     ...(own&&order.fulfillmentMode==='pickup'&&['ready','picked_up'].includes(expressStatus(order))?{pickupCode:e.pickupCode}:{}),
     ...(own||staff||shop?{printSettings:structuredClone(e.printSettings||[])}:{})};
+  if(own&&!staff&&!shop)for(const print of result.printSettings||[])delete print.rateMinor;
   return ['staff','manager'].includes(user?.shopRole) ? staffExpressProjection(result) : result;
 }
 export function startExpressAcceptance(order,at) {
@@ -135,7 +137,8 @@ export function createExpressSnapshot(cart,lines,at) {
  return {version:1,originalSupplierId:lines[0].supplierId,location:structuredClone(cart.expressLocation),declines:0,declinedSupplierIds:[],
   pickupCode:String(randomInt(1000000)).padStart(6,'0'),events:[{state:'sending',at,supplierId:lines[0].supplierId}],
   printSettings:lines.map(line=>({fileId:line.artworkFileId,pages:structuredClone(line.documentPages),copies:line.quantity,
-    colour:line.expressPrint.colour,paper:line.expressPrint.paper,paperStock:line.expressPrint.paperStock,sides:line.expressPrint.sides,layout:line.printLayout,note:line.specialInstructions||'',acceptedWarnings:structuredClone(line.expressPrint.acceptedWarnings)}))};
+    colour:line.expressPrint.colour,paper:line.expressPrint.paper,paperStock:line.expressPrint.paperStock,sides:line.expressPrint.sides,
+    ...(line.expressPrint.paper==='a3'?{rateMinor:line.expressPrint.rateMinor}:{}),layout:line.printLayout,note:line.specialInstructions||'',acceptedWarnings:structuredClone(line.expressPrint.acceptedWarnings)}))};
 }
 const day=at=>new Date(Date.parse(at)+8*3600000).toISOString().slice(0,10);
 export function expressGuide(store,user,at) {
@@ -177,7 +180,7 @@ function expressReplacementSupports(source,shop,settings,fulfillmentMode,at) {
    const item=store.catalogItems.find(row=>row.id===itemId), listing=item&&publicCatalogItem(store,item);
    const file=store.files.find(row=>row.fileId===print.fileId);
    if(!listing || !(item.printLayouts||[]).includes(print.layout) || !listingAcceptsArtwork(listing.acceptedFormats,file?.detectedContentType))return [];
-   try { expressCatalogOptions(store,item,print);return [{item,listing}]; } catch(error) {if(error.status)return [];throw error;}
+   try { const standard=expressCatalogOptions(store,item,print);if(print.paper==='a3'&&standard.rateMinor!==print.rateMinor)return [];return [{item,listing}]; } catch(error) {if(error.status)return [];throw error;}
   }).sort((a,b)=>a.listing.turnaroundHours-b.listing.turnaroundHours);
   if(!compatible.length)return false;
   lines.push({catalogItemId:compatible[0].item.id,quantity:print.copies||1,expressPrint:print});
@@ -191,8 +194,9 @@ function expressReplacementSupports(source,shop,settings,fulfillmentMode,at) {
 
 /** Express offers only its standard print controls, never custom paid add-ons. */
 export function expressCatalogOptions(store,item,print) {
+ assertDocumentRequest(store,item,print);
  const normalize=value=>String(value||'').trim().toLowerCase().replace(/\s+/g,' ');
- const optionIds=[];let paperStock=null;
+ const optionIds=[];let paperStock=null,hasA3=false;
  for(const group of catalogGroupsForItem(store,item.id,{includeInactiveOptions:false})) {
    if(group.kind==='addon') {if(group.required)expressFail(409,'express_listing_configuration_required');continue;}
    const name=normalize(group.name);let chosen;
@@ -202,8 +206,11 @@ export function expressCatalogOptions(store,item,print) {
        return print.colour==='bw'?bw:/colou?r/.test(label)&&!bw;
      });
    } else if(/size/.test(name)||group.options.some(o=>o.specBinding?.fieldCode==='size')) {
-     const pattern={a4:/\ba4\b/,short:/short|letter|8[.]5.*11/,long:/long|folio|legal|8[.]5.*13/}[print.paper];
+     const pattern={a4:/\ba4\b/,a3:/\ba3\b/,short:/short|letter|8[.]5.*11/,long:/long|folio|legal|8[.]5.*13/}[print.paper];
      chosen=group.options.find(o=>pattern?.test(normalize(o.specBinding?.value||o.label)));
+     if(print.paper==='a3'&&chosen)hasA3=true;
+   } else if(/sides/.test(name)) {
+     chosen=group.options.find(o=>print.sides==='two'?/back|two|duplex/.test(normalize(o.label)):/one|single/.test(normalize(o.label)));
    } else if(/paper|material|stock/.test(name)) {
      chosen=print.paperStock?group.options.find(o=>normalize(o.label)===normalize(print.paperStock)):group.options[0];
      if(chosen)paperStock=chosen.label;
@@ -211,6 +218,9 @@ export function expressCatalogOptions(store,item,print) {
    if(!chosen)expressFail(409,'express_listing_configuration_required');
    optionIds.push(chosen.id);
  }
- selectedCatalogPrice(store,item,optionIds);
- return {optionIds,paperStock};
+ if(print.paper==='a3'&&!hasA3)expressFail(409,'express_listing_configuration_required');
+ const priced=selectedCatalogPrice(store,item,optionIds);
+ const rateMinor=print.paper==='a3'?priced.effectiveUnitPriceMinor:expressRates(store.settings)[print.colour==='bw'?'bwMinor':'colourMinor'];
+ if(!Number.isSafeInteger(rateMinor)||rateMinor<=0)expressFail(409,'express_listing_configuration_required');
+ return {optionIds,paperStock,rateMinor};
 }

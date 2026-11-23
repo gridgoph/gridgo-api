@@ -141,6 +141,22 @@ const call = (store, action, body = {}, user = { id: 'client', role: 'client' })
   audit: (store, row) => store.auditLog.push(row),
 });
 
+test('recovery cannot offer a declared B&W-only or single-sided document shop for incompatible saved work',()=>{
+  const store=fixture(),order=store.orders[0];
+  store.taxonomy.categories.push({code:'document_publication',active:true});
+  store.taxonomy.subcategories.push({code:'document_printing',categoryCode:'document_publication',active:true});
+  for(const item of store.catalogItems)item.subcategoryCode='document_printing';
+  for(const service of store.supplierServices)service.categoryCode='document_publication';
+  const replacement=store.supplierServices.find(s=>s.supplierId==='replacement');
+  replacement.documentCapabilities={papers:['a4'],colours:['bw'],duplex:false};
+  store.orderLineItems[0].structuredSpecSnapshot={colourMode:'colour',sides:'one'};
+  assert.equal(findReplacementShop(store,order,AT),null);
+  replacement.documentCapabilities.colours.push('colour');
+  assert.equal(findReplacementShop(store,order,AT).supplierId,'replacement');
+  store.orderLineItems[0].structuredSpecSnapshot.sides='two';
+  assert.equal(findReplacementShop(store,order,AT),null);
+});
+
 test('one opening hour pauses overnight, weekends, split shifts and closures; never expires early by seconds', () => {
   const store = fixture(), order = store.orders[0];
   startShopAcceptance(store, order, '2026-10-10T09:30:30.000Z');

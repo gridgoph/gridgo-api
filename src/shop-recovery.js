@@ -1,5 +1,6 @@
 import { recordVerificationRecovery, hasSupplierTransferExposure } from "./supplier-verification.js";
 import { startExpressAcceptance, declineExpress } from './express-orders.js';
+import { documentRequestSupported } from './document-capabilities.js';
 import { tightDeclineExemption } from './scheduling-policy.js';
 import { sameReviewData } from './review-data.js';
 import { changePaymentPending } from './order-change-policy.js';
@@ -56,6 +57,7 @@ function compatibleLines(store, order, supplierId, fault = 'shop') {
       const ids = options.map((option) => groups.find((group) => normalized(group.name) === normalized(option.groupNameSnapshot)
         && (group.kind || 'spec') === (option.groupKindSnapshot || 'spec'))?.options.find((row) => normalized(row.label) === normalized(option.optionLabelSnapshot))?.id);
       if (ids.some((id) => !id)) continue;
+      if(!documentRequestSupported(store,item,{optionIds:ids,structuredSpec:line.structuredSpecSnapshot,expressPrint:line.expressPrint}))continue;
       // Free-form specs must be represented by the matched option labels; otherwise require Operations review.
       if (Object.entries(line.structuredSpecSnapshot || {}).some(([key, value]) => ['size', 'material', 'finish'].includes(key)
         && value && !options.some((option) => normalized(option.optionLabelSnapshot) === normalized(value)))) continue;

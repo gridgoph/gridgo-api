@@ -92,9 +92,10 @@ export async function routeExpressOrders({req,url,store,user,readBody,id,now,aud
    declineExpress(store,order,{at,id,kind:'declined',actorId:actorUserId(user),reason:body.reason.trim()});return response();
  }
  if(order.fileCheck?.status!=='passed')fail(409,'artwork_file_check_required');
- if(!order.cash&&!paymentSettled(order.payments?.initial))fail(409,'payment_required');
+ const payAfterAcceptance=order.expressOrder?.paymentTiming==='after_acceptance';
+ if(!order.cash&&!payAfterAcceptance&&!paymentSettled(order.payments?.initial))fail(409,'payment_required');
  acknowledgeInstructions(store,order,user,body,at,(_store,event)=>store.auditLog.push({id:id('aud'),at,actorId:actorUserId(user),actorRole:'supplier',...event,actor:undefined}));
  order.shopAcceptance.status='accepted';order.shopAcceptance.acceptedAt=at;order.shopAcceptance.acceptedBy=actorUserId(user);
- order.state='payment_authorized';order.timeline.push({at,state:order.state,by:actorUserId(user),note:'Shop accepted Express order.'});
+ order.state=payAfterAcceptance&&!paymentSettled(order.payments?.initial)?'awaiting_initial_payment':'payment_authorized';order.timeline.push({at,state:order.state,by:actorUserId(user),note:'Shop accepted Express order.'});
  expressEvent(store,order,'accepted',{at,id,actorId:actorUserId(user)});return response();
 }

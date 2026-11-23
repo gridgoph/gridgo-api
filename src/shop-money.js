@@ -12,6 +12,7 @@ import {shopMoneyPolicy,shopMoneyPaused,payRequestClosed} from './shop-money-pol
 import {clientPaymentSnapshot} from './shop-payment-method.js';
 import {identityHasMembership,selectActorRole} from './authorization-context.js';
 import {refundSettlementFor} from './refund-policy.js';
+import {supplierPayoutStatus,assertSupplierPayoutAllowed} from './supplier-payout-policy.js';
 export {clientPaymentSnapshot} from './shop-payment-method.js';
 export {shopMoneySettings} from './shop-money-settings.js';
 export {shopMoneyPolicy,shopMoneyPaused} from './shop-money-policy.js';
@@ -120,6 +121,8 @@ const settlementPayoutHeld=(s,o)=>Boolean(o.payoutHold||(s.claims||[]).some(cl=>
 /** A dry run uses the exact proof/collection/hold checks and sequential cap reservations. */
 function prepareItems(store,supplierId,ctx,{dry=false,keys}={}) {
   const s=dry?structuredClone(store):store,c=context(ctx),items=[],held=[];
+  const payoutStatus=supplierPayoutStatus(s,supplierId,c.at);
+  if(payoutStatus.held)return {items,held:[{key:`supplier:${supplierId}`,reason:payoutStatus.reason}],netAmountMinor:0,grossAmountMinor:0};
   for(const o of s.orders||[]) {
     if(o.supplierId!==supplierId||o.reviewData||!o.commercialCommittedAt)continue;
     const externalPrincipal=o.cash||o.clientPayment?.methods.includes('counter_cash');
@@ -297,6 +300,7 @@ export async function routeShopMoney({req,url,store,user,readBody,now,id,databas
   if(prepare&&req.method==='POST') {
     const run=events(store).find(e=>e.id===prepare[1]&&e.kind==='settlement_run'),row=run?.data.shops.find(s=>s.supplierId===prepare[2]);
     if(!row)fail('settlement_not_found',404);
+    assertSupplierPayoutAllowed(store,row.supplierId,c.at);
     const key=`transfer:${run.id}:${row.supplierId}`,existing=events(store).find(e=>e.key===key);
     if(existing) {if(existing.data.payerId!==user.id)fail('verification_payer_required',403);return {status:200,body:{transfer:existing,status:events(store).findLast(e=>e.data?.transferId===existing.id)?.kind||'reserved'}};}
     const account=opsPayoutAccountProjection(store,row.supplierId);if(!account?.qr)fail('payout_qr_required');

@@ -1,4 +1,5 @@
 import { listCashEvidence } from './cash-evidence.js';
+import { assertSupplierPayoutAllowed } from './supplier-payout-policy.js';
 import { randomUUID } from 'node:crypto';
 import { cashAmounts, cashSettings, cashFail as fail } from './cash-policy.js';
 import { cashFingerprint, cashWallet, postCash, reconcileCash, releaseCash } from './cash-ledger.js';
@@ -216,6 +217,7 @@ export async function routeCash({req,url,db,store,user,readBody,id,now,audit,sto
       await collectCash({db,store,order,user,body,at,id,audit});
       ({receipt}=await issueAcknowledgement({database:db,store,order,user,now:()=>at,id,audit}));
     } else if (action==='shop-payment') {
+      assertSupplierPayoutAllowed(store,order.supplierId,at);
       assertRefundWorkAllowed(store,order);
       if (claimBlocksHandover(store,order)) fail('cash_work_held');
       if (order.state!=='rider_assigned' || p.shopPaidAt || p.noShowApprovedAt) fail('cash_shop_payment_not_available');
@@ -295,6 +297,7 @@ export async function routeCash({req,url,db,store,user,readBody,id,now,audit,sto
     } else if (action==='remedy-reserve') {
       const issue=store.issues.find(i=>i.id===body.issueId && i.orderId===order.id);
       const d=issue?.faultDecision, refund=['partial_refund','full_refund'].includes(d?.remedy);
+      if(['reprint','replacement'].includes(d?.remedy))assertSupplierPayoutAllowed(store,order.supplierId,at);
       if (!d || d.id!==body.decisionId || d.status!=='approved' || !['partial_refund','full_refund','reprint','replacement'].includes(d.remedy)
         || !['shop','rider','gridgo'].includes(d.fault) || !d.evidenceIds?.length
         || !Number.isSafeInteger(d.gridgoCostMinor) || d.gridgoCostMinor<0 || d.gridgoCostMinor>d.costMinor
@@ -327,6 +330,7 @@ export async function routeCash({req,url,db,store,user,readBody,id,now,audit,sto
       if (!r || !['reserved','unknown'].includes(r.status) || r.payerId!==user.id && user.role!=='super_admin') fail('cash_remedy_payer_required',403);
       if (body.amountMinor!==r.amountMinor) fail('cash_remedy_amount_mismatch',400);
       const refund=['partial_refund','full_refund'].includes(r.remedyType);
+      if(!refund)assertSupplierPayoutAllowed(store,order.supplierId,at);
       const reference=text(body.reference),receiptFileId=refund?bind(body.receiptFileId,'cash_remedy_receipt'):
         owned(store,user,body.receiptFileId,'cash_reprint_receipt',{id:r.id,orderId:order.id,supplierId:order.supplierId});
       if ((await db.query("SELECT 1 FROM cash_journals WHERE kind='remedy_paid' AND evidence->>'reference'=$1 AND evidence->>'sourceWallet'=$2 AND evidence->>'provider'=$3",[reference,r.sourceWallet,r.provider])).rowCount) fail('cash_transfer_duplicate');

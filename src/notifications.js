@@ -386,12 +386,22 @@ export function notificationVisible(store, notification, userId, role, { shopId 
   if (isTestOperationsUser(store, userId) && !reviewSubject(store, notification)) return false;
   if (role && !(role === 'supplier' ? hasSupplierAppAccess(store, userId) : hasRole(store,userId,role))) return false;
   const requiredRole = notification.appRole || (notification.type?.startsWith('shop_') ? 'supplier' : notification.type?.startsWith('ops_') ? 'ops_admin' : null);
+  let managerDispute = false;
+  if (notification.type === 'shop_ownership_disputed' && requiredRole === 'supplier') {
+    const member = (store.shopMemberships || []).find(m => m.shopId === notification.shopId && m.userId === userId);
+    // Guided signup's registering account is the shop ID. This operational
+    // notice does not grant other Managers or Staff access to Owner notices.
+    managerDispute = notification.shopId === userId && (!shopId || shopId === notification.shopId)
+      && member?.status === 'active' && member.role === 'staff'
+      && (store.shopTeamMemberSettings || []).some(m => m.shopId === notification.shopId && m.userId === userId && m.manager === true);
+    if (!managerDispute) return false;
+  }
   // A former Owner keeps the business user ID; role demotion must also hide
   // their historical money notifications. Selected Staff context never mixes
   // in notices for another shop the same person happens to own.
   const staffContext = (store.shopMemberships || []).find(m => m.userId === userId && m.shopId === (shopId || notification.shopId || userId) && m.role === 'staff');
   if (staffContext && (!requiredRole || requiredRole === 'supplier') && (!role || role === 'supplier')) {
-    if (staffContext.status !== 'active' || notification.expressOffer?.earningsMinor != null || !['shop_job_assigned', 'shop_express_offer'].includes(notification.type)
+    if (staffContext.status !== 'active' || notification.expressOffer?.earningsMinor != null || (!managerDispute && !['shop_job_assigned', 'shop_express_offer'].includes(notification.type))
       || (notification.shopId || orderFromNotification(store, notification)?.supplierId) !== staffContext.shopId) return false;
   }
 
