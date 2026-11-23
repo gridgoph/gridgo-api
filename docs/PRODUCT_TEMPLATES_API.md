@@ -216,7 +216,9 @@ these cases separately before retrying; this operation offers no override.
 The additive migration creates the reference/workflow tables and a nullable
 `template_data` composite on listings. It relaxes only the existing option
 ordering bound to 200 so complete apparel tables fit; legacy callers retain their
-existing editor limits. It expands the existing file-reference type allowlist.
+existing editor limits. It extends the installed file-reference type constraint, preserving all existing
+reference types and populated rows (including team photographs), and adds only
+`product_setup_request`.
 It does not impose a new CHECK that a historical catalogue upsert can violate.
 Historical mappings omit `template_data`, so their updates preserve it. No domain
 row is rewritten by DDL. Rollback is forward-only to preserve team work and shop

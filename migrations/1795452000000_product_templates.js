@@ -4,10 +4,13 @@ export async function up(pgm) {
     -- Relax a bound only; legacy upserts remain valid during overlap/rollback.
     ALTER TABLE supplier_catalog_options DROP CONSTRAINT supplier_catalog_options_sort_order_check;
     ALTER TABLE supplier_catalog_options ADD CONSTRAINT supplier_catalog_options_sort_order_check CHECK (sort_order BETWEEN 0 AND 199);
-    ALTER TABLE file_references DROP CONSTRAINT file_references_reference_type_check;
-    ALTER TABLE file_references ADD CONSTRAINT file_references_reference_type_check CHECK(reference_type IN
-      ('order','supplier_service','user','rider_document','supplier_catalog_item','supplier_shop_media','supplier_payout_account',
-       'tracker_decision','refund_request','support_chat_message','delivery_chat_message','pickup_chat_message','client_shop_chat_message','quote_request','home_promotion','cash','product_setup_request'));
+    DO $$ DECLARE prior text; BEGIN
+      SELECT pg_get_expr(conbin,conrelid) INTO prior FROM pg_constraint
+        WHERE conrelid='file_references'::regclass AND conname='file_references_reference_type_check';
+      IF prior IS NULL THEN RAISE EXCEPTION 'file reference policy must exist before template migration'; END IF;
+      ALTER TABLE file_references DROP CONSTRAINT file_references_reference_type_check;
+      EXECUTE format('ALTER TABLE file_references ADD CONSTRAINT file_references_reference_type_check CHECK ((%s) OR reference_type = %L)', prior, 'product_setup_request');
+    END $$;
     CREATE TABLE product_templates (
       id text PRIMARY KEY,
       subcategory_code text NOT NULL REFERENCES taxonomy_subcategories(code) ON DELETE RESTRICT,
