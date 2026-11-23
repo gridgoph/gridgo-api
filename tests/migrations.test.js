@@ -1247,7 +1247,8 @@ for (const fees of [[3100, 6200, 9300], [8900, 14900, 22900]]) test(`delivery zo
       const columns = Object.keys(before[table][0]).map(name => `"${name.replaceAll('"', '""')}"`).join(', ');
       assert.deepEqual((await client.query(`SELECT ${columns} FROM ${table}`)).rows,
         table === "order_jobs" ? before[table]
-          : before[table].map(row => ({ ...row, data: { ...row.data, shopHandoverVersion: 1 } })));
+          : before[table].map(row => ({ ...row, data: { ...row.data, shopHandoverVersion: 1,
+            clientPayment:{methods:['in_app_qr'],settlement:'staged'} } })));
     }
   });
 });

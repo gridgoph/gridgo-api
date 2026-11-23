@@ -1,3 +1,6 @@
+import { seedProductTemplatePhotos } from './product-template-media.js';
+import { createObjectStorage } from './object-storage.js';
+import { defaultProductTemplates } from './product-template-data.js';
 import { seedLegalDocuments } from './legal.js';
 import { fileURLToPath } from "node:url";
 
@@ -42,6 +45,8 @@ export async function seedReferenceData(database) {
     const store = await loadStore(database);
     const reference = referenceData();
     appendMissing(store.catalog, reference.catalog, "id");
+    store.productTemplates ||= [];
+    appendMissing(store.productTemplates, defaultProductTemplates(), "id");
     for (const key of ["categories", "categoryAliases", "subcategories", "materials", "finishes"]) {
       appendMissing(store.taxonomy[key], reference.taxonomy[key], "code");
     }
@@ -74,6 +79,7 @@ async function main() {
   try {
     await database.assertReady();
     await seedReferenceData(database);
+    if (process.env.MINIO_ENDPOINT) await seedProductTemplatePhotos(createObjectStorage(process.env));
     console.log("Seeded GRIDGO platform reference data (no users or operational records).\n");
   } finally {
     await database.close();

@@ -1,4 +1,7 @@
 import { verificationLedgerTable, verificationLedgerRows, loadVerificationLedgerRows } from "./supplier-verification-store.js";
+import {shopMoneyTables,shopMoneyRows,loadShopMoneyRows} from './shop-money-store.js';
+import {clientPaymentSnapshot} from './shop-payment-method.js';
+import {shopMoneyDeadlineSql} from './shop-money-policy.js';
 import { fileAccessTable, fileAccessRows, loadFileAccessRows } from './shop-file-access.js';
 import { shopTeamTables, emptyShopTeam, shopTeamRows, loadShopTeamRows, ensureShopOwners } from './shop-team-store.js';
 import { STAFF_LIST_PAGE, readStaffPage, staffPageRequested, staffListPlan, parseStaffPage, encodeStaffCursor } from './staff-list-pages.js';
@@ -92,6 +95,8 @@ const TABLES = [
   { name: "taxonomy_categories", keys: ["id"], columns: ["id", "code", "name", "active", "sort_order", "position", "data"] },
   { name: "taxonomy_category_aliases", keys: ["code"], columns: ["code", "category_code", "position", "data"] },
   { name: "taxonomy_subcategories", keys: ["id"], columns: ["id", "code", "category_code", "name", "active", "sort_order", "position", "data"] },
+  { name: "product_templates", keys: ["id"], columns: ["id", "subcategory_code", "active", "version", "data"] },
+  { name: "product_setup_requests", keys: ["id"], columns: ["id", "supplier_id", "kind", "status", "version", "created_at", "updated_at", "data"] },
   { name: "product_type_requests", keys: ["id"], columns: ["id", "supplier_id", "category_code", "name", "description", "status", "reason", "product_type_code", "version", "created_at", "updated_at", "reviewed_at", "reviewed_by"] },
   { name: "taxonomy_materials", keys: ["id"], columns: ["id", "code", "name", "category_codes", "active", "position", "data"] },
   { name: "taxonomy_finishes", keys: ["id"], columns: ["id", "code", "name", "category_codes", "active", "position", "data"] },
@@ -101,7 +106,7 @@ const TABLES = [
   { name: "accepted_file_formats", keys: ["code"], columns: ["code", "display_name", "input_kind", "extensions", "mime_types", "active"] },
   { name: "supplier_service_file_formats", keys: ["supplier_service_id", "format_code"], columns: ["supplier_service_id", "format_code"] },
   ...quoteRequestTables,
-  { name: "supplier_catalog_items", keys: ["id"], columns: ["id", "supplier_id", "supplier_service_id", "subcategory_code", "name", "description", "base_price_minor", "pricing_unit", "package_qty", "measure_unit", "minimum_width_milli", "minimum_height_milli", "minimum_length_milli", "minimum_order_quantity", "printer_max_width_feet", "print_layouts", "priced_by_colour", "one_colour", "express", "sample_available", "sample_price_minor", "production_time_review_reasons", "turnaround_mode", "turnaround_hours", "turnaround_days", "turnaround_minutes", "minimum_turnaround_hours", "minimum_turnaround_days", "minimum_turnaround_minutes", "file_format_mode", "active", "suspend_reason", "suspended_at", "suspended_by", "sort_order", "version", "created_at", "updated_at", "review_status", "review_reason", "reviewed_at", "reviewed_by", "approved_snapshot", "quote_request_id", "quote_client_id"] },
+  { name: "supplier_catalog_items", keys: ["id"], columns: ["id", "supplier_id", "supplier_service_id", "subcategory_code", "name", "description", "base_price_minor", "pricing_unit", "package_qty", "measure_unit", "minimum_width_milli", "minimum_height_milli", "minimum_length_milli", "minimum_order_quantity", "printer_max_width_feet", "print_layouts", "priced_by_colour", "one_colour", "express", "sample_available", "sample_price_minor", "production_time_review_reasons", "turnaround_mode", "turnaround_hours", "turnaround_days", "turnaround_minutes", "minimum_turnaround_hours", "minimum_turnaround_days", "minimum_turnaround_minutes", "file_format_mode", "active", "suspend_reason", "suspended_at", "suspended_by", "sort_order", "version", "created_at", "updated_at", "review_status", "review_reason", "reviewed_at", "reviewed_by", "approved_snapshot", "template_data", "quote_request_id", "quote_client_id"] },
   { name: "supplier_catalog_colour_sizes", keys: ["catalog_item_id", "size_key"], columns: ["catalog_item_id", "size_key", "paper_size", "width_milli", "height_milli", "tier_set"] },
   { name: "supplier_catalog_colour_prices", keys: ["catalog_item_id", "size_key", "tier_code"], columns: ["catalog_item_id", "size_key", "tier_code", "price_minor"] },
   { name: "supplier_catalog_option_groups", keys: ["id"], columns: ["id", "catalog_item_id", "name", "kind", "help_text", "required", "selection_mode", "sort_order", "version", "created_at", "updated_at"] },
@@ -157,6 +162,7 @@ const TABLES = [
   { name: "location_pings", keys: ["id"], columns: ["id", "order_id", "rider_id", "lat", "lng", "accuracy_meters", "at", "position", "data"] },
   { name: "escalations", keys: ["id"], columns: ["id", "order_id", "rider_id", "status", "created_at", "updated_at", "position", "data"] },
   verificationLedgerTable,
+  ...shopMoneyTables,
   { name: "device_tokens", keys: ["id"], columns: ["id", "user_id", "token", "platform", "created_at", "updated_at", "position", "data"] },
 ];
 
@@ -165,6 +171,8 @@ export function emptyStore() {
     ...emptyStaffStore(),
     ...emptyShopTeam(),
     supplierVerificationLedger: [],
+    shopMoneyLedger: [],
+    shopMoneyEvents: [],
     shopFileAccesses: [],
     ...emptyVoucherStore(),
     orderSurveys: [],
@@ -205,6 +213,8 @@ export function emptyStore() {
     supplierServicePriceTiers: [],
     acceptedFileFormats: [],
     supplierServiceFileFormats: [],
+    productTemplates: [],
+    productSetupRequests: [],
     catalogItems: [],
     productTypeRequests: [],
     catalogItemPhotos: [],
@@ -256,6 +266,7 @@ function rowsFromStore(store) {
   ensureShopOwners(store);
   shopTeamRows(store, rows);
   verificationLedgerRows(store, rows);
+  shopMoneyRows(store, rows);
   rows.shop_file_accesses = fileAccessRows(store);
   staffRows(store, rows);
   voucherRows(store, rows);
@@ -473,9 +484,12 @@ function rowsFromStore(store) {
       product_type_code: request.productTypeCode ?? null, version: request.version, created_at: request.createdAt,
       updated_at: request.updatedAt, reviewed_at: request.reviewedAt ?? null, reviewed_by: request.reviewedBy ?? null });
   }
+  for (const template of store.productTemplates || []) rows.product_templates.push({ id: template.id, subcategory_code: template.subcategoryCode, active: template.active !== false, version: template.version, data: without(template, ["id", "subcategoryCode", "active", "version"]) });
+  for (const request of store.productSetupRequests || []) rows.product_setup_requests.push({ id: request.id, supplier_id: request.supplierId, kind: request.kind, status: request.status, version: request.version, created_at: request.createdAt, updated_at: request.updatedAt, data: without(request, ["id", "supplierId", "kind", "status", "version", "createdAt", "updatedAt"]) });
   for (const item of (store.catalogItems || [])) {
     rows.supplier_catalog_items.push({
       id: item.id, supplier_id: item.supplierId, supplier_service_id: item.supplierServiceId,
+      template_data: item.templateData ?? null,
       review_status: item.reviewStatus || "approved", review_reason: item.reviewReason ?? null,
       reviewed_at: item.reviewedAt ?? null, reviewed_by: item.reviewedBy ?? null, approved_snapshot: item.approvedSnapshot ?? null,
       subcategory_code: item.subcategoryCode, name: item.name, description: item.description || "",
@@ -937,7 +951,8 @@ function readGraph(database) {
   async function read(name, where, values = [], options = {}) {
     const table = TABLES.find(table => table.name === name);
     if (!table) throw new Error(`Unknown read graph table: ${name}`);
-    const sql=orderReadQuery(table,where,options);
+    const projection=name==='supplier_profiles'?{...options,select:[...(options.select||table.columns),`(${shopMoneyDeadlineSql}) AS shop_money_deadline_at`]}:options;
+    const sql=orderReadQuery(table,where,projection);
     if(name!=='supplier_payout_accounts') {
       loaded[name]=(await database.query(sql,values)).rows;
       return;
@@ -2339,6 +2354,9 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
   store.legalPenaltyGate = legalPenaltyGate;
   loadShopTeamRows(store, loaded);
   loadVerificationLedgerRows(store, loaded);
+  loadShopMoneyRows(store, loaded);
+  Object.defineProperty(store,'shopMoneyDeadlines',{value:new Map(loaded.supplier_profiles.filter(row=>Object.hasOwn(row,'shop_money_deadline_at'))
+    .map(row=>[row.user_id,row.shop_money_deadline_at])),enumerable:false});
   store.shopFileAccesses = loadFileAccessRows(loaded.shop_file_accesses);
   loadStaffRows(store, loaded);
   loadVoucherRows(store, loaded);
@@ -2503,6 +2521,8 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
     categoryCode: row.category_code, name: row.name, description: row.description, status: row.status, reason: row.reason,
     productTypeCode: row.product_type_code, version: row.version, createdAt: row.created_at, updatedAt: row.updated_at,
     reviewedAt: row.reviewed_at, reviewedBy: row.reviewed_by }));
+  store.productTemplates = loaded.product_templates.map(row => ({ ...row.data, id: row.id, subcategoryCode: row.subcategory_code, active: row.active, version: row.version }));
+  store.productSetupRequests = loaded.product_setup_requests.map(row => ({ ...row.data, id: row.id, supplierId: row.supplier_id, kind: row.kind, status: row.status, version: row.version, createdAt: row.created_at, updatedAt: row.updated_at }));
   store.catalogItems = orderedBy(loaded.supplier_catalog_items, "supplier_id", "sort_order", "id").map((row) => {
     const item = {
       id: row.id, supplierId: row.supplier_id, supplierServiceId: row.supplier_service_id,
@@ -2526,6 +2546,7 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
       fileFormatMode: row.file_format_mode, active: row.active, sortOrder: row.sort_order,
       version: row.version, createdAt: row.created_at, updatedAt: row.updated_at,
     };
+    present(item, "templateData", row.template_data);
     present(item, "suspendReason", row.suspend_reason);
     present(item, "suspendedAt", row.suspended_at);
     present(item, "suspendedBy", row.suspended_by);
@@ -2917,6 +2938,7 @@ async function upsertChanged(database, table, before, current) {
 export async function saveStore(database, store) {
   if (notificationReadStores.has(store)) throw new Error('Projection stores are read-only');
   if (!database.inWriteTransaction()) throw new Error("saveStore requires an active write transaction");
+  for(const order of store.orders||[])order.clientPayment??=clientPaymentSnapshot(order);
   enforceReviewData(store, originalDomainStore(store));
   labelReviewNotifications(store, originalDomainStore(store));
   finalizeAuditEntries(store, originalDomainStore(store));

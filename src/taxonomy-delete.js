@@ -69,6 +69,7 @@ function subcategoryUsage(store, codes) {
   const shopIds = [...new Set(listings.map((item) => item.supplierId))];
   return {
     listings: listings.length,
+    ...((store.productTemplates || []).some(row => codes.has(row.subcategoryCode)) ? { productTemplates: store.productTemplates.filter(row => codes.has(row.subcategoryCode)).length } : {}),
     ...((store.productTypeRequests || []).some(row => codes.has(row.productTypeCode)) ? { productTypeRequests: store.productTypeRequests.filter(row => codes.has(row.productTypeCode)).length } : {}),
     shops: shopIds.map((supplierId) => shopFor(store, supplierId)),
     orders: ordersOnListings(store, listingIds),
@@ -102,6 +103,7 @@ export function taxonomyEntryUsage(store, collection, entry) {
     shops: shopIds.map((supplierId) => shopFor(store, supplierId)),
     orders: under.orders,
     starters: under.starters,
+    ...(under.productTemplates ? { productTemplates: under.productTemplates } : {}),
   };
 }
 

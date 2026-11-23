@@ -25,7 +25,7 @@ test("one inclusive zone table determines the distance label and delivery price"
   }
 });
 
-test("Out of Zone uses configurable integer money over the whole rounded-up distance and retains 85/15", () => {
+test("Out of Zone uses configurable integer money over the whole rounded-up distance and the new 80/20 split", () => {
   const settings = { ...model.defaultOperationalSettings(), deliveryFeeBands: bands() };
   Object.assign(settings.deliveryFeeBands[3], { baseFeeMinor: 8000, perKmMinor: 1200 });
   assert.equal(model.deliveryFeeForDistance(16000.1, settings), 28400);
@@ -34,8 +34,8 @@ test("Out of Zone uses configurable integer money over the whole rounded-up dist
     supplierDownpaymentRateBps: 2500, distanceMeters: 16001, settings,
   });
   assert.equal(money.deliveryFeeMinor, 28400);
-  assert.equal(money.riderPayoutMinor, 24140);
-  assert.equal(money.platformDeliveryShareMinor, 4260);
+  assert.equal(money.riderPayoutMinor, 22720);
+  assert.equal(money.platformDeliveryShareMinor, 5680);
   assert.equal(money.totalMinor, 138400);
   settings.deliveryFeeBands[3].baseFeeMinor = Number.MAX_SAFE_INTEGER;
   assert.throws(() => model.deliveryFeeForDistance(16001, settings), { code: "invalid_money" });

@@ -33,7 +33,7 @@ test('whole-cart cash limit and debts fail closed; online checkout keeps its cur
     const { call, path } = await makeCart(store, [1, 1]);
     if (mode === 'online') {
       await call('POST', `${path}/checkout`, { payment: { method: 'qr_manual', reference: 'ONLINE', proofFileId: 'receipt' } });
-      assert.equal(store.orders.at(-1).riderCommissionBps, 8500);
+      assert.equal(store.orders.at(-1).riderCommissionBps, 8000);
     } else await assert.rejects(call('POST', `${path}/checkout`, { payment: { method: 'cash' } }),
       { code: { disabled: 'cash_disabled', limit: 'cash_limit_exceeded', debt: 'cash_client_barred' }[mode] });
   }

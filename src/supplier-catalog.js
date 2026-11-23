@@ -367,6 +367,13 @@ export function catalogItemBlockers(store, item, { publicOnly = false, at } = {}
   if (!String(item.name || "").trim()) blockers.push("name");
   if (!Number.isSafeInteger(item.basePriceMinor) || item.basePriceMinor < 0) blockers.push("base_price");
   if (!item.subcategoryCode) blockers.push("subcategory");
+  if (item.templateData?.managed) {
+    const groups = catalogGroupsForItem(store, item.id);
+    if (item.basePriceMinor <= 0 || minimumCatalogPrice(store, item) <= 0 || groups.some(group => group.options.some(option => option.active !== false && (item.basePriceMinor + option.priceModifierMinor <= 0 || group.kind === "addon" && option.priceModifierMinor < 0)))
+        || (store.catalogPriceTiers || []).some(tier => tier.catalogItemId === item.id && tier.unitPriceMinor <= 0)
+        || (store.catalogSpeedTiers || []).some(tier => tier.catalogItemId === item.id && tier.priceMinor != null && tier.priceMinor <= 0)) blockers.push("template_price_required");
+    if (publicOnly && item.templateData.shopConfirmed === false) blockers.push("shop_confirmation_required");
+  }
   if (item.subcategoryCode === TARPAULIN_OUTDOOR_BANNERS && !isValidPrinterMaxWidthFeet(item.printerMaxWidthFeet)) {
     blockers.push("printer_max_width_feet");
   }
@@ -375,7 +382,7 @@ export function catalogItemBlockers(store, item, { publicOnly = false, at } = {}
     .filter((photo) => photo.catalogItemId === item.id)
     .filter((photo) => readyFile(store, photo.fileId));
   // A quote listing is the shop's price for one client's brief; it has no sample photo.
-  if (photos.length === 0 && !isQuoteListing(item)) blockers.push("photo");
+  if (photos.length === 0 && !item.templateData?.stockPhotos?.length && !isQuoteListing(item)) blockers.push("photo");
   for (const group of catalogGroupsForItem(store, item.id)) {
     if (group.options.filter((option) => option.active !== false).length === 0) {
       blockers.push(`option_group:${group.id}`);
@@ -453,7 +460,8 @@ export function minimumCatalogPrice(store, item) {
 }
 
 function publicPhotos(store, itemId) {
-  return (store.catalogItemPhotos || [])
+  const stock = (store.catalogItems || []).find(row => row.id === itemId)?.templateData?.stockPhotos || [];
+  const own = (store.catalogItemPhotos || [])
     .filter((photo) => photo.catalogItemId === itemId && readyFile(store, photo.fileId))
     .sort(compareSortOrder)
     .map((photo) => ({
@@ -461,7 +469,9 @@ function publicPhotos(store, itemId) {
       sortOrder: photo.sortOrder,
       altText: photo.altText ?? null,
       url: `/catalog/media/${photo.fileId}`,
+      ...((store.catalogItems || []).find(row => row.id === itemId)?.templateData ? { realPhoto: true } : {}),
     }));
+  return own.length ? own : stock.map((photo, sortOrder) => ({ ...photo, downloadUrl: photo.url, sortOrder, realPhoto: false }));
 }
 
 function publicShopMedia(store, supplierId) {
@@ -601,6 +611,7 @@ export function publicCatalogItem(store, item, { selectedOptionIds, at } = {}) {
     } : null,
     acceptedFormats: effectiveAcceptedFormats(store, item),
     photos: publicPhotos(store, item.id),
+    ...(item.templateData ? { clientTips: item.templateData.clientTips || [], templateUnit: item.templateData.unit } : {}),
     prepSteps: prepStepsForItem(store, item.id),
     optionGroups: groups,
     version: item.version,
@@ -1300,6 +1311,7 @@ export function privateCatalogItem(store, item) {
   const groups = catalogGroupsForItem(store, item.id);
   return {
     id: item.id,
+    ...(item.templateData ? { template: structuredClone(item.templateData) } : {}),
     productionTime: effectiveProductionTime(store, item).choice,
     productionTimeReview: productionTimeReview(store, item),
     reviewStatus: item.reviewStatus || "approved",
@@ -1342,13 +1354,15 @@ export function privateCatalogItem(store, item) {
     suspendedAt: item.suspendedAt ?? null,
     sortOrder: item.sortOrder,
     version: item.version,
-    photos: (store.catalogItemPhotos || [])
+    photos: item.templateData?.stockPhotos?.length && !(store.catalogItemPhotos || []).some(p => p.catalogItemId === item.id)
+      ? publicPhotos(store, item.id) : (store.catalogItemPhotos || [])
       .filter((photo) => photo.catalogItemId === item.id)
       .sort(compareSortOrder)
       .map((photo) => ({
         fileId: photo.fileId,
         sortOrder: photo.sortOrder,
         altText: photo.altText ?? null,
+        ...(item.templateData ? { realPhoto: true } : {}),
       })),
     prepSteps: prepStepsForItem(store, item.id),
     optionGroups: groups.map((group) => ({

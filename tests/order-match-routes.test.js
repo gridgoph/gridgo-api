@@ -326,13 +326,13 @@ test("preferences, addresses, matching, cart checkout, invoice, and mockup use t
 
   assert.equal(checkedOut.status, 201);
   const committed = store.orders.find((order) => order.id === checkedOut.body.order.id);
-  assert.equal(committed.riderCommissionBps, 8500);
-  assert.equal(committed.riderPayoutMinor, 7565);
-  assert.equal(committed.platformDeliveryShareMinor, 1335);
-  assert.equal(store.orderJobs[0].riderCommissionBps, 8500);
-  assert.equal(store.orderJobs[0].riderPayoutMinor, 7565);
+  assert.equal(committed.riderCommissionBps, 8000);
+  assert.equal(committed.riderPayoutMinor, 7120);
+  assert.equal(committed.platformDeliveryShareMinor, 1780);
+  assert.equal(store.orderJobs[0].riderCommissionBps, 8000);
+  assert.equal(store.orderJobs[0].riderPayoutMinor, 7120);
   store.settings.riderCommissionBps = 7000;
-  assert.equal(committed.riderPayoutMinor, 7565);
+  assert.equal(committed.riderPayoutMinor, 7120);
   assert.equal(checkedOut.body.order.riderPayoutMinor, undefined);
   assert.equal(checkedOut.body.order.jobs[0].riderPayoutMinor, undefined);
 
@@ -1111,8 +1111,8 @@ test("Out of Zone stays available, cart listings carry zones and ratings, checko
   assert.equal(placed.status, 201);
   assert.equal(placed.body.order.deliveryFeeMinor, 29500);
   const order = store.orders.find((row) => row.id === placed.body.order.id);
-  assert.equal(order.riderPayoutMinor, 25075);
-  assert.equal(order.platformDeliveryShareMinor, 4425);
+  assert.equal(order.riderPayoutMinor, 23600);
+  assert.equal(order.platformDeliveryShareMinor, 5900);
   assert.equal(store.orderJobs[0].deliveryDistanceMeters, 16001);
   store.settings.deliveryFeeBands[3].perKmMinor = 2000;
   store.settings.deliveryFeeBands[2].maxDistanceMeters = 23000;
@@ -1231,7 +1231,7 @@ for (const [count, mode] of [[2, "delivery"], [3, "delivery"], [2, "pickup"]]) {
       assert.equal(order.payments.initial.amountMinor, order.totalMinor);
       assert.equal(order.payoutMilestones.reduce((sum, stage) => sum + stage.amountMinor, 0), order.supplierSubtotalMinor);
       assert.equal(order.riderPayoutMinor + order.platformDeliveryShareMinor, order.deliveryFeeMinor);
-      assert.equal(order.riderCommissionBps, 8500);
+      assert.equal(order.riderCommissionBps, 8000);
       assert.equal((await call('GET', `/orders/${order.id}/invoice`)).body.invoice.invoiceNumber, placed.invoice.invoiceNumber);
     }
   });
@@ -1741,7 +1741,7 @@ for (const count of [1, 2]) {
       assert.equal(order.grossServiceFeeMinor, index === 0 ? 1000 : 2000);
       assert.equal(order.totalMinor, order.supplierSubtotalMinor + order.serviceFeeMinor + order.deliveryFeeMinor);
       assert.equal(order.payoutMilestones.reduce((sum, row) => sum + row.amountMinor, 0), index === 0 ? 10000 : 20000);
-      assert.equal(order.riderPayoutMinor, Math.round(order.deliveryFeeMinor * .85));
+      assert.equal(order.riderPayoutMinor, Math.round(order.deliveryFeeMinor * .80));
       order.payments.initial.status = 'confirmed';
       const revenue = moneyReportingForOrder(order).platformRevenue;
       assert.equal(revenue.organizationDiscountMinor, index === 0 ? 500 : 1000);

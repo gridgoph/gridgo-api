@@ -1796,7 +1796,7 @@ test("settings use audited compare-and-swap and suppliers govern supported payme
     assert.equal(current.body.settings.productionNudge.afterValue, 4);
     assert.equal(current.body.settings.productionNudge.afterUnit, "hours");
 
-    assert.equal(current.body.settings.riderCommissionBps, 8500);
+    assert.equal(current.body.settings.riderCommissionBps, 8000);
     for (const riderCommissionBps of [null, "8500", 8500.5, -1, 10001]) {
       const invalid = await request(instance.api, "/settings", {
         method: "PATCH", subject: "clerk_super",
@@ -4855,7 +4855,9 @@ test("Operations audit reads are limited to workspace actions or one file", { sk
   const unrestricted = await request(instance.api, "/audit", { subject: "clerk_super" });
   assert.equal(unrestricted.status, 200);
   assert.deepEqual(unrestricted.body.audit.filter(row => rows.some(fixture => fixture.id === row.id)).map(row => row.id).sort(), rows.map(row => row.id).sort());
-  const lifecycle = unrestricted.body.audit.filter(row => !rows.some(fixture => fixture.id === row.id));
+  const bookkeeping = unrestricted.body.audit.filter(row => row.action.startsWith('shop_money.'));
+  assert.ok(bookkeeping.every(row=>row.actorRole==='system'));
+  const lifecycle = unrestricted.body.audit.filter(row => !rows.some(fixture => fixture.id === row.id)&&!row.action.startsWith('shop_money.'));
   assert.equal(lifecycle.length, 1);
   assert.equal(lifecycle[0].action, 'order.transition');
   assert.equal(lifecycle[0].actorRole, 'system');

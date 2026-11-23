@@ -60,6 +60,7 @@ export const VERIFICATION_DOCUMENT_TYPES = Object.freeze(["business_permit", "va
 const VERIFICATION_DOCUMENT_TYPE_SET = new Set(VERIFICATION_DOCUMENT_TYPES);
 export const PURPOSE_POLICIES = Object.freeze({
   supplier_price_list: {roles:['supplier'],maxBytes:15*1024*1024,contentTypes:['image/jpeg','image/png','image/webp','application/pdf']},
+  product_setup: { roles: ['supplier'], maxBytes: 20 * 1024 * 1024, contentTypes: [...CONTENT_TYPES, 'audio/mp4', 'audio/mpeg', 'audio/ogg', 'audio/wav'] },
   cash_topup_proof: { roles: ['rider'], maxBytes: 15*1024*1024, contentTypes: ['image/jpeg','image/png','image/webp'] },
   cash_shop_receipt: { roles: ['rider'], maxBytes: 15*1024*1024, contentTypes: ['image/jpeg','image/png','image/webp'] },
   cash_no_show_photo: { roles: ['rider'], maxBytes: 15*1024*1024, contentTypes: ['image/jpeg','image/png','image/webp'] },
@@ -508,7 +509,8 @@ export function validateUpload(file, purpose = "artwork") {
   if (extension === ".docx" && file.size > DOCX_MAX_BYTES) {
     fail(413, "file_too_large", "DOCX artwork must be 16 MiB or smaller.", { purpose, maxBytes: DOCX_MAX_BYTES, maxMiB: 16 });
   }
-  const sniffedContentType = sniffContentType(sniffBytes);
+  const sniffedContentType = purpose === 'product_setup' && ['.m4a', '.mp3', '.ogg', '.wav'].includes(extension)
+    ? sniffSetupAudio(sniffBytes) : sniffContentType(sniffBytes);
   if (HEIC_EXTENSIONS.has(extension) || sniffedContentType === "image/heic") {
     fail(
       415,
@@ -520,7 +522,7 @@ export function validateUpload(file, purpose = "artwork") {
 
   let declaredContentType = String(file.declaredContentType || "").trim().toLowerCase();
   if (declaredContentType === "image/jpg") declaredContentType = "image/jpeg";
-  const declaredAllowed = purpose === "artwork" ? new Set(ARTWORK_UPLOAD_CONTENT_TYPES) : CONTENT_TYPES;
+  const declaredAllowed = purpose === "artwork" ? new Set(ARTWORK_UPLOAD_CONTENT_TYPES) : purpose === "product_setup" ? new Set(policy.contentTypes) : CONTENT_TYPES;
   if (!GENERIC_CONTENT_TYPES.has(declaredContentType) && !declaredAllowed.has(declaredContentType)) {
     fail(
       415,
@@ -532,7 +534,8 @@ export function validateUpload(file, purpose = "artwork") {
     );
   }
 
-  const extensionContentType = EXTENSION_CONTENT_TYPES.get(extension);
+  const extensionContentType = purpose === 'product_setup' && ['.m4a','.mp3','.ogg','.wav'].includes(extension)
+    ? ({'.m4a':'audio/mp4','.mp3':'audio/mpeg','.ogg':'audio/ogg','.wav':'audio/wav'})[extension] : EXTENSION_CONTENT_TYPES.get(extension);
   const explicitTypeMismatch =
     !GENERIC_CONTENT_TYPES.has(declaredContentType) && declaredContentType !== sniffedContentType;
   if (!extensionContentType || !sniffedContentType || extensionContentType !== sniffedContentType || explicitTypeMismatch) {
@@ -561,6 +564,14 @@ export function validateUpload(file, purpose = "artwork") {
     );
   }
   return sniffedContentType;
+}
+
+function sniffSetupAudio(bytes) {
+  if (bytes.length >= 12 && bytes.subarray(4,8).toString('ascii') === 'ftyp' && ['M4A ', 'M4B '].includes(bytes.subarray(8,12).toString('ascii'))) return 'audio/mp4';
+  if (bytes.length >= 4 && (bytes.subarray(0,3).toString('ascii') === 'ID3' || bytes[0] === 255 && (bytes[1] & 0xe0) === 0xe0)) return 'audio/mpeg';
+  if (bytes.length >= 4 && bytes.subarray(0,4).toString('ascii') === 'OggS') return 'audio/ogg';
+  if (bytes.length >= 12 && bytes.subarray(0,4).toString('ascii') === 'RIFF' && bytes.subarray(8,12).toString('ascii') === 'WAVE') return 'audio/wav';
+  return null;
 }
 
 function sniffContentType(bytes) {
@@ -862,6 +873,7 @@ export function resolveFileTarget(store, purpose, body, user = null) {
       "A pick-up chat photo is bound when the message is sent: send its fileId in attachmentFileIds to POST /orders/:id/pickup-chat/messages.",
     );
   }
+  if (purpose === 'product_setup') fail(400, 'product_setup_not_attachable', 'Send file IDs through the product setup request.');
   if (purpose==='shop_team_photo') fail(400,'shop_team_photo_not_attachable','Save this photo through the shop team member route.');
   if (!KINDS.has(purpose)) {
     fail(400, "invalid_file_purpose", "Choose one supported file purpose and try again.");
@@ -1399,6 +1411,10 @@ export function authorizeFileRead(user, store, file) {
     fail(404, "file_not_found", "That ready file no longer exists. Refresh the record and try again.");
   }
   if (!user) forbidden();
+  if (file.purpose === 'product_setup') {
+    if (file.ownerId === user.id || ['ops_admin', 'super_admin'].some(role => identityHasMembership(user, role))) return;
+    forbidden();
+  }
   if (file.purpose==='shop_team_photo') {
     if(user.role==='supplier' && teamPhotoReadable(store,file,user,user.id))return;
     forbidden();

@@ -262,6 +262,10 @@ export async function routePayoutAccount({ req, url, store, user, readBody, now,
   if (req.method === "GET") {
     return { status: 200, body: { payoutAccount: projection() } };
   }
+  if((store.shopMoneyEvents||[]).some(e=>e.kind==='transfer_reserved'&&e.supplierId===user.id
+    &&!(store.shopMoneyEvents||[]).some(x=>['transfer_paid','transfer_cancelled'].includes(x.kind)&&x.data.transferId===e.id))) {
+    fail(409,'shop_money_destination_locked','Reconcile the prepared shop transfer before changing this receiving account.');
+  }
 
   if ((store.orders || []).some(order => order.cash && order.supplierId === user.id
     && ['reprint', 'replacement'].includes(order.cashProgress?.remedy?.remedyType)
