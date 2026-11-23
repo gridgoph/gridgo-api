@@ -1,3 +1,4 @@
+import { seedProductTemplatePhotos } from './product-template-media.js';
 import { reconcileDispatchOffers } from './dispatch-offers.js';
 import { appendAudit } from './audit.js';
 import { seedDevelopmentPromotion } from './seed-home-promotions.js';
@@ -1828,6 +1829,7 @@ async function main() {
     } catch {
       storage = null;
     }
+    await seedProductTemplatePhotos(storage);
     const result = await seedDevelopmentShops(database, { objectStorage: storage });
     console.log(
       `Seeded development shops ${result.shops.map((shop) => `${shop.shopName} <${shop.email}>`).join(", ")}`

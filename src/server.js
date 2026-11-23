@@ -1,3 +1,4 @@
+import { templatePhotoKey } from './product-template-media.js';
 import {routeShopMoney,syncShopMoney,sweepShopMoney,shopMoneySettings,shopMoneyWorkDue,shopMoneyChanged} from './shop-money.js';
 import {validateShopMoneySettings} from './shop-money-settings.js';
 import {activeShopTransferForKey} from './shop-money-policy.js';
@@ -2448,6 +2449,14 @@ async function handleAuditedRequest(req, res) {
     if (hasBearerToken(req) || req.headers['x-gridgo-worker-token']) {
       const verified=await verifiedClerkClaimsFor(req);
       await enforceShopWorkerBoundary(database,req,verified?.claims,now());
+    }
+
+    if (req.method === 'GET' && pathname.startsWith('/product-template-photos/')) {
+      const key = templatePhotoKey(pathname);
+      if (!key) return send(res, 404, { error: 'not_found' });
+      const signed = await objectStorage.presignGet(key);
+      res.writeHead(302, { Location: signed.url, 'Cache-Control': 'private, no-store', ...res.gridgoCorsHeaders });
+      return res.end();
     }
 
     if (req.method === "GET" && pathname === "/health") {

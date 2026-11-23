@@ -1,3 +1,4 @@
+import { routeProductTemplates } from './product-templates.js';
 import { expandProductionTimeBody, clearProductionTimeReview, productionTimeFields, productionTimeAudit } from './production-time.js';
 import { isQuoteListing } from "./quote-listings.js";
 import { previewProductionTime } from './production-time-preview.js';
@@ -31,6 +32,7 @@ import {
   assertExpectedVersion,
   bumpVersion,
   catalogGroupsForItem,
+  catalogItemBlockers,
   copyStarterIntoItem,
   listingStartersFor,
   listOwnCatalogItemsFromGraph,
@@ -656,6 +658,8 @@ function parseFormatFinderQuery(url) {
 }
 
 export async function routeSupplierCatalog(args) {
+  const templates = await routeProductTemplates(args);
+  if (templates) return templates;
   const hours = await routeShopHours(args);
   if (hours) return hours;
   const review = await routeCatalogReview(args);
@@ -671,13 +675,19 @@ export async function routeSupplierCatalog(args) {
   const catalogRead = req.method === 'GET' && (isPublicSupplierCatalogRoute(req.method, url.pathname) || url.pathname.startsWith('/ops/catalog/') || url.pathname === '/me/catalog-preview');
   const response = await routeSupplierCatalogExisting(catalogRead ? { ...args, store: reviewCatalogView(store, args.user, includeReviewData(args.user, url.searchParams)) } : args);
   const item = snapshot && (store.catalogItems || []).find(row => row.id === itemId);
-  if (response?.mutated && item && sensitiveSnapshot(snapshot) !== sensitiveSnapshot(listingSnapshot(store, item))) {
+  const pricingChanged = response?.mutated && item && sensitiveSnapshot(snapshot) !== sensitiveSnapshot(listingSnapshot(store, item));
+  if (pricingChanged) {
+    if (item.templateData?.managed) item.templateData.priceOnly = false;
     startListingReview(store, item, snapshot);
     if (priorStatus !== "pending") catalogReviewNotice(store, item, args, "catalog_review_pending");
     if (response.body?.item) response.body.item = privateCatalogItem(store, item);
     response.body.reviewStatus = item.reviewStatus;
     response.body.reviewReason = item.reviewReason;
   }
+  if (response?.mutated && item?.templateData?.mergedInto && item.active !== false) fail(409, "product_merged", "Edit the surviving product instead of its merged history.", { catalogItemId: item.templateData.mergedInto });
+  if (response?.mutated && item?.templateData?.managed && (pricingChanged || item.active !== false) && catalogItemBlockers(store, item).includes("template_price_required")) fail(400, "template_price_required", "Every product option must have a positive price.");
+  if (response?.mutated && item?.templateData && item.basePriceMinor <= 0 && (item.active !== false || snapshot?.item.basePriceMinor !== item.basePriceMinor)) fail(400, "template_price_required", "Price this product before making it live.");
+  if (response?.mutated && item?.templateData?.shopConfirmed === false && item.active !== false) fail(409, "shop_confirmation_required", "Confirm the prepared product first.");
   if (response?.mutated && item) retainApprovedPhotos(store, item);
   return response;
 }

@@ -1,5 +1,7 @@
 # GRIDGO API
 
+Ready-made product templates, full price tables, price checks, assisted setup and explicit legacy conversion: [Product templates](docs/PRODUCT_TEMPLATES_API.md).
+
 My shop status, expiring pauses and night Express documents: [Express API](docs/EXPRESS_API.md#my-shop-status-and-night-documents).
 
 Custom backend for GRIDGO clients, suppliers, riders, Operations, and Super Admin. The API uses PostgreSQL 17 for all domain data, MinIO for private file bytes, Clerk for every authenticated request, and optional push delivery. Notification delivery and privacy rules are in [Realtime events](docs/REALTIME_EVENTS.md).
