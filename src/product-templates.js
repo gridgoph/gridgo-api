@@ -138,6 +138,7 @@ export async function routeProductTemplates(args) {
     );
     for (const r of store.productSetupRequests.filter(
       (r) =>
+        next.active !== false &&
         r.kind === "template" &&
         r.status === "pending" &&
         r.requestedName.toLowerCase() === next.name.toLowerCase(),

@@ -51,9 +51,9 @@ export function templateNotice(store, item, args, type, body) {
     userIds: recipients.map((r) => r.userId),
   });
 }
-export function templateFor(store, id) {
+export function templateFor(store, id, { allowInactive = false } = {}) {
   const t = (store.productTemplates || []).find(
-    (t) => t.id === id && t.active !== false,
+    (t) => t.id === id && (allowInactive || t.active !== false),
   );
   if (!t)
     fail("product_template_not_found", "Choose an available template.", 404);

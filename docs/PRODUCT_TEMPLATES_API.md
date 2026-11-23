@@ -197,7 +197,9 @@ Review the preview, then repeat it with `dryRun:false` and
 `expectedVersions:{itemId:version,...}` for every action and every variant source.
 The operation recomputes the plan under the normal transaction lock; stale
 versions return `409 catalog_item_stale`. Applied sources remain as hidden rows
-with `template.mergedInto`, all photos and order references intact. The survivor
+with `template.mergedInto`, all photos and order references intact. Merged history
+cannot be republished or edited into another duplicate (`409 product_merged`);
+edit the surviving product. The survivor
 retains all explicit variant prices as normal options. Nothing is deleted.
 Repeated runs report previously matched records rather than rewriting them.
 

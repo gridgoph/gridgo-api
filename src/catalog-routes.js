@@ -684,6 +684,7 @@ export async function routeSupplierCatalog(args) {
     response.body.reviewStatus = item.reviewStatus;
     response.body.reviewReason = item.reviewReason;
   }
+  if (response?.mutated && item?.templateData?.mergedInto && item.active !== false) fail(409, "product_merged", "Edit the surviving product instead of its merged history.", { catalogItemId: item.templateData.mergedInto });
   if (response?.mutated && item?.templateData?.managed && (pricingChanged || item.active !== false) && catalogItemBlockers(store, item).includes("template_price_required")) fail(400, "template_price_required", "Every product option must have a positive price.");
   if (response?.mutated && item?.templateData && item.basePriceMinor <= 0 && (item.active !== false || snapshot?.item.basePriceMinor !== item.basePriceMinor)) fail(400, "template_price_required", "Price this product before making it live.");
   if (response?.mutated && item?.templateData?.shopConfirmed === false && item.active !== false) fail(409, "shop_confirmation_required", "Confirm the prepared product first.");

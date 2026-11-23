@@ -581,3 +581,49 @@ test("legacy colour-tier products cannot silently ignore a replacement full pric
     { code: "template_manual_conversion_required" },
   );
 });
+
+test("retiring a template still permits price edits on an existing product", async () => {
+  const s = setup(),
+    r = await call(s, "supplier", "POST", "/me/template-products", product(s)),
+    item = s.catalogItems.find((i) => i.id === r.body.item.id);
+  s.productTemplates.find((t) => t.id === item.templateData.templateId).active =
+    false;
+  const updated = await call(
+    s,
+    "supplier",
+    "PUT",
+    `/me/template-products/${item.id}`,
+    { ...product(s), expectedVersion: item.version },
+  );
+  assert.equal(updated.status, 200);
+});
+test("merged history cannot be republished or converted back into a duplicate", async () => {
+  const s = setup(),
+    item = s.catalogItems[0];
+  item.active = false;
+  item.templateData = {
+    templateId: "tpl_flyers",
+    mergedInto: "survivor",
+    shopConfirmed: true,
+  };
+  await assert.rejects(
+    call(s, "supplier", "PUT", `/me/template-products/${item.id}`, {
+      ...product(s),
+      expectedVersion: item.version,
+    }),
+    { code: "product_merged" },
+  );
+  await assert.rejects(
+    routeSupplierCatalog({
+      store: s,
+      user: actors.supplier,
+      req: { method: "PATCH", headers: {} },
+      url: new URL(`/me/catalog-items/${item.id}`, "http://api.test"),
+      readBody: async () => ({ expectedVersion: item.version, active: true }),
+      id,
+      now: () => AT,
+      audit,
+    }),
+    { code: "product_merged" },
+  );
+});

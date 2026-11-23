@@ -85,10 +85,19 @@ export function createProduct(
       "Keep this colour-tier product in the existing editor until the GRIDGO team reviews its conversion.",
       409,
     );
-  const template = templateFor(
-    store,
-    body.templateId || item?.templateData?.templateId,
-  );
+  if (item?.templateData?.mergedInto)
+    fail(
+      "product_merged",
+      "Edit the surviving product instead of its merged history.",
+      409,
+      { catalogItemId: item.templateData.mergedInto },
+    );
+  const templateId = body.templateId || item?.templateData?.templateId;
+  const template = templateFor(store, templateId, {
+    allowInactive: Boolean(
+      item && item.templateData?.templateId === templateId,
+    ),
+  });
   if (
     item &&
     item.templateData.templateId &&
@@ -223,7 +232,9 @@ export function createProduct(
     templateId: template.id,
     templateVersion: template.version,
     managed: true,
-    priceOnly: !store.catalogOptionGroups.some(group => group.catalogItemId === item.id && group.kind === "addon"),
+    priceOnly: !store.catalogOptionGroups.some(
+      (group) => group.catalogItemId === item.id && group.kind === "addon",
+    ),
     unit: template.unit,
     readyTime: chip.code,
     stockPhotos: structuredClone(template.stockPhotos),
