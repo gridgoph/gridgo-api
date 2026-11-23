@@ -25,6 +25,22 @@ import { shopMembershipsFor, selectedShop, assertActiveShop, shopSummary, staffR
 import { STAFF_LIST_PAGE, staffListPlan, staffPageRequested, staffPageBody } from './staff-list-pages.js';
 import { ORDER_REMOVAL_ROUTE, removeOrder, activeOrderSql } from './order-removal.js';
 import { routeTesterProgram } from './tester-program-routes.js';
+import {
+  isAdminKioskPath,
+  isKioskFileUpload,
+  isPublicKioskPath,
+  isPublicKioskWrite,
+  routeAdminKiosk,
+  routePublicKiosk,
+} from './kiosk-machine.js';
+
+/** Public early-access sign-up and status routes — no Clerk JWT required. */
+function isPublicEarlyAccessRoute(method, pathname) {
+  if (method !== "POST") return false;
+  // Strip /api prefix (Vite dev proxy keeps it on the path)
+  const p = pathname.startsWith("/api/") ? pathname.slice(4) : pathname;
+  return p === "/public/early-access" || p === "/early-access";
+}
 import { isQuoteListing } from "./quote-listings.js";
 import { routeQuoteRequests, expireQuoteRequests, quoteValidityDays, quoteSaveError } from "./quote-requests.js";
 import { matchTesterInvites, reconcileTesterInvite, publicTesterInvites } from './tester-invites.js';
@@ -2423,8 +2439,10 @@ async function handleAuditedRequest(req, res) {
   let pathname = "/";
   try {
     const requestOrigin = typeof req.headers.origin === "string" ? req.headers.origin : null;
+    const earlyUrl = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+    const publicKiosk = isPublicKioskPath(earlyUrl.pathname);
     res.gridgoCorsHeaders = { Vary: "Origin" };
-    if (requestOrigin && !ALLOWED_ORIGINS.has(requestOrigin)) {
+    if (requestOrigin && !ALLOWED_ORIGINS.has(requestOrigin) && !publicKiosk) {
       return send(res, 403, {
         error: "origin_not_allowed",
         message: `Origin ${requestOrigin} is not allowed. Add its exact origin to CORS_ALLOWED_ORIGINS and restart the API.`,
@@ -2434,7 +2452,7 @@ async function handleAuditedRequest(req, res) {
       res.gridgoCorsHeaders = {
         "Access-Control-Allow-Origin": requestOrigin,
         "Access-Control-Allow-Credentials": "true",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization, Last-Event-ID, Idempotency-Key, X-GRIDGO-Role, X-GRIDGO-Shop-Id, X-GRIDGO-Worker-Token, X-GRIDGO-Device-Id, X-GRIDGO-App, If-Match",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, Last-Event-ID, Idempotency-Key, X-GRIDGO-Role, X-GRIDGO-Shop-Id, X-GRIDGO-Worker-Token, X-GRIDGO-Device-Id, X-GRIDGO-App, If-Match, X-Kiosk-Coin-Key",
         "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
         Vary: "Origin",
       };
@@ -2448,6 +2466,28 @@ async function handleAuditedRequest(req, res) {
     if (hasBearerToken(req) || req.headers['x-gridgo-worker-token']) {
       const verified=await verifiedClerkClaimsFor(req);
       await enforceShopWorkerBoundary(database,req,verified?.claims,now());
+    }
+
+    if (publicKiosk) {
+      try {
+        const result = await routePublicKiosk({ req, url });
+        if (result?.file) {
+          res.writeHead(200, {
+            "Content-Type": result.file.mime || "application/octet-stream",
+            "Content-Disposition": `${result.file.inline ? "inline" : "attachment"}; filename="${String(result.file.filename).replace(/["\r\n]/g, "")}"`,
+            "Content-Security-Policy": "default-src 'none'; script-src 'none'; object-src 'none'; base-uri 'none'",
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "private, no-store",
+            ...(res.gridgoCorsHeaders || {}),
+          });
+          res.end(result.file.bytes);
+          return;
+        }
+        if (result) return send(res, result.status, result.body);
+      } catch (error) {
+        if (error?.status) return send(res, error.status, { error: error.code || "kiosk_error", message: error.message });
+        throw error;
+      }
     }
 
     if (req.method === "GET" && pathname === "/health") {
@@ -2972,6 +3012,15 @@ async function handleAuditedRequest(req, res) {
       res.setHeader('Cache-Control', 'private, no-store');
       if (teamResponse.mutated) await save(store);
       return send(res, teamResponse.status, teamResponse.body);
+    }
+    if (isAdminKioskPath(pathname)) {
+      try {
+        const result = await routeAdminKiosk({ req, url, user });
+        if (result) return send(res, result.status, result.body);
+      } catch (error) {
+        if (error?.status) return send(res, error.status, { error: error.code || "kiosk_error", message: error.message });
+        throw error;
+      }
     }
     // All authenticated transition refusals, including common work/identity guards,
     // commit an audit before responding. Reload discards unsaved partial route edits.
@@ -8322,6 +8371,37 @@ const server = http.createServer((req, res) => {
           error: "server_error",
           message: "GRIDGO could not read that request. Try again, or check the API log if the problem continues.",
         });
+      });
+    return;
+  }
+  if (isKioskFileUpload(req.method, pathname)) {
+    // The phone upload is multipart and larger than the JSON body cap.
+    void handleRequest(req, res);
+    return;
+  }
+  if (mutatesStore && isPublicKioskWrite(req.method, pathname)) {
+    void readBody(req)
+      .then(() => handleRequest(req, res))
+      .catch((error) => {
+        if (res.headersSent) { res.destroy(error); return; }
+        if (error instanceof AttachmentError || (error && Number.isInteger(error.status) && error.code)) {
+          sendDomainError(res, error); return;
+        }
+        send(res, 500, { error: "server_error", message: "GRIDGO could not complete that request. Try again, or check the API log if the problem continues." });
+      });
+    return;
+  }
+  if (mutatesStore && isPublicEarlyAccessRoute(req.method, pathname)) {
+    // Public early-access sign-ups are unauthenticated writes that commit
+    // through the domain lock without a Clerk session JWT.
+    void readBody(req)
+      .then(() => enqueueMutation(() => handleRequest(req, res)))
+      .catch((error) => {
+        if (res.headersSent) { res.destroy(error); return; }
+        if (error instanceof AttachmentError || (error && Number.isInteger(error.status) && error.code)) {
+          sendDomainError(res, error); return;
+        }
+        send(res, 500, { error: "server_error", message: "GRIDGO could not complete that request. Try again, or check the API log if the problem continues." });
       });
     return;
   }

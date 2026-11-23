@@ -1,6 +1,8 @@
 node_modules/
 data/store.json
 data/*.log
+data/kiosk-machine.json
+data/kiosk-files/
 .env
 .env.local
 .tmp/
