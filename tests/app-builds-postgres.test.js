@@ -7,6 +7,7 @@ import { resetDatabase } from './fixtures/reset-database.js';
 import { fixture, AT } from './fixtures/reschedule.js';
 import { apiForTest } from './fixtures/reschedule-http.js';
 import { PICKUP_CHECK_CODES } from '../src/operational-model.js';
+import { syncShopMoney } from '../src/shop-money.js';
 import { up as migrateMinimums } from '../migrations/1794191100000_rider_packs_minimum_builds.js';
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -152,6 +153,9 @@ test('every rider-packs custody entry point refuses an old rider build before do
     store.settings.productionNudge.enabled = false;
     for (const user of store.users) user.createdAt = new Date().toISOString();
     store.orders[0].performanceClock = { version: 1, supplierId: 'supplier', schedule: store.settings.operatingHours.schedule };
+    // Finish canonical fixture accounting before the API starts. Its unrelated
+    // lifecycle audit must not race the custody request's zero-write assertion.
+    syncShopMoney(store, { at: AT });
   }, { queryProbe: true });
   const before = await custodyRows(db);
   for (const [index, [method, path, body]] of custody.entries()) {

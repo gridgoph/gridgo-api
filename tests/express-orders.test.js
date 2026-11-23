@@ -129,7 +129,7 @@ test('Express drafts cannot be edited through custom cart routes or previewed ag
 test('lifecycle sweep honors five-minute boundaries and cancels on the third consecutive timeout',async()=>{
  const {addShop}=await import('./fixtures/scheduling.js');
  const {expireShopAcceptances}=await import('../src/shop-recovery.js');
- const {store,client}=setup();addShop(store,'shop_c',{express:true,lat:7.11,lng:125.64});
+ const {store,client}=setup();addShop(store,'shop_c',{express:true,lat:7.10,lng:125.61});
  const item=store.catalogItems.at(-1);item.pricingUnit='per_page';item.subcategoryCode='document_printing';store.supplierServices.at(-1).categoryCode='document_publication';
  let n=0;const id=p=>`${p}_${++n}`;
  const order={id:'timed',orderType:'express',clientId:client.id,supplierId:'shop_a',state:'supplier_assigned',fulfillmentMode:'pickup',totalMinor:330,

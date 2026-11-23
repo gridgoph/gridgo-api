@@ -44,7 +44,7 @@ export function assertExpressNightJob(source, supplierId, lines, fulfillmentMode
   const {projection}=projectListingGroup(store,lines,{now:at});
   if(fulfillmentMode==='delivery' && !isOpenAt(operatingHours(store.settings).schedule,projection.promiseBy))expressFail(409,'express_shop_unavailable');
 }
-export function expressShopList(source,user,{location,sort='nearest',fulfillmentMode='pickup'}={},at) {
+export function expressShopList(source,user,{location,sort='nearest',fulfillmentMode='pickup',includeClosed=false,productType='documents'}={},at) {
   location=expressPoint(location);
   if(!['pickup','delivery'].includes(fulfillmentMode)) expressFail(400,'invalid_fulfillment_mode');
   if(!['nearest','top_rated','fewest_jobs'].includes(sort)) expressFail(400,'invalid_express_sort');
@@ -52,21 +52,36 @@ export function expressShopList(source,user,{location,sort='nearest',fulfillment
   const rows=[];
   for(const profile of store.supplierProfiles||[]) {
     const supplierId=profile.userId, supplier=store.users.find(u=>u.id===supplierId);
+    const shopAvailability=expressAvailability(profile,store.settings,at,'pickup');
     const availability=expressAvailability(profile,store.settings,at,fulfillmentMode);
-    if(!availability || !supplier || !sameReviewData(user,supplier) || blockers(supplierId,profile).length) continue;
+    if((!availability&&!includeClosed) || !supplier || !sameReviewData(user,supplier)
+      || blockers(supplierId,profile).some(code=>!includeClosed||code!=='shop_closed') || profile.expressEnabled===false) continue;
+    const listingStore=includeClosed&&!shopAvailability?{...store,supplierProfiles:store.supplierProfiles.map(p=>p.userId===supplierId
+      ?{...p,isClosed:false,availability:{...p.availability,pausedUntil:null}}:p)}:store;
     const listings=(store.catalogItems||[]).filter(item=>item.supplierId===supplierId && item.express===true
-      && item.pricingUnit==='per_page' && item.subcategoryCode==='document_printing' && publicCatalogItem(store,item,{at}));
+      && (productType==='plans'?['per_page','per_unit'].includes(item.pricingUnit)&&item.subcategoryCode==='blueprint_cad_plotting'&&!item.pricedByColour
+        :item.pricingUnit==='per_page' && item.subcategoryCode==='document_printing') && publicCatalogItem(listingStore,item,{at}));
     if(!listings.length) continue;
+    if(productType==='plans'&&availability?.nightWindow)continue;
     const jobsAhead=(store.orders||[]).filter(o=>o.supplierId===supplierId && ['supplier_assigned','payment_authorized','production','supplier_self_qc'].includes(o.state)).length;
-    const hours=Math.min(...listings.map(item=>publicCatalogItem(store,item,{at}).turnaroundHours||1));
+    const hours=Math.min(...listings.map(item=>publicCatalogItem(listingStore,item,{at}).turnaroundHours||1));
     let projection;
-    try { projection=(projectExpressNightFinish(store,supplierId,hours,at) || projectShopFinish(store,{supplierId,turnaroundHours:hours,units:1,now:at})).projection; }
+    try { projection=availability?(projectExpressNightFinish(store,supplierId,hours,at) || projectShopFinish(store,{supplierId,turnaroundHours:hours,units:1,now:at})).projection:{promiseBy:null}; }
     catch(error) { if(error.code==='express_night_capacity')continue;throw error; }
-    if(availability.nightWindow && fulfillmentMode==='delivery' && !isOpenAt(operatingHours(store.settings).schedule,projection.promiseBy))continue;
+    if(availability?.nightWindow && fulfillmentMode==='delivery' && !isOpenAt(operatingHours(store.settings).schedule,projection.promiseBy))continue;
     const createdAt=(store.approvalCases||[]).find(c=>c.userId===supplierId&&c.kind==='supplier'&&c.status==='approved')?.decidedAt||supplier.createdAt, age=Date.parse(at)-Date.parse(createdAt);
-    rows.push({supplierId,verified:supplierVerified(store,supplierId),catalogItemIds:listings.map(item=>item.id),name:profile.shopName||supplier.name||'Shop',address:profile.shop.label||'',
-      location:structuredClone(profile.shop),distanceMeters:distanceMetersBetween(location,profile.shop),distanceZone:distanceZoneForDistance(distanceMetersBetween(location,profile.shop),store.settings),rating:publicShopRating(store,supplierId),jobsAhead,
-      readyAt:projection.promiseBy,deliveryAvailable:availability.deliveryAvailable,nightWindow:availability.nightWindow,busy:jobsAhead>=3,isNew:Number.isFinite(age)&&age>=0&&age<7*86400000});
+    const home=profile.supplierType==='home',barangay=home?(profile.barangay||'Barangay unavailable'):null;
+    const distance=distanceMetersBetween(location,profile.shop),distanceZone=distanceZoneForDistance(distance,store.settings);
+    const verified=supplierVerified(store,supplierId);
+    rows.push({supplierId,verified,verificationLevel:verified?'verified':'starter',printerType:home?'home':'shop',barangay,
+      catalogItemIds:listings.map(item=>item.id),name:home?barangay:profile.shopName||supplier.name||'Shop',address:home?barangay:profile.shop.label||'',
+      location:home?null:structuredClone(profile.shop),distanceMeters:home?Math.ceil(distance/500)*500:distance,distanceApproximate:home,distanceZone,
+      zone:{...distanceZone,code:({nearby:'A',away:'B',long_distance:'C'})[distanceZone.key]||null},
+      deliveryFeeMinor:fulfillmentMode==='delivery'?deliveryFeeForDistance(distance,store.settings):null,
+      walkingTimeMinutes:fulfillmentMode==='pickup'?Math.ceil((home?Math.ceil(distance/500)*500:distance)/80):null,walkingEstimateSource:fulfillmentMode==='pickup'?'straight_line_80m_per_minute':null,
+      isOpenNow:!!shopAvailability,selectable:!!availability,openStatus:shopAvailability?(shopAvailability.nightWindow?'night':'open'):'closed',
+      rating:publicShopRating(store,supplierId),jobsAhead,
+      readyAt:availability?projection.promiseBy:null,deliveryAvailable:availability?.deliveryAvailable||false,nightWindow:availability?.nightWindow||null,busy:jobsAhead>=3,isNew:Number.isFinite(age)&&age>=0&&age<7*86400000});
   }
   rows.sort((a,b)=>(sort==='top_rated'?(b.rating?.average||0)-(a.rating?.average||0):sort==='fewest_jobs'?a.jobsAhead-b.jobsAhead:0)
     ||a.distanceMeters-b.distanceMeters||a.supplierId.localeCompare(b.supplierId));
@@ -88,7 +103,7 @@ export function publicExpress(order,user) {
   if(!own&&!staff&&!shop&&user?.id!==order.riderId)return null;
   const result = {status:expressStatus(order),paymentTiming:e.paymentTiming||'checkout',originalSupplierId:e.originalSupplierId,currentSupplierId:order.supplierId,declineCount:e.declines,
     acceptBy:order.shopAcceptance?.status==='pending'?order.shopAcceptance.deadlineAt:null,
-    events:structuredClone(e.events||[]),refundRequired:e.refundRequired===true,
+    events:structuredClone(e.events||[]),refundRequired:e.refundRequired===true,repickRequired:e.repickRequired===true,payBy:e.payBy||null,
     ...(own&&order.fulfillmentMode==='pickup'&&['ready','picked_up'].includes(expressStatus(order))?{pickupCode:e.pickupCode}:{}),
     ...(own||staff||shop?{printSettings:structuredClone(e.printSettings||[])}:{})};
   if(own&&!staff&&!shop)for(const print of result.printSettings||[])delete print.rateMinor;
@@ -116,16 +131,25 @@ export function declineExpress(store,order,{at,id,kind='declined',actorId=null,r
   order.shopAcceptance.status=kind;
   e.events.push({state:kind,at,supplierId:previous,reason:kind==='timed_out'?'No response within five minutes.':reason});
   const client=store.users.find(u=>u.id===order.clientId);
-  const replacement=e.declines<3 && expressShopList(store,client,{location:e.location,fulfillmentMode:order.fulfillmentMode},at).find(shop=>!e.declinedSupplierIds.includes(shop.supplierId)
+  const manual=e.paymentTiming==='after_acceptance'||e.printSettings?.some(print=>print.paper==='a3'||print.productType==='plans');
+  const originalPickup=order.pickup||store.supplierProfiles.find(p=>p.userId===e.originalSupplierId)?.shop;
+  const originalZone=e.printerZone?.key||(order.fulfillmentMode==='delivery'?order.distanceZone?.key:null)
+    ||distanceZoneForDistance(distanceMetersBetween(originalPickup,e.location),store.settings).key;
+  const zoneSettings=e.deliveryFeeBands?{...store.settings,deliveryFeeBands:e.deliveryFeeBands}:store.settings;
+  const sameZone=shop=>distanceZoneForDistance(distanceMetersBetween(
+    store.supplierProfiles.find(profile=>profile.userId===shop.supplierId).shop,
+    order.fulfillmentMode==='delivery'?order.dropoff:e.location),zoneSettings).key===originalZone;
+  const replacement=!manual&&e.declines<3 && expressShopList(store,client,{location:order.fulfillmentMode==='delivery'?order.dropoff:e.location,fulfillmentMode:order.fulfillmentMode},at).find(shop=>!e.declinedSupplierIds.includes(shop.supplierId)
     && expressReplacementSupports(store,shop,e.printSettings||[],order.fulfillmentMode,at)
-    && (order.fulfillmentMode==='pickup'||deliveryFeeForDistance(distanceMetersBetween(shop.location,order.dropoff),store.settings)===order.deliveryFeeMinor));
+    && sameZone(shop));
   if(replacement) {
     order.supplierId=replacement.supplierId;
     if(replacement.nightWindow)e.nightWindow=structuredClone(replacement.nightWindow);else delete e.nightWindow;
-    order.pickup=structuredClone(replacement.location);
+    order.pickup=structuredClone(store.supplierProfiles.find(p=>p.userId===replacement.supplierId).shop);
     for(const job of store.orderJobs||[])if(job.orderId===order.id){job.supplierId=order.supplierId;job.pickup=structuredClone(order.pickup);job.updatedAt=at;}
     expressEvent(store,order,'moved',{at,id,actorId,reason:kind==='timed_out'?'No response within five minutes.':reason});startExpressAcceptance(order,at);
   } else {
+    if(manual)e.repickRequired=true;
     order.state='cancelled';order.cancelledAt=at;order.cancelledBy=null;order.cancellationReason='No Express shop accepted the order.';
     e.refundRequired=Object.values(order.payments||{}).some(p=>p.status==='confirmed');
     for(const job of store.orderJobs||[])if(job.orderId===order.id){job.state='cancelled';job.updatedAt=at;}
@@ -138,7 +162,31 @@ export function createExpressSnapshot(cart,lines,at) {
   pickupCode:String(randomInt(1000000)).padStart(6,'0'),events:[{state:'sending',at,supplierId:lines[0].supplierId}],
   printSettings:lines.map(line=>({fileId:line.artworkFileId,pages:structuredClone(line.documentPages),copies:line.quantity,
     colour:line.expressPrint.colour,paper:line.expressPrint.paper,paperStock:line.expressPrint.paperStock,sides:line.expressPrint.sides,
-    ...(line.expressPrint.paper==='a3'?{rateMinor:line.expressPrint.rateMinor}:{}),layout:line.printLayout,note:line.specialInstructions||'',acceptedWarnings:structuredClone(line.expressPrint.acceptedWarnings)}))};
+    ...(line.expressPrint.productType?{productType:line.expressPrint.productType}:{}),
+    ...(line.expressPrint.paper==='a3'||line.expressPrint.productType==='plans'?{rateMinor:line.expressPrint.rateMinor}:{}),layout:line.printLayout,note:line.specialInstructions||'',acceptedWarnings:structuredClone(line.expressPrint.acceptedWarnings)}))};
+}
+
+export function assertExpressPaymentSubmission(order,at) {
+ if(order.expressOrder?.paymentTiming!=='after_acceptance')return;
+ if(order.shopAcceptance?.status!=='accepted')expressFail(409,'express_acceptance_required');
+ if(order.expressOrder.payBy&&Date.parse(at)>=Date.parse(order.expressOrder.payBy))expressFail(409,'express_payment_expired');
+}
+
+/** Submitted evidence reserves the price while Operations confirms it. */
+export function expireExpressPayments(store,{at,id}) {
+ let changed=false;
+ for(const order of store.orders||[]) {
+  const e=order.expressOrder;
+  if(order.orderType!=='express'||e?.paymentTiming!=='after_acceptance'||!e.payBy
+    ||order.state!=='awaiting_initial_payment'||order.payments?.initial?.status!=='not_submitted'
+    ||Date.parse(at)<Date.parse(e.payBy))continue;
+  order.state='cancelled';order.cancelledAt=at;order.cancelledBy=null;order.cancellationReason='Express payment window expired. Choose a printer again.';
+  e.repickRequired=true;
+  for(const job of store.orderJobs||[])if(job.orderId===order.id){job.state='cancelled';job.updatedAt=at;}
+  order.timeline.push({at,state:'cancelled',by:'system',note:order.cancellationReason});
+  expressEvent(store,order,'payment_expired',{at,id});changed=true;
+ }
+ return changed;
 }
 const day=at=>new Date(Date.parse(at)+8*3600000).toISOString().slice(0,10);
 export function expressGuide(store,user,at) {
@@ -206,7 +254,7 @@ export function expressCatalogOptions(store,item,print) {
        return print.colour==='bw'?bw:/colou?r/.test(label)&&!bw;
      });
    } else if(/size/.test(name)||group.options.some(o=>o.specBinding?.fieldCode==='size')) {
-     const pattern={a4:/\ba4\b/,a3:/\ba3\b/,short:/short|letter|8[.]5.*11/,long:/long|folio|legal|8[.]5.*13/}[print.paper];
+     const pattern={a4:/\ba4\b/,a3:/\ba3\b/,a2:/\ba2\b|20x30/,a1:/\ba1\b|24x36/,a0:/\ba0\b/,'30x40':/30x40/,short:/short|letter|8[.]5.*11/,long:/long|folio|legal|8[.]5.*13/}[print.paper];
      chosen=group.options.find(o=>pattern?.test(normalize(o.specBinding?.value||o.label)));
      if(print.paper==='a3'&&chosen)hasA3=true;
    } else if(/sides/.test(name)) {
@@ -220,7 +268,7 @@ export function expressCatalogOptions(store,item,print) {
  }
  if(print.paper==='a3'&&!hasA3)expressFail(409,'express_listing_configuration_required');
  const priced=selectedCatalogPrice(store,item,optionIds);
- const rateMinor=print.paper==='a3'?priced.effectiveUnitPriceMinor:expressRates(store.settings)[print.colour==='bw'?'bwMinor':'colourMinor'];
+ const rateMinor=print.paper==='a3'||print.productType==='plans'?priced.effectiveUnitPriceMinor:expressRates(store.settings)[print.colour==='bw'?'bwMinor':'colourMinor'];
  if(!Number.isSafeInteger(rateMinor)||rateMinor<=0)expressFail(409,'express_listing_configuration_required');
  return {optionIds,paperStock,rateMinor};
 }
