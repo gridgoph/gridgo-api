@@ -1,3 +1,4 @@
+import { templateNotice } from './product-template-common.js';
 import { retainApprovedPhotos } from "./catalog-review-state.js";
 import { isQuoteListing } from "./quote-listings.js";
 import { identityHasMembership } from "./authorization-context.js";
@@ -86,8 +87,11 @@ export async function routeCatalogReview({ req, url, store, user, readBody, id, 
       if (item.reviewStatus !== "pending") fail(409, "listing_not_pending", "Refresh the review queue.");
       if (!["approved", "needs_revision"].includes(body.status)) fail(400, "invalid_review_status", "Choose approved or needs_revision.");
       if (body.status === "approved") {
+        if (item.templateData?.shopConfirmed === false) fail(409, "shop_confirmation_required", "The shop must confirm the prepared prices first.");
         complete(store, item);
-        if (body.photosUnbranded !== true) fail(400, "photo_review_required", "Confirm every photo has no watermark, logo or shop branding.");
+        if (item.templateData?.managed && item.basePriceMinor <= 0) fail(400, "template_price_required", "Enter positive prices.");
+        if (!(item.templateData?.managed && item.templateData?.priceOnly && !(store.catalogItemPhotos || []).some(p => p.catalogItemId === item.id)) && body.photosUnbranded !== true) fail(400, "photo_review_required", "Confirm every photo has no watermark, logo or shop branding.");
+        if (item.templateData?.managed && item.templateData.priceCheck) item.templateData.priceCheck = { ...item.templateData.priceCheck, required: false, reviewedAt: now() };
         item.approvedSnapshot = null;
         retainApprovedPhotos(store, item);
         item.reviewReason = null;
@@ -100,6 +104,10 @@ export async function routeCatalogReview({ req, url, store, user, readBody, id, 
       reviewedVersion: body.expectedVersion, photosUnbranded: body.photosUnbranded === true,
       photoFileIds: (store.catalogItemPhotos || []).filter(row => row.catalogItemId === item.id).map(row => row.fileId),
     });
+    if (staff && body.status === "approved" && item.templateData?.managed) {
+      const live = Boolean(publicCatalogItem(store, item));
+      templateNotice(store, item, context, live ? "template_product_live" : "template_product_price_checked", live ? "Your product passed the price check and is live." : "Your product passed the price check. Open Products to check its availability.");
+    }
     catalogReviewNotice(store, item, context, staff ? "catalog_review_decided" : "catalog_review_pending");
     return { status: 200, body: { item: privateCatalogItem(store, item) }, mutated: true };
   }

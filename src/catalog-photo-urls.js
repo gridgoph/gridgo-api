@@ -1,3 +1,4 @@
+import { templatePhotoKey } from './product-template-media.js';
 /**
  * Attach short-lived signed download URLs to catalog sample photos.
  *
@@ -35,6 +36,7 @@ export function catalogItemsWithPhotos(body) {
       if (line?.listing?.photos) items.push(line.listing);
     }
   }
+  for (const template of body?.templates || []) if (template?.stockPhotos) items.push({ photos: template.stockPhotos });
   // GET /catalog/shops/:id is `{ shop: { services: [ { items } ] } }`.
   // Without this walk the client category wall gets fileId but no downloadUrl,
   // so every tile reads "No sample".
@@ -53,10 +55,11 @@ export function catalogItemsWithPhotos(body) {
 export async function decorateCatalogPhotoUrls(store, body, { findFile, presignGet }) {
   for (const item of catalogItemsWithPhotos(body)) {
     for (const photo of item.photos || []) {
-      const file = findFile(store, photo.fileId);
-      if (!file?.objectKey) continue;
+      const file = photo.fileId ? findFile(store, photo.fileId) : null;
+      const key = file?.objectKey || templatePhotoKey(photo.url);
+      if (!key) continue;
       try {
-        const signed = await presignGet(file.objectKey);
+        const signed = await presignGet(key);
         photo.downloadUrl = signed.url;
         photo.downloadUrlExpiresAt = signed.expiresAt;
       } catch {
