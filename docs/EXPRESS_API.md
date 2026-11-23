@@ -314,7 +314,9 @@ the accepted price while Operations reviews it; the five minutes do not limit
 Operations confirmation time. Unsubmitted payments expire to cancellation with
 the same repick flag through the existing lifecycle/save boundary. Production
 and readiness still require confirmed payment. Legacy accepted orders without a
-`payBy` keep their existing behavior. This changes no payout shares or releases.
+`payBy` keep their existing behavior. Fully voucher-funded zero-cash checkout
+retains the existing voucher settlement and requires no cash submission window.
+This changes no payout shares or releases.
 
 Client follow-up call sequence: upload/read Preview files; `POST /express/shops`;
 `POST /express/drafts` (manual or Just print it); existing cart quote/voucher

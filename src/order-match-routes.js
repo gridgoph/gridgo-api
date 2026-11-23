@@ -1187,7 +1187,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   // never changes what this client owes.
   const cash = body.payment?.method === 'cash';
   const paymentAfterAcceptance=cart.orderType==='express'&&cartLines.some(line=>line.expressPrint?.paper==='a3'||line.expressPrint?.productType==='plans');
-  if(paymentAfterAcceptance&&body.payment!=null)fail(409,'express_payment_after_acceptance','Pay for this Express order after the shop accepts.');
+  if(paymentAfterAcceptance&&!zeroCashBoundary&&body.payment!=null)fail(409,'express_payment_after_acceptance','Pay for this Express order after the shop accepts.');
   const downpaymentPercent = cash || basketId ? 100 : downpaymentPercentSetting(store.settings);
   const order = {
     id: orderId,

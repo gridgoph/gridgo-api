@@ -188,3 +188,20 @@ test('accepted document rerouting uses its original zone limits and preserves th
  startExpressAcceptance(order,AT);declineExpress(store,order,{at:AT,id:p=>p});
  assert.equal(order.supplierId,'shop_b');assert.equal(order.deliveryFeeMinor,8900);assert.equal(order.totalMinor,10000);
 });
+
+test('fully voucher-funded A3 keeps the existing zero-cash checkout boundary',async()=>{
+ const {issueVoucher}=await import('../src/vouchers.js');
+ const {store,client,call}=setup();let sequence=0;
+ const campaign={id:'full',name:'Full voucher',valueMinor:100000,totalLimit:10,validityDays:30,status:'active',purpose:'manual',coversOrderTotal:true};
+ store.voucherCampaigns=[campaign];issueVoucher(store,campaign,client.id,{id:prefix=>`${prefix}_${++sequence}`,at:AT});
+ for(const item of store.catalogItems) {
+  store.catalogOptionGroups.push({id:`size_${item.id}`,catalogItemId:item.id,name:'Size',kind:'spec',required:true});
+  store.catalogOptions.push({id:`a3_${item.id}`,optionGroupId:`size_${item.id}`,label:'A3',specBinding:{fieldCode:'size',value:'A3'},active:true,priceModifierMinor:0});
+ }
+ const draft=await call('POST','/express/drafts',{...request,supplierId:'shop_a',files:[{...files[0],paper:'a3'}]});
+ assert.equal(draft.body.quote.downpaymentMinor,0);
+ // Released clients may still include their payment object at a zero boundary.
+ const placed=await call('POST',`/me/carts/${draft.body.cartId}/checkout`,{looksRight:true,expressConfirmation:draft.body.confirmation,payment:{method:'qr_manual',reference:'UNUSED',proofFileId:'file_qr'}});
+ const order=store.orders.find(row=>row.id===placed.body.order.id);
+ assert.equal(order.payments.initial.method,'gridgo_voucher');assert.equal(order.payments.initial.status,'confirmed');assert.equal(order.state,'needs_qa');
+});
