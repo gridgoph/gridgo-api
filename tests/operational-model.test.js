@@ -339,7 +339,7 @@ test("role-aware projections expose client fee lines and truthful supplier settl
   assert.equal(opsOrder.payments.initial.reference, "PRIVATE-GCASH-REFERENCE");
   assert.deepEqual(moneyReportingForOrder(order).platformRevenue, {
     grossServiceFeeMinor: 10000, netServiceFeeMinor: 10000, organizationDiscountMinor: 0,
-    billedMinor: 11_335,
+    billedMinor: 11_780,
     collectedMinor: 10_000,
     recognizedMinor: 0,
     adjustedMinor: 0,
@@ -353,7 +353,7 @@ test("role-aware projections expose client fee lines and truthful supplier settl
   ];
   assert.deepEqual(moneyReportingForOrder(adjusted).platformRevenue, {
     grossServiceFeeMinor: 10000, netServiceFeeMinor: 10000, organizationDiscountMinor: 0,
-    billedMinor: 11_335,
+    billedMinor: 11_780,
     collectedMinor: 10_000,
     recognizedMinor: 7_000,
     adjustedMinor: -1_000,
@@ -815,7 +815,7 @@ test("delivery split snapshots the rider rate and rounds half-up with an exact r
     assert.equal(money.platformDeliveryShareMinor, share);
     assert.equal(money.riderPayoutMinor + money.platformDeliveryShareMinor, feeMinor);
   }
-  assert.equal(plan().riderCommissionBps, 8500);
+  assert.equal(plan().riderCommissionBps, 8000);
 });
 
 test("rider commission setting rejects coerced and out-of-range rates", () => {
@@ -829,9 +829,9 @@ test("dispatch and ops expose delivery earnings while client and supplier omit t
   const order = { id: "split", clientId: "client", supplierId: "supplier", ...plan() };
   for (const role of ["rider", "ops_admin", "super_admin"]) {
     const projected = publicOrderFor(order, { id: role, role });
-    assert.equal(projected.riderPayoutMinor, 7565);
-    assert.equal(projected.platformDeliveryShareMinor, 1335);
-    assert.equal(projected.riderCommissionBps, 8500);
+    assert.equal(projected.riderPayoutMinor, 7120);
+    assert.equal(projected.platformDeliveryShareMinor, 1780);
+    assert.equal(projected.riderCommissionBps, 8000);
   }
   for (const role of ["client", "supplier"]) {
     const projected = publicOrderFor(order, { id: role, role });
@@ -844,12 +844,12 @@ test("dispatch and ops expose delivery earnings while client and supplier omit t
 
 test("finance counts GRIDGO delivery revenue only from confirmed collection", () => {
   const order = { ...plan(), ...createPaymentSchedule(plan()), commercialCommittedAt: AT, state: "delivered" };
-  assert.equal(moneyReportingForOrder(order).platformRevenue.billedMinor, 11335);
+  assert.equal(moneyReportingForOrder(order).platformRevenue.billedMinor, 11780);
   assert.equal(moneyReportingForOrder(order).platformRevenue.collectedMinor, 0);
   order.payments.final_online.status = "confirmed";
-  assert.equal(moneyReportingForOrder(order).platformRevenue.collectedMinor, 1335);
-  assert.equal(moneyReportingForOrder(order).platformRevenue.recognizedMinor, 1335);
-  assert.equal(moneyReportingForOrder(order).deliverySettlement.riderPayoutMinor, 7565);
+  assert.equal(moneyReportingForOrder(order).platformRevenue.collectedMinor, 1780);
+  assert.equal(moneyReportingForOrder(order).platformRevenue.recognizedMinor, 1780);
+  assert.equal(moneyReportingForOrder(order).deliverySettlement.riderPayoutMinor, 7120);
   // The 75/25 plan collects delivery in both installments. Round cumulatively:
   // 8 paid centavos at 85% -> 7 rider, 1 platform; all 10 -> 9 rider, 1 platform.
   Object.assign(order, { deliveryFeeMinor: 10, riderCommissionBps: 8500, paymentAllocations: [

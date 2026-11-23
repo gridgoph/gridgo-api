@@ -141,6 +141,22 @@ const call = (store, action, body = {}, user = { id: 'client', role: 'client' })
   audit: (store, row) => store.auditLog.push(row),
 });
 
+test('recovery cannot offer a declared B&W-only or single-sided document shop for incompatible saved work',()=>{
+  const store=fixture(),order=store.orders[0];
+  store.taxonomy.categories.push({code:'document_publication',active:true});
+  store.taxonomy.subcategories.push({code:'document_printing',categoryCode:'document_publication',active:true});
+  for(const item of store.catalogItems)item.subcategoryCode='document_printing';
+  for(const service of store.supplierServices)service.categoryCode='document_publication';
+  const replacement=store.supplierServices.find(s=>s.supplierId==='replacement');
+  replacement.documentCapabilities={papers:['a4'],colours:['bw'],duplex:false};
+  store.orderLineItems[0].structuredSpecSnapshot={colourMode:'colour',sides:'one'};
+  assert.equal(findReplacementShop(store,order,AT),null);
+  replacement.documentCapabilities.colours.push('colour');
+  assert.equal(findReplacementShop(store,order,AT).supplierId,'replacement');
+  store.orderLineItems[0].structuredSpecSnapshot.sides='two';
+  assert.equal(findReplacementShop(store,order,AT),null);
+});
+
 test('one opening hour pauses overnight, weekends, split shifts and closures; never expires early by seconds', () => {
   const store = fixture(), order = store.orders[0];
   startShopAcceptance(store, order, '2026-10-10T09:30:30.000Z');
@@ -378,6 +394,9 @@ test('cheaper substitute: shop paid its own price, exact difference reserved in 
   assert.equal(activePayoutHold(store, order), false);
   assert.equal(store.refundPayments?.length || 0, 0, 'no transfer is claimed');
   assert.equal(moneyReportingForOrder(order, store).supplierSettlement.totalSupplierEarningsMinor, 8000);
+  const {syncShopMoney,shopMoneyBalances}=await import('../src/shop-money.js');
+  syncShopMoney(store,{at:AT,id});
+  assert.equal(shopMoneyBalances(store,'replacement',AT).owedMinor,8000,'the cheaper-shop credit preserves its agreed unpaid principal');
   const [move] = order.shopMoves;
   assert.deepEqual([move.fault, move.choice, move.refundRequestId, move.refundStatus], ['shop', 'replacement', request.id, 'reserved']);
   assert.ok(store.auditLog.some((row) => row.action === 'order.shop_move_applied'));

@@ -941,3 +941,20 @@ test('verification recovery can settle a zero-net shop remainder without inventi
     SELECT id,settlement_id,order_id,supplier_id,amount_minor,status,reference,receipt_file_id,released_at,released_by,created_at
     FROM refund_supplier_payouts WHERE id=$1 ON CONFLICT(id) DO NOTHING`,[p.id]);
 });
+
+test('fulfilled refund settlement retains and pays the separate launch bonus through the daily desk',{skip:!DATABASE_URL},async t=>{
+  const db=createDatabase(process.env);t.after(()=>db.close());await fixture(db,{state:'issue_window_open'});
+  const {syncShopMoney,runShopSettlement,routeShopMoney,shopMoneyBalances}=await import('../src/shop-money.js');
+  await db.transaction(async()=>{const s=await loadStore(db);s.settings.shopMoney.launchedAt=AT;s.files.push(readyFile('bonus_receipt','payout_receipt','ops'));syncShopMoney(s,{at:AT,id});await saveStore(db,s);});
+  let refund=await settle(db,await review(db,await request(db,{kind:'complaint'})),{shop:50000,rider:4250,total:55000});
+  assert.equal(refund.settlement.disposition,'fulfilled_with_refund');
+  await call(db,'ops','POST',`/refund-requests/${refund.id}/supplier-payout`,{expectedVersion:refund.version,amountMinor:50000,payoutAccountVersion:1,destinationVerified:true,reference:'AGREED-SHOP-REMAINDER',receiptFileId:'shop_receipt',reason:'Agreed principal paid'});
+  const cutoff='2026-09-28T08:00:00.000Z';let run;
+  await db.transaction(async()=>{const s=await loadStore(db);syncShopMoney(s,{at:cutoff,id});assert.equal(shopMoneyBalances(s,'supplier',cutoff).owedMinor,20000);run=runShopSettlement(s,{at:cutoff,id});await saveStore(db,s);});
+  assert.equal(run.data.shops.find(s=>s.supplierId==='supplier').availableMinor,20000);
+  const money=async(path,body)=>db.transaction(async()=>{const s=await loadStore(db);const r=await routeShopMoney({req:{method:'POST'},url:new URL(path,'http://money.test'),store:s,user:actor(s,'ops'),readBody:async()=>body,now:()=>cutoff,id,database:db});if(r.mutated)await saveStore(db,s);return r.body;});
+  const {transfer}=await money(`/ops/shop-money/runs/${run.id}/shops/supplier/prepare`,{});
+  await money(`/ops/shop-money/transfers/${transfer.id}/confirm`,{amountMinor:20000,fundsSentConfirmed:true,paidAt:cutoff,reference:'RETAINED-LAUNCH-BONUS',receiptFileId:'bonus_receipt',reason:'Retained accepted bonus paid'});
+  const s=await loadStore(db);assert.equal(shopMoneyBalances(s,'supplier',cutoff).owedMinor,0);assert.equal(shopMoneyBalances(s,'supplier',cutoff).paidMinor,70000);
+  assert.ok(s.orders[0].payoutMilestones.every(m=>m.status==='superseded'));
+});

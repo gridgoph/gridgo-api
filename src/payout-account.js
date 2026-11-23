@@ -1,6 +1,10 @@
 import { identityHasMembership } from "./authorization-context.js";
 import { findFile } from "./attachments.js";
 import { philippineMobileNumber } from "./phone.js";
+import { PAYOUT_CONSENT_WORDING } from './supplier-signup.js';
+import { supplierPayoutStatus } from './supplier-payout-policy.js';
+import { privilegedAdminMemberships, queueInvalidate } from './notifications.js';
+import { randomUUID } from 'node:crypto';
 import {
   CatalogError,
   assertExpectedVersion,
@@ -95,6 +99,8 @@ function readyQrFile(store, account) {
 export function payoutAccountProjection(store, account) {
   if (!account) return null;
   const file = readyQrFile(store, account);
+  const policy=(store.supplierPayoutPolicies||[]).find(p=>p.supplierId===account.supplierId);
+  const guided=(store.supplierSignups||[]).some(s=>s.supplierId===account.supplierId);
   return {
     supplierId: account.supplierId,
     provider: account.provider,
@@ -112,6 +118,7 @@ export function payoutAccountProjection(store, account) {
       : null,
     version: account.version || 1,
     updatedAt: account.updatedAt,
+    ...(policy||guided?{holder:policy?.holder??null,consent:policy?.consent??null,payoutStatus:supplierPayoutStatus(store,account.supplierId)}:{}),
   };
 }
 
@@ -223,18 +230,41 @@ function auditChange(audit, store, user, action, detail) {
   }
 }
 
-export async function routePayoutAccount({ req, url, store, user, readBody, now, audit }) {
+export async function routePayoutAccount({ req, url, store, user, readBody, now, audit, id = prefix=>`${prefix}_${randomUUID()}` }) {
   const { pathname } = url;
   if (pathname !== ME_ROUTE || !["GET", "PATCH", "DELETE"].includes(req.method)) return null;
 
   requireSupplier(user);
+  const actorId=user.actorUserId||user.id;
+  if(['staff','manager'].includes(user.shopRole)||(store.shopMemberships||[]).length
+    && !(store.shopMemberships||[]).some(m=>m.shopId===user.id&&m.userId===actorId&&m.role==='owner'&&m.status==='active')) {
+    fail(403,'shop_owner_required','Only an active shop Owner can read or change the payout account.');
+  }
   const profile = (store.supplierProfiles || []).find((candidate) => candidate.userId === user.id);
   if (!profile) fail(404, "supplier_profile_not_found", "Complete supplier enrollment first.");
   if (!Array.isArray(store.supplierPayoutAccounts)) store.supplierPayoutAccounts = [];
   const current = payoutAccountFor(store, user.id);
+  const at=now();
+  let policy=(store.supplierPayoutPolicies||=[]).find(p=>p.supplierId===user.id);
+  const pause=()=>{
+    if(!policy){policy={supplierId:user.id,updatedAt:at};store.supplierPayoutPolicies.push(policy);}
+    policy.pausedUntil=new Date(Math.max(Date.parse(policy.pausedUntil)||0,Date.parse(at)+24*3600000)).toISOString();policy.updatedAt=at;
+    const owners=(store.shopMemberships||[]).filter(m=>m.shopId===user.id&&m.role==='owner'&&m.status==='active').map(m=>m.userId);
+    for(const recipient of [...(owners.length?owners:[user.id]).map(userId=>({userId,appRole:'supplier'})),
+      ...privilegedAdminMemberships(store).map(m=>({userId:m.userId,appRole:m.role}))]) {
+      (store.notifications||=[]).push({id:id('ntf'),...recipient,type:'supplier_payout_account_changed',shopId:user.id,
+        title:'Shop payout account changed',body:'The shop payout account changed. Payouts are paused for 24 hours. Open Money to review it.',at,read:false});
+    }
+    queueInvalidate(store,{resource:'payouts',userIds:[...owners,user.id]});
+  };
+  const projection=()=>{const result=payoutAccountProjection(store,current||payoutAccountFor(store,user.id));if(result)result.payoutStatus=supplierPayoutStatus(store,user.id,at);return result;};
 
   if (req.method === "GET") {
-    return { status: 200, body: { payoutAccount: payoutAccountProjection(store, current) } };
+    return { status: 200, body: { payoutAccount: projection() } };
+  }
+  if((store.shopMoneyEvents||[]).some(e=>e.kind==='transfer_reserved'&&e.supplierId===user.id
+    &&!(store.shopMoneyEvents||[]).some(x=>['transfer_paid','transfer_cancelled'].includes(x.kind)&&x.data.transferId===e.id))) {
+    fail(409,'shop_money_destination_locked','Reconcile the prepared shop transfer before changing this receiving account.');
   }
 
   if ((store.orders || []).some(order => order.cash && order.supplierId === user.id
@@ -246,7 +276,7 @@ export async function routePayoutAccount({ req, url, store, user, readBody, now,
   if (req.method === "DELETE") {
     if (!current) return { status: 200, body: { payoutAccount: null } };
     assertExpectedVersion(req, {}, "payout_account_stale", current.version || 1, url);
-    const at = now();
+    if(current.qrFileId||policy?.consent)pause();
     retireQrFile(store, current, user, at);
     store.supplierPayoutAccounts = store.supplierPayoutAccounts.filter((row) => row !== current);
     auditChange(audit, store, user, "payout_account.delete", { provider: current.provider });
@@ -280,8 +310,21 @@ export async function routePayoutAccount({ req, url, store, user, readBody, now,
   const hasQr = Object.hasOwn(body, "qrFileId");
   const qrFileId = hasQr && body.qrFileId != null ? requiredText(body.qrFileId, "qrFileId", 120) : null;
   const qrFile = qrFileId ? resolveQrFile(store, current, qrFileId, user) : null;
-
-  const at = now();
+  const destinationEstablished=Boolean(current?.qrFileId||policy?.consent?.qrFileId||policy?.pausedUntil);
+  const destinationChanged=destinationEstablished&&(!current||provider!==current.provider||accountName!==current.accountName||accountNumber!==current.accountNumber
+    ||institution!==current.institution||(hasQr&&qrFileId!==current.qrFileId)||(Object.hasOwn(body,'holder')&&policy?.holder&&body.holder!==policy.holder));
+  const optsIntoConsent=Object.hasOwn(body,'holder')||Object.hasOwn(body,'consent');
+  const consentRequired=optsIntoConsent||Boolean(policy?.consent)||(store.supplierSignups||[]).some(s=>s.supplierId===user.id);
+  const needsConsent=optsIntoConsent||consentRequired&&Boolean(qrFile||destinationChanged&&current?.qrFileId);
+  if(needsConsent&&(!['mine','family','friend','staff'].includes(body.holder)||body.consent?.accepted!==true||body.consent.wording!==PAYOUT_CONSENT_WORDING)) {
+    fail(400,'payout_consent_required','Choose whose QR this is and accept the payout consent.',{wording:PAYOUT_CONSENT_WORDING});
+  }
+  if(needsConsent) {
+    if(!policy){policy={supplierId:user.id,updatedAt:at};store.supplierPayoutPolicies.push(policy);}
+    policy.holder=body.holder;policy.consent={accepted:true,wording:PAYOUT_CONSENT_WORDING,at,actorUserId:actorId,
+      qrFileId:qrFileId??current?.qrFileId??policy.consent?.qrFileId??null};policy.updatedAt=at;
+  }
+  if(destinationChanged)pause();
   let account = current;
   if (!account) {
     account = {
@@ -309,10 +352,11 @@ export async function routePayoutAccount({ req, url, store, user, readBody, now,
   auditChange(audit, store, user, current ? "payout_account.update" : "payout_account.create", {
     provider: account.provider,
     qrFileId: account.qrFileId,
+    holder:policy?.holder??null,consent:policy?.consent??null,pausedUntil:policy?.pausedUntil??null,
   });
   return {
     status: current ? 200 : 201,
-    body: { payoutAccount: payoutAccountProjection(store, account) },
+    body: { payoutAccount: {...payoutAccountProjection(store, account),payoutStatus:supplierPayoutStatus(store,user.id,at)} },
     mutated: true,
   };
 }

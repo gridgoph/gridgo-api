@@ -355,7 +355,7 @@ test('no-show enforces contact and server wait, returns exact shop principal onc
     const delivered=await api('rider','POST','/dispatch/order/delivery',{otp:'123456',evidenceType:'photo',evidenceFileId:'redel-drop',receiptMode:'digital',
       acknowledgementSignature:{fileId:'redel-signature',signerName:'Client Recipient',arNumber:prepared.body.receipt.arNumber}});
     assert.equal(delivered.status,200,JSON.stringify(delivered.body));
-    assert.equal((await cashWallet(db,'rider')).balanceMinor,38365);
+    assert.equal((await cashWallet(db,'rider')).balanceMinor,37920);
     assert.equal((await loadStore(db)).orders[0].handover.otp,'123456');
     assert.equal((await reconcileCash(db)).ok,true);
   } finally {await db.close();}

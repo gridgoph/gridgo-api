@@ -1,4 +1,6 @@
+import { assertSupplierPayoutAllowed } from './supplier-payout-policy.js';
 import { prepareVerificationPayout, completeVerificationPayout, hasVerificationReservation } from "./supplier-verification.js";
+import {activeShopTransferForKey} from './shop-money-policy.js';
 import { staffPageBody } from './staff-list-pages.js';
 import { assertReviewMoneyAllowed } from './review-data.js';
 import { assertProhibitedItemIntake, assertProhibitedItemFileCheck, prohibitedItemHold } from './prohibited-items.js';
@@ -390,6 +392,7 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
     request.status = body.outcome === 'unknown' ? 'payment_unknown' : 'approved';
     eventKind = body.outcome; eventData = { attemptId: attempt.id };
   } else if (action === 'supplier-payout' || action === 'supplier-payout-prepare') {
+    assertSupplierPayoutAllowed(store,order.supplierId,at);
     const settlement = settlementFor(store, request);
     const payout = store.refundSupplierPayouts.find((row) => row.settlementId === settlement?.id && row.status === 'pending');
     if (!payout) fail(409, 'refund_supplier_payout_not_pending', 'No remaining shop settlement payout is pending.');
@@ -398,6 +401,7 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
       || store.refundRequests.some((row) => row.orderId === order.id && ['requested', 'reviewed'].includes(row.status))) {
       fail(409, 'payout_held', 'Resolve the independent claims, issues and pending refund reviews before paying the shop.');
     }
+    if(activeShopTransferForKey(store,`settlement:${payout.id}`))fail(409,'shop_money_transfer_route_required','Use the prepared daily transfer to record this payout.');
     const prepared=prepareVerificationPayout(store,order,{key:`settlement:${payout.id}`,amountMinor:payout.amountMinor,at,actor:user,id,recording:action==='supplier-payout',attemptId:body.attemptId});
     if(action==='supplier-payout-prepare'||prepared.status==='held')return {status:prepared.status==='held'?202:200,body:{payout:prepared},mutated:true};
     if (body.amountMinor !== prepared.netAmountMinor) fail(409, 'refund_supplier_payout_amount_mismatch', 'Pay exactly the prepared net shop obligation.', { amountMinor: prepared.netAmountMinor });

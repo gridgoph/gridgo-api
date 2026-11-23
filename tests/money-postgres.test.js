@@ -144,7 +144,7 @@ test("real PostgreSQL persists all plan allocations and immutable fee snapshots"
   assert.equal(organization.totalMinor, 113900);
   assert.equal(organization.payments.initial.amountMinor, 30000);
   assert.equal(organization.supplierPlatformPayoutMinor, 100000);
-  assert.equal(organization.riderPayoutMinor, 7565);
+  assert.equal(organization.riderPayoutMinor, 7120);
   await assert.rejects(database.query("UPDATE platform_settings SET settings=jsonb_set(settings, '{serviceFeeRateBps}', '499')"), { code: '23514' });
   const delivery = persisted.orders.find((order) => order.id === "delivery_rounding");
   assert.deepEqual(
@@ -187,12 +187,12 @@ test("real PostgreSQL persists all plan allocations and immutable fee snapshots"
     { paymentCode: "initial", component: "supplier_principal", amountMinor: 25_000 },
   ]);
 
-  assert.equal(delivery.riderCommissionBps, 8500);
-  assert.equal(delivery.riderPayoutMinor, 7565);
-  assert.equal(delivery.platformDeliveryShareMinor, 1335);
+  assert.equal(delivery.riderCommissionBps, 8000);
+  assert.equal(delivery.riderPayoutMinor, 7120);
+  assert.equal(delivery.platformDeliveryShareMinor, 1780);
   assert.deepEqual((await database.query(`SELECT rider_payout_minor, platform_delivery_share_minor
     FROM orders WHERE id = 'delivery_rounding'`)).rows[0], {
-    rider_payout_minor: 7565, platform_delivery_share_minor: 1335,
+    rider_payout_minor: 7120, platform_delivery_share_minor: 1780,
   });
   persisted.settings.riderCommissionBps = 7000;
   [1200, 6500, 23000].forEach((limit, index) => { persisted.settings.deliveryFeeBands[index].maxDistanceMeters = limit; });

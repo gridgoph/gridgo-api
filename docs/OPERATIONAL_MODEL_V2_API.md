@@ -292,6 +292,9 @@ The existing Operations/Super Admin `GET /users/:id` approval response is now `{
 
 ## Supplier payout account
 
+Guided sign-up adds required QR-holder consent, owner-only setup and independent
+24-hour destination-change holds. See [Supplier sign-up](SUPPLIER_SIGNUP_API.md#existing-payout-account-added-consent-and-destination-pause).
+
 Payout release is a person in Operations scanning the shop's own receiving QR with a wallet app. This record is that plate plus the words needed to check the right shop is being paid. It is private to the shop and to Operations / Super Admin; it never appears in any client, rider, or public catalogue projection.
 
 ### `GET /me/payout-account`
@@ -807,7 +810,7 @@ Unauthenticated. Streams the current ready plate so checkout and the ops preview
 
 `settings.deliveryFeeBands` is the single source for distance labels and delivery prices (`src/operational-model.js`). The four zone keys, names, and order stay fixed: Nearby, Away, Long Distance, Out of Zone. Only Super Admin can edit the first three `maxDistanceMeters` values. Bounds are inclusive: a distance exactly at an upper limit stays in that zone, and the next zone starts above that limit. Defaults remain 5,000 / 10,000 / 15,000 m; Out of Zone starts above the saved Long Distance limit and has `maxDistanceMeters: null` (no maximum). Distances computed from coordinates are rounded to whole metres before band selection, as before. The former 4,999 m default becomes 5,000 m for future quotes.
 
-The first three bands use `feeMinor`. Out of Zone has **no `feeMinor`**; its price is `baseFeeMinor + perKmMinor * ceil(distanceMeters / 1000)`, applied to the **whole** distance, not only the excess beyond the saved Long Distance limit. With the defaults, 15,001 m costs 28,000 minor units (PHP 280), 16,000 m costs the same, and 16,001 m or 16,200 m costs 29,500 (PHP 295). Integer arithmetic rejects overflow. Out of Zone is never excluded because of its distance. The snapshotted rider/GRIDGO split remains 85/15 by default.
+The first three bands use `feeMinor`. Out of Zone has **no `feeMinor`**; its price is `baseFeeMinor + perKmMinor * ceil(distanceMeters / 1000)`, applied to the **whole** distance, not only the excess beyond the saved Long Distance limit. With the defaults, 15,001 m costs 28,000 minor units (PHP 280), 16,000 m costs the same, and 16,001 m or 16,200 m costs 29,500 (PHP 295). Integer arithmetic rejects overflow. Out of Zone is never excluded because of its distance. New commitments use the configured 80/20 rider/GRIDGO split; existing snapshots remain unchanged.
 
 Migration `1790812800000_delivery_distance_zones` preserves the three stored flat fees, adds the fixed zone metadata and 15,000 m cap, adds the Out of Zone band, and increments the settings version. It never updates orders, jobs, or their stored fees/splits. Existing accepted prices remain snapshots. Unusual legacy tables with other than three bands require review before migration.
 
@@ -954,9 +957,9 @@ The opt-in pre-match request and read-only checkout contract, including compatib
 
 ### Rider delivery split
 
-`riderCommissionBps` means **the share the rider keeps**, default `8500` (85% rider, 15% GRIDGO). Only Super Admin edits it through `PATCH /settings`, e.g. `{ "expectedVersion": 4, "riderCommissionBps": 8500, "reason": "Delivery split update" }`. Other roles receive `403 forbidden`. Null, strings, fractional and out-of-range values return `400 invalid_rider_commission_rate` with `field: "riderCommissionBps"`; stale versions return `409 settings_version_conflict`. Omitting the field keeps the current setting. The change is audited with previous/current settings.
+`riderCommissionBps` means **the share the rider keeps**, default `8000` (80% rider, 20% GRIDGO). Only Super Admin edits it through `PATCH /settings`, e.g. `{ "expectedVersion": 4, "riderCommissionBps": 8000, "reason": "Delivery split update" }`. Other roles receive `403 forbidden`. Null, strings, fractional and out-of-range values return `400 invalid_rider_commission_rate` with `field: "riderCommissionBps"`; stale versions return `409 settings_version_conflict`. Omitting the field keeps the current setting. The change is audited with previous/current settings.
 
-Quote acceptance and cart checkout snapshot the setting when the delivery fee is set. Each order and its checkout job store the rate; later settings, assignment, or state changes do not reprice it. Migration `1786978800000` preserves all pre-existing orders/jobs at `10000` (their original full rider pass-through), while seeding `8500` for new commitments. A permitted quote supersession creates a new commercial commitment with the then-current rate. Zero-fee pickup jobs have zero rider payout and zero GRIDGO delivery share.
+Quote acceptance and cart checkout snapshot the setting when the delivery fee is set. Each order and its checkout job store the rate; later settings, assignment, or state changes do not reprice it. Migration `1786978800000` preserves all pre-existing orders/jobs at `10000` (their original full rider pass-through), while seeding `8500` for new commitments. Migration `1795320000000` sets the new-commitment policy to `8000` without editing any existing order/job snapshots. A permitted quote supersession creates a new commercial commitment with the then-current rate. Zero-fee pickup jobs have zero rider payout and zero GRIDGO delivery share.
 
 The following top-level fields are on rider and Operations/Super Admin order projections, including `GET /dispatch/offers` (`offers[]`), dispatch mutation responses (`order`), and `GET /orders` / `GET /orders/:id`. The rider app should sum `riderPayoutMinor` for its completed-delivery earnings view; `deliveryFeeMinor` remains the gross client charge. These amounts describe entitlement, not a recorded bank transfer; this contract adds no rider withdrawal or payout-release endpoint.
 

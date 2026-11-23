@@ -550,3 +550,9 @@ JSONB column is additive; old profile upserts omit it and preserve settings and
 ping budgets, without new CHECK constraints. During rolling deployment, enable
 the companion night/pause controls only after every API process runs this
 version: older binaries remain schema-compatible but cannot enforce new gates.
+## A3 extension
+
+Guided document shops may offer A3 at their own snapshotted page prices. A3
+Express uses artwork review, then shop acceptance, then client QR payment before
+work starts. Standard Express retains checkout payment. See the exact calls in
+[Supplier sign-up](SUPPLIER_SIGNUP_API.md#capability-aware-matching-and-a3-express).

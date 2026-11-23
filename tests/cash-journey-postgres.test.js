@@ -1,3 +1,4 @@
+import { PAYOUT_CONSENT_WORDING } from '../src/supplier-signup.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createDatabase } from '../src/database.js';
@@ -11,7 +12,7 @@ const skip=!process.env.DATABASE_URL;
 const ok=(r,status=200)=>{assert.equal(r.status,status,JSON.stringify(r.body));return r.body;};
 async function setup(t) {
   const db=createDatabase(process.env);t.after(()=>db.close());
-  await resetDatabase(db,'TRUNCATE users, platform_settings RESTART IDENTITY CASCADE');
+  await resetDatabase(db,'TRUNCATE users, platform_settings, taxonomy_categories RESTART IDENTITY CASCADE');
   const store=checkoutFixture();store.vouchers.forEach(v=>v.status='void');
   store.approvalCases.push({id:'case_rider',userId:'rider',kind:'rider',status:'approved',version:1,applicationRevision:1,createdAt:AT,updatedAt:AT});
   for(const [fileId,purpose,ownerId]of [
@@ -160,7 +161,7 @@ test('reserved and unknown cash reprint transfers lock the shop receiving accoun
   const issue=ok(await api('client','POST',`/orders/${orderId}/issues`,{problemType:'damage',description:'Packed work was damaged in transit',photoFileIds:['problem']}),201).issue;
   const decision=ok(await api('ops','POST',`/issues/${issue.id}/decision`,{expectedVersion:1,fault:'rider',remedy:'reprint',costMinor:2000,gridgoCostMinor:2000,
     evidenceIds:['rider_check'],reason:'Pickup was undamaged; delivery evidence shows damage'})).issue.faultDecision;
-  ok(await api('supplier','PATCH','/me/payout-account',{expectedVersion:0,provider:'gcash',accountName:'Printer',accountNumber:'09171234567',qrFileId:'shop-qr'}),201);
+  ok(await api('supplier','PATCH','/me/payout-account',{expectedVersion:0,provider:'gcash',accountName:'Printer',accountNumber:'09171234567',qrFileId:'shop-qr',holder:'mine',consent:{accepted:true,wording:PAYOUT_CONSENT_WORDING}}),201);
   const reserve={issueId:issue.id,decisionId:decision.id,destinationVerified:true,supplierDestinationVersion:1,sourceWallet:'OPERATIONS',provider:'GCASH'};
   ok(await cashPost(api,'ops',orderId,'remedy-reserve',reserve));
   for(const status of ['reserved','unknown']) {
@@ -175,7 +176,9 @@ test('reserved and unknown cash reprint transfers lock the shop receiving accoun
     assert.equal(ok(await api('ops','GET',`/orders/${orderId}/cash`)).cash.progress.remedy.destination.qrFileId,'shop-qr');
   }
   ok(await cashPost(api,'ops',orderId,'remedy-reconcile',{outcome:'not_sent',noTransferConfirmed:true,reason:'Bank confirmed no transfer'}));
-  assert.equal(ok(await api('supplier','PATCH','/me/payout-account',{expectedVersion:1,qrFileId:'shop-new-qr'})).payoutAccount.version,2);
+  assert.equal(ok(await api('supplier','PATCH','/me/payout-account',{expectedVersion:1,qrFileId:'shop-new-qr',holder:'mine',consent:{accepted:true,wording:PAYOUT_CONSENT_WORDING}})).payoutAccount.version,2);
+  assert.equal((await cashPost(api,'ops',orderId,'remedy-reserve',{...reserve,supplierDestinationVersion:2})).body.error,'supplier_payout_paused');
+  await db.query("UPDATE supplier_payout_policies SET paused_until=$1 WHERE supplier_id='supplier'",[new Date(Date.parse(AT)-1).toISOString()]);
   ok(await cashPost(api,'ops',orderId,'remedy-reserve',{...reserve,supplierDestinationVersion:2}));
   ok(await cashPost(api,'ops',orderId,'remedy-pay',{amountMinor:2000,reference:'REPRINT-JOURNEY',receiptFileId:'reprint-paid'}));
   assert.equal(ok(await api('supplier','DELETE','/me/payout-account?expectedVersion=2')).payoutAccount,null);
