@@ -1,3 +1,4 @@
+import { homeProfile, homePrinterStatus, recordHomeOffer, recordHomeGiveBack } from './home-printers.js';
 import { supplierCanWork } from "./supplier-verification.js";
 import { notifyAdmins } from './domain-events.js';
 import { queueInvalidate } from './notifications.js';
@@ -46,7 +47,7 @@ export async function routeExpressOrders({req,url,store,user,readBody,id,now,aud
    return {status:200,body:{date,orderCount:orders.length,cancelledCount:orders.filter(o=>o.state==='cancelled').length,totalMinor:Number(totalMinor),
     lowRatings:(store.shopReviews||[]).filter(r=>r.qualityStars<=2&&orders.some(o=>o.id===r.orderId)).map(r=>({orderId:r.orderId,supplierId:r.supplierId,qualityStars:r.qualityStars,at:r.createdAt}))}};
  }
- const match=/^\/orders\/([^/]+)\/express\/(accept|decline|pickup)$/.exec(url.pathname);
+ const match=/^\/orders\/([^/]+)\/express\/(accept|decline|pickup|give-back)$/.exec(url.pathname);
  if(!match||req.method!=='POST')return null;
  if(user?.role!=='supplier')fail(403,'forbidden');
  const order=store.orders.find(o=>o.id===match[1]&&o.orderType==='express');
@@ -59,6 +60,18 @@ export async function routeExpressOrders({req,url,store,user,readBody,id,now,aud
  if(!body||typeof body!=='object'||Array.isArray(body))fail(400,'invalid_request');
  assertRefundWorkAllowed(store,order);
  const response=()=>({status:200,body:{orderId:order.id,state:order.state,expressOrder:publicExpress(order,user)},mutated:true});
+ if(action==='give-back') {
+   const profile=homeProfile(store,user.id);if(!profile)fail(409,'home_printer_required');
+   if(claimBlocksHandover(store,order))fail(409,'payout_held');
+   if(order.shopAcceptance?.status!=='accepted'||!['payment_authorized','production','supplier_self_qc'].includes(order.state))fail(409,'home_give_back_unavailable');
+   if(typeof body.reason!=='string'||!body.reason.trim()||body.reason.length>2000)fail(400,'shop_cancel_reason_required');
+   if((order.payoutMilestones||[]).some(p=>p.status==='released')||(store.refundSupplierPayouts||[]).some(p=>p.orderId===order.id&&p.status==='released'))fail(409,'express_reassignment_payout_released');
+   recordHomeGiveBack(store,profile,order,at);
+   order.state='supplier_assigned';order.shopAcceptance.status='pending';
+   declineExpress(store,order,{at,id,kind:'given_back',actorId:actorUserId(user),reason:body.reason.trim()});
+   for(const job of store.orderJobs||[])if(job.orderId===order.id&&order.state!=='cancelled')job.state='approved_for_production';
+   return response();
+ }
  if(action==='pickup') {
    if(order.fulfillmentMode!=='pickup')fail(409,'express_pickup_required');
    if(order.expressOrder.pickedUpAt)return response();
@@ -95,6 +108,8 @@ export async function routeExpressOrders({req,url,store,user,readBody,id,now,aud
  const payAfterAcceptance=order.expressOrder?.paymentTiming==='after_acceptance';
  if(!order.cash&&!payAfterAcceptance&&!paymentSettled(order.payments?.initial))fail(409,'payment_required');
  acknowledgeInstructions(store,order,user,body,at,(_store,event)=>store.auditLog.push({id:id('aud'),at,actorId:actorUserId(user),actorRole:'supplier',...event,actor:undefined}));
+ const home=homeProfile(store,user.id);
+ if(home) {const status=homePrinterStatus(store,home,at);if(status.reason)fail(409,status.reason);recordHomeOffer(store,user.id,'accepted',at);}
  order.shopAcceptance.status='accepted';order.shopAcceptance.acceptedAt=at;order.shopAcceptance.acceptedBy=actorUserId(user);
  if(payAfterAcceptance&&!paymentSettled(order.payments?.initial))order.expressOrder.payBy=new Date(Date.parse(at)+5*60000).toISOString();
  order.state=payAfterAcceptance&&!paymentSettled(order.payments?.initial)?'awaiting_initial_payment':'payment_authorized';order.timeline.push({at,state:order.state,by:actorUserId(user),note:'Shop accepted Express order.'});

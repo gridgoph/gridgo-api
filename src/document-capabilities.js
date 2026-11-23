@@ -24,6 +24,8 @@ export function documentCapabilities(value) {
 
 /** Absence preserves released listings. New capabilities fail closed on an explicit unsupported request. */
 export function documentRequestSupported(store,item,request={}) {
+  const home=store.supplierProfiles?.find(p=>p.userId===item?.supplierId&&p.homePrinter);
+  if(home&&(!request.expressPrint||item?.subcategoryCode!=='document_printing'||!['short','a4','long'].includes(request.expressPrint.paper)))return false;
   const service=(store.supplierServices||[]).find(s=>s.id===item?.supplierServiceId);
   const capability=service?.documentCapabilities;
   if (!capability || item?.subcategoryCode!=='document_printing') return true;
@@ -56,6 +58,8 @@ export function assertDocumentRequest(store,item,request) {
 
 /** Recovery/manual assignment consume accepted facts, never today's source options. */
 export function supplierSupportsDocumentOrder(store,supplierId,order) {
+  if(store.supplierProfiles?.some(p=>p.userId===supplierId&&p.homePrinter)
+    &&(order.orderType!=='express'||!order.expressOrder?.printSettings?.length||order.expressOrder.printSettings.some(p=>p.productType==='plans'||!['short','a4','long'].includes(p.paper))))return false;
   const services=(store.supplierServices||[]).filter(s=>s.supplierId===supplierId&&s.state==='live'&&s.documentCapabilities);
   if(!services.length)return true;
   const requests=order.expressOrder?.printSettings||(store.orderLineItems||[]).filter(line=>line.orderId===order.id)

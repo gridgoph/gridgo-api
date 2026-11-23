@@ -227,3 +227,5 @@ owner-only QR consent, independent 24-hour pauses and private setup assistance.
 The complete PostgreSQL suite runs on CI. This API PR has no new application
 screen; phone/desktop screenshots and store releases belong to the two screen
 follow-ups. Deploy the additive migrations and API before enabling those screens.
+
+Home-kind sign-up additionally requires private-pin consent and documents-only capabilities; its To do online switch replaces fixed hours. See [Home printers](HOME_PRINTERS_API.md) for Starter review, verification, pin and app-call contracts.

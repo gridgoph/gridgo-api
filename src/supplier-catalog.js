@@ -1,3 +1,4 @@
+import { homePrinterResponse } from './home-printers.js';
 import { supplierVerified, verificationSummary } from "./supplier-verification.js";
 import { supplierMatchBlockersFor } from "./supplier-eligibility.js";
 import { effectiveProductionTime, productionTimeReview } from './production-time.js';
@@ -389,6 +390,7 @@ export function catalogItemBlockers(store, item, { publicOnly = false, at } = {}
     }
   }
   if (publicOnly) {
+    if(store.supplierProfiles?.some(p=>p.userId===item.supplierId&&p.homePrinter) && (item.subcategoryCode!=='document_printing'||item.pricingUnit!=='per_page'||item.express!==true))blockers.push('home_documents_only');
     if (!quoteListingVisible(store, item)) blockers.push("quote_only");
     const owner = (store.users || []).find(row => row.id === item.supplierId);
     if (!supplierAccountIsActive(owner?.accountStatus)) blockers.push("account_inactive");
@@ -619,7 +621,10 @@ export function publicCatalogItem(store, item, { selectedOptionIds, at } = {}) {
   };
 }
 
-export function publicSupplierShop(store, supplierId) {
+export function publicSupplierShop(store,supplierId) {
+  return homePrinterResponse(store,publicSupplierShopInternal(store,supplierId),null);
+}
+function publicSupplierShopInternal(store, supplierId) {
   const owner = (store.users || []).find(row => row.id === supplierId);
   if (!supplierAccountIsActive(owner?.accountStatus)) return null;
   const membership = (store.userRoleMemberships || []).some(
@@ -666,7 +671,7 @@ export function publicSupplierShop(store, supplierId) {
     shopName: profile.shopName,
     hours: shopHoursStatus(profile, store.settings),
     shop: profile.shop,
-    media: publicShopMedia(store, supplierId),
+    media: profile.homePrinter ? [] : publicShopMedia(store, supplierId),
     categories: [...new Set(services.map((service) => service.categoryCode))],
     services,
   };
@@ -823,7 +828,7 @@ function publicCatalogMediaEligible(store, file) {
   }
   if (file.purpose === "supplier_shop_image") {
     const media = (store.supplierShopMedia || []).find((candidate) => candidate.fileId === file.fileId);
-    return Boolean(media && publicSupplierShop(store, media.supplierId));
+    return Boolean(media && !store.supplierProfiles?.some(p=>p.userId===media.supplierId&&p.homePrinter) && publicSupplierShop(store, media.supplierId));
   }
   return false;
 }

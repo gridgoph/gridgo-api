@@ -35,6 +35,11 @@ export function nightWindow(profile, at) {
 
 export function expressAvailability(profile, settings, at, fulfillmentMode = 'pickup') {
   if (profile?.isClosed || shopPaused(profile, at) || profile?.expressEnabled === false) return null;
+  if(profile?.homePrinter) {
+    const deliveryAvailable=isOpenAt(operatingHours(settings).schedule,at);
+    if(!profile.homePrinter.online || fulfillmentMode==='pickup'&&!profile.pickupAvailable || fulfillmentMode==='delivery'&&!deliveryAvailable)return null;
+    return {nightWindow:{startsAt:at,endsAt:new Date(Date.parse(at)+DAY).toISOString(),home:true},deliveryAvailable};
+  }
   const night = nightWindow(profile, at);
   if (!night && !isOpenAt(profile?.schedule || defaultShopSchedule(), at)) return null;
   const deliveryAvailable = isOpenAt(operatingHours(settings).schedule, at);

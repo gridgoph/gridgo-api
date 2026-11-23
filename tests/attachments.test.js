@@ -368,7 +368,7 @@ test("verification documents attach only to the uploader and support typed repla
     400,
     "invalid_verification_document_type",
   );
-  assert.deepEqual(VERIFICATION_DOCUMENT_TYPES, ["business_permit", "valid_id", "id_selfie", "sample_work"]);
+  assert.deepEqual(VERIFICATION_DOCUMENT_TYPES, ["business_permit", "valid_id", "id_selfie", "sample_work", "barangay_clearance", "tin"]);
 
   const replacement = readyFile("verification_document", { fileId: "permit-new" });
   store.files.push(replacement);

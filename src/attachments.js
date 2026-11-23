@@ -56,7 +56,7 @@ const KINDS = new Set([
   "rider_verification_document",
 ]);
 const CONTENT_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "application/pdf"]);
-export const VERIFICATION_DOCUMENT_TYPES = Object.freeze(["business_permit", "valid_id", "id_selfie", "sample_work"]);
+export const VERIFICATION_DOCUMENT_TYPES = Object.freeze(["business_permit", "valid_id", "id_selfie", "sample_work", "barangay_clearance", "tin"]);
 const VERIFICATION_DOCUMENT_TYPE_SET = new Set(VERIFICATION_DOCUMENT_TYPES);
 export const PURPOSE_POLICIES = Object.freeze({
   supplier_price_list: {roles:['supplier'],maxBytes:15*1024*1024,contentTypes:['image/jpeg','image/png','image/webp','application/pdf']},
@@ -1382,7 +1382,7 @@ function canReadReference(user, store, reference, file) {
   }
   if (reference.type === "supplier_shop_media") {
     if (hasRole(user, "supplier") && reference.id === user.id) return true;
-    return Boolean(publicSupplierShop(store, reference.id));
+    return !store.supplierProfiles?.some(p=>p.userId===reference.id&&p.homePrinter)&&Boolean(publicSupplierShop(store, reference.id));
   }
   if (reference.type === "supplier_service") {
     const service = (store.supplierServices || []).find((item) => item.id === reference.id);

@@ -83,7 +83,7 @@ const TABLES = [
   { name: "client_match_selections", keys: ["token_hash"], columns: ["token_hash", "client_id", "request_id", "expires_at", "selection"] },
   { name: "client_match_preferences", keys: ["client_id"], columns: ["client_id", "ranking", "version", "updated_at"] },
   { name: "client_saved_addresses", keys: ["id"], columns: ["id", "client_id", "label", "address_line", "lat", "lng", "is_default", "version", "created_at", "updated_at", "deleted_at"] },
-  { name: "supplier_profiles", keys: ["user_id"], columns: ["user_id", "shop_name", "contact_name", "shop_lat", "shop_lng", "shop_label", "pickup_available", "is_closed", "express_enabled", "availability", "schedule", "version", "updated_at"] },
+  { name: "supplier_profiles", keys: ["user_id"], columns: ["user_id", "shop_name", "contact_name", "shop_lat", "shop_lng", "shop_label", "pickup_available", "is_closed", "express_enabled", "availability", "schedule", "home_printer", "version", "updated_at"] },
   { name: 'supplier_signups', keys: ['clerk_user_id'], columns: ['clerk_user_id','supplier_id','version','steps','updated_at'] },
   { name: 'supplier_payout_policies', keys: ['supplier_id'], columns: ['supplier_id','holder','consent','paused_until','updated_at'] },
   { name: "shop_reviews", keys: ["id"], columns: ["id", "order_id", "supplier_id", "client_id", "quality_stars", "speed_stars", "value_stars", "comment", "created_at"] },
@@ -354,7 +354,7 @@ function rowsFromStore(store) {
     });
   }
   for (const profile of (store.supplierProfiles || [])) {
-    rows.supplier_profiles.push({ user_id: profile.userId, shop_name: profile.shopName, contact_name: profile.contactName, shop_lat: profile.shop.lat, shop_lng: profile.shop.lng, shop_label: profile.shop.label, pickup_available: Boolean(profile.pickupAvailable), is_closed: Boolean(profile.isClosed), express_enabled: profile.expressEnabled !== false, availability: profile.availability ?? null, schedule: profile.schedule ?? null, version: profile.version || 1, updated_at: profile.updatedAt });
+    rows.supplier_profiles.push({ user_id: profile.userId, shop_name: profile.shopName, contact_name: profile.contactName, shop_lat: profile.shop.lat, shop_lng: profile.shop.lng, shop_label: profile.shop.label, pickup_available: Boolean(profile.pickupAvailable), is_closed: Boolean(profile.isClosed), express_enabled: profile.expressEnabled !== false, availability: profile.availability ?? null, schedule: profile.schedule ?? null, home_printer: profile.homePrinter ?? null, version: profile.version || 1, updated_at: profile.updatedAt });
   }
   rows.supplier_signups=(store.supplierSignups||[]).map(s=>({clerk_user_id:s.clerkUserId,supplier_id:s.supplierId,version:s.version,steps:s.steps,updated_at:s.updatedAt}));
   rows.supplier_payout_policies=(store.supplierPayoutPolicies||[]).map(p=>({supplier_id:p.supplierId,holder:p.holder??null,consent:p.consent??null,paused_until:p.pausedUntil??null,updated_at:p.updatedAt}));
@@ -951,7 +951,14 @@ function readGraph(database) {
   async function read(name, where, values = [], options = {}) {
     const table = TABLES.find(table => table.name === name);
     if (!table) throw new Error(`Unknown read graph table: ${name}`);
-    const projection=name==='supplier_profiles'?{...options,select:[...(options.select||table.columns),`(${shopMoneyDeadlineSql}) AS shop_money_deadline_at`]}:options;
+    const projection=name==='supplier_profiles'?{...options,select:[...(options.select||table.columns),`(${shopMoneyDeadlineSql}) AS shop_money_deadline_at`,
+      `CASE WHEN supplier_profiles.home_printer IS NOT NULL THEN (
+        SELECT jsonb_agg(DISTINCT COALESCE(f.data->>'verificationDocumentType',r.data->>'documentType'))
+        FROM files f JOIN file_references r ON r.file_id=f.file_id
+        WHERE f.owner_id=supplier_profiles.user_id AND f.purpose='verification_document' AND f.state='ready'
+          AND f.data->>'deletedAt' IS NULL AND f.data->>'deleteRequestedAt' IS NULL
+          AND r.reference_type='user' AND r.reference_id=supplier_profiles.user_id
+      ) END AS home_verification_types`]}:options;
     const sql=orderReadQuery(table,where,projection);
     if(name!=='supplier_payout_accounts') {
       loaded[name]=(await database.query(sql,values)).rows;
@@ -2428,6 +2435,9 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
   }));
   store.supplierProfiles = orderedBy(loaded.supplier_profiles, "user_id").map((row) => {
     const item = { userId: row.user_id, shopName: row.shop_name, contactName: row.contact_name, shop: { lat: row.shop_lat, lng: row.shop_lng, label: row.shop_label }, pickupAvailable: row.pickup_available, expressEnabled: row.express_enabled !== false, version: row.version || 1, updatedAt: row.updated_at };
+    if (row.home_printer) { item.homePrinter = row.home_printer; item.supplierType = 'home'; item.barangay = row.home_printer.barangay;
+      if(Object.hasOwn(row,'home_verification_types'))Object.defineProperty(item,'homeVerificationTypes',{value:row.home_verification_types||[]});
+    }
     if (row.is_closed) item.isClosed = true;
     if (row.availability) item.availability = row.availability;
     // Absent means the shop has not set its own hours and is scheduled against

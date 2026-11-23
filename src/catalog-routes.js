@@ -778,6 +778,7 @@ async function routeSupplierCatalogExisting({ req, url, store, user, readBody, i
       return { status: 200, body: { profile: privateSupplierProfile(store, profile, owner) } };
     }
     const body = catalogRecord(await readBody(req));
+    if(profile.homePrinter && ["shop","pickupAvailable"].some(k=>Object.hasOwn(body,k)))fail(409,"home_pin_route_required","Use the home printer pin and pickup controls.");
     assertExpectedVersion(req, body, "supplier_profile_stale", profile.version || 1);
     if (Object.hasOwn(body, "email")) {
       fail(400, "email_not_editable", "Your email comes from your GRIDGO sign-in. Change it there and it will update here.", { field: "email" });

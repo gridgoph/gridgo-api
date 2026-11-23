@@ -1,3 +1,4 @@
+import { homePrinterResponse, validateHomeSettings } from './home-printers.js';
 import { assertSupplierPayoutAllowed, supplierPayoutStatus } from './supplier-payout-policy.js';
 import { verificationSettings, validateVerificationSettings, prepareVerificationPayout, completeVerificationPayout } from "./supplier-verification.js";
 import {shopMoneySettings,validateShopMoneySettings} from './shop-money-settings.js';
@@ -342,6 +343,7 @@ export function defaultOperationalSettings() {
 export function validateOperationalSettings(settings) {
   validateShopMoneySettings(settings);
   validateVerificationSettings(settings);
+  validateHomeSettings(settings);
   validateExpressRates(Object.hasOwn(settings || {}, 'expressRates') ? settings.expressRates : expressRates());
   validateCashSettings(settings);
   if (settings.riderOfferTimeoutSeconds !== undefined && (!Number.isInteger(settings.riderOfferTimeoutSeconds)
@@ -1853,7 +1855,7 @@ export function publicOrderFor(order, user, store = null) {
     .sort((a, b) => a.at.localeCompare(b.at) || a.id.localeCompare(b.id))
     .map(row => ({ id: row.id, at: row.at, action: row.action, actor: { userId: row.actorUserId, name: row.actorName, role: row.actorRole, ...(row.actorPinStaffId ? {pinStaffId:row.actorPinStaffId} : {}) } }));
   if (['staff','manager'].includes(user?.shopRole)) return staffOrderProjection(publicRecord);
-  return owningClient && order.orderType === "express" ? expressClientProjection(publicRecord) : publicRecord;
+  return homePrinterResponse(store, owningClient && order.orderType === "express" ? expressClientProjection(publicRecord) : publicRecord, user);
 }
 
 export function issueWindowExpiresAt(openedAt, issueWindowHours) {
