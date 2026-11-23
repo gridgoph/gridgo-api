@@ -58,16 +58,22 @@ export function assertDocumentRequest(store,item,request) {
 export function supplierSupportsDocumentOrder(store,supplierId,order) {
   const services=(store.supplierServices||[]).filter(s=>s.supplierId===supplierId&&s.state==='live'&&s.documentCapabilities);
   if(!services.length)return true;
-  const requests=order.expressOrder?.printSettings||(store.orderLineItems||[]).filter(line=>line.orderId===order.id
-    &&((store.catalogItems||[]).some(item=>item.id===line.sourceCatalogItemId&&item.subcategoryCode==='document_printing')||line.expressPrint))
-    .map(line=>{
+  const requests=order.expressOrder?.printSettings||(store.orderLineItems||[]).filter(line=>line.orderId===order.id)
+    .flatMap(line=>{
       const spec={...(line.structuredSpecSnapshot||{}),...(line.expressPrint||{})};
       for(const option of (store.orderLineItemOptions||[]).filter(o=>o.orderLineItemId===line.id)) {
         if(/colou?r/i.test(option.groupNameSnapshot)&&!spec.colour&&!spec.colourMode)spec.colour=option.optionLabelSnapshot;
         if(/size/i.test(option.groupNameSnapshot)&&!spec.paper&&!spec.size)spec.size=option.optionLabelSnapshot;
         if(/sides/i.test(option.groupNameSnapshot)&&!spec.sides)spec.sides=/back|two|duplex/i.test(option.optionLabelSnapshot)?'two':'one';
       }
-      return spec;
+      // Historical snapshots lack a product type. Conservatively recognize
+      // page pricing, paper sizes and saved print options without consulting
+      // a source listing that may have been privately revised or removed.
+      const documentFacts=line.expressPrint || spec.subcategoryCode==='document_printing'
+        || line.pricingUnitSnapshot==='per_page' || line.pricingBasisSnapshot==='per_page'
+        || ['paper','colour','colourMode','sides'].some(key=>spec[key])
+        || /^(?:a[34]|short|long|letter|legal|folio)$/i.test(String(spec.size||'').trim());
+      return documentFacts?[spec]:[];
     });
   return requests.every(request=>services.some(service=>documentRequestSupported({supplierServices:[service]},
     {supplierServiceId:service.id,subcategoryCode:'document_printing'},request)));

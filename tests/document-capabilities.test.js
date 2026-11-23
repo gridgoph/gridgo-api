@@ -5,6 +5,7 @@ import { matchShop } from '../src/order-match.js';
 import { expressCatalogOptions, expressStatus } from '../src/express-orders.js';
 import { createSignupDocuments, supplierSupportsDocumentOrder } from '../src/document-capabilities.js';
 import { routeExpressOrders } from '../src/express-routes.js';
+import { routeSupplierCatalog } from '../src/catalog-routes.js';
 const AT='2026-09-23T01:00:00.000Z';
 function setup() {
   const f=fixture({express:true});
@@ -65,4 +66,47 @@ test('manual supplier eligibility also respects immutable document print facts',
   store.orderLineItems=[{id:'saved_line',orderId:'normal',sourceCatalogItemId:store.catalogItems[0].id,structuredSpecSnapshot:{size:'A4'}}];
   store.orderLineItemOptions=[{orderLineItemId:'saved_line',groupNameSnapshot:'Colour',optionLabelSnapshot:'Colour'}];
   assert.equal(supplierSupportsDocumentOrder(store,'shop_a',{id:'normal'}),false);
+});
+
+test('accepted document specifications remain guarded without the original document listing',()=>{
+  const {store}=setup();
+  store.catalogItems[0].subcategoryCode='booklets';
+  for(const spec of [{size:'a3'},{colourMode:'colour'},{sides:'two'}]) {
+    store.orderLineItems=[{id:'accepted',orderId:'normal',sourceCatalogItemId:store.catalogItems[0].id,
+      pricingUnitSnapshot:'per_page',structuredSpecSnapshot:spec}];
+    assert.equal(supplierSupportsDocumentOrder(store,'shop_a',{id:'normal'}),false);
+    assert.equal(supplierSupportsDocumentOrder(store,'shop_b',{id:'normal'}),true);
+    store.orderLineItems[0].sourceCatalogItemId=null;
+    assert.equal(supplierSupportsDocumentOrder(store,'shop_a',{id:'normal'}),false);
+  }
+  // Historical lines can lack a pricing unit; their accepted options still apply.
+  store.orderLineItems=[{id:'accepted',orderId:'normal',structuredSpecSnapshot:{}}];
+  store.orderLineItemOptions=[{orderLineItemId:'accepted',groupNameSnapshot:'Colour',optionLabelSnapshot:'Colour'}];
+  assert.equal(supplierSupportsDocumentOrder(store,'shop_a',{id:'normal'}),false);
+  store.orderLineItemOptions=[];
+  store.orderLineItems[0].structuredSpecSnapshot={size:'3 x 5 feet',material:'vinyl'};
+  assert.equal(supplierSupportsDocumentOrder(store,'shop_a',{id:'normal'}),true);
+});
+
+test('ordinary checkout keeps document capability requirements after a private product edit',async()=>{
+  const {store,client}=setup();let sequence=0;const id=p=>`normal_${p}_${++sequence}`;
+  store.files.find(f=>f.fileId==='file_art').detected={pageCount:2};
+  const [service]=createSignupDocuments(store,'shop_b',{papers:['a3'],colours:['colour'],duplex:true,a3PricesMinor:{colour:1700},finishing:{}},{id,at:AT});
+  service.state='live';const item=store.catalogItems.at(-1);item.reviewStatus='approved';
+  store.catalogItemPhotos.push({catalogItemId:item.id,fileId:'photo_item_shop_b',sortOrder:0});
+  const optionIds=store.catalogOptionGroups.filter(g=>g.catalogItemId===item.id)
+    .map(g=>store.catalogOptions.filter(o=>o.optionGroupId===g.id).at(-1).id);
+  const call=caller(store,client,AT);
+  const cart=(await call('POST','/me/carts',{fulfillmentMode:'pickup'})).body.cart;
+  await call('POST',`/me/carts/${cart.id}/lines`,{catalogItemId:item.id,expectedVersion:1,expectedServiceVersion:1,
+    optionIds,quantity:1,structuredSpec:{size:'a3',colourMode:'colour',sides:'two'},artworkFileId:'file_art',printLayout:'fit_to_paper'});
+  const placed=await call('POST',`/me/carts/${cart.id}/checkout`,{payment:{method:'qr_manual',proofFileId:'file_qr',reference:'DOCUMENT'}});
+  const order=store.orders.find(o=>o.id===placed.body.order.id);
+  assert.equal(supplierSupportsDocumentOrder(store,'shop_a',order),false);
+  const edited=await routeSupplierCatalog({req:{method:'PATCH'},url:new URL(`http://test/me/catalog-items/${item.id}`),store,
+    user:{id:'shop_b',role:'supplier'},readBody:async()=>({expectedVersion:1,subcategoryCode:'booklets'}),id,now:()=>AT,audit:()=>{}});
+  assert.equal(edited.status,200);assert.equal(item.reviewStatus,'pending');
+  assert.equal(item.approvedSnapshot.item.subcategoryCode,'document_printing');
+  assert.equal(supplierSupportsDocumentOrder(store,'shop_a',order),false);
+  assert.deepEqual(store.orderLineItems[0].structuredSpecSnapshot,{size:'a3',colourMode:'colour',sides:'two'});
 });

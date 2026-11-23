@@ -11,14 +11,17 @@ import { defaultTaxonomy } from '../src/taxonomy.js';
 import { createSignupDocuments } from '../src/document-capabilities.js';
 import { routeOrderMatch } from '../src/order-match-routes.js';
 import { startExpressAcceptance } from '../src/express-orders.js';
+import { deviceAcceptsNotification } from '../src/push-outbox.js';
+import { notificationVisible } from '../src/notifications.js';
 const skip=!process.env.DATABASE_URL;
 const supplier={headers:{'X-GRIDGO-Role':'supplier'}};
 const ok=r=>{assert.ok(r.status>=200&&r.status<300,JSON.stringify(r.body));return r.body;};
-async function setup(t,emptyOrders=false) {
+async function setup(t,emptyOrders=false,prepare=()=>{}) {
   const db=createDatabase(process.env);t.after(()=>db.close());
   await resetDatabase(db,'TRUNCATE users, platform_settings, taxonomy_categories, accepted_file_formats RESTART IDENTITY CASCADE');
   const store=fixture();store.taxonomy=defaultTaxonomy();
   if(emptyOrders)for(const key of ['orders','orderJobs','orderLineItems','orderLineItemOptions','orderInvoices'])store[key]=[];
+  prepare(store);
   await db.transaction(()=>saveStore(db,store));
   const clerk=http.createServer((req,res)=>{
     const subject=/^\/v1\/users\/([^/?]+)/.exec(req.url)?.[1];
@@ -136,4 +139,59 @@ test('destination pause blocks payout preparation and recording without reservin
   const store=await loadStore(db);
   assert.equal(store.orders[0].payoutMilestones[0].status,'pending_pof');
   assert.equal(store.supplierVerificationLedger.length,0);
+});
+
+for(const [label,spec] of [['paper',{size:'a3',colourMode:'bw',sides:'one'}],['colour',{size:'a4',colourMode:'colour',sides:'one'}],['duplex',{size:'a4',colourMode:'bw',sides:'two'}]]) {
+  test(`private product reclassification cannot bypass accepted document ${label} in eligibility or assignment`,{skip},async t=>{
+    const {db,api}=await setup(t,false,store=>{
+      for(const service of store.supplierServices)service.categoryCode='document_publication';
+      for(const item of store.catalogItems)item.subcategoryCode='document_printing';
+      store.supplierServices.find(s=>s.supplierId==='replacement').documentCapabilities={papers:['a4'],colours:['bw'],duplex:false};
+      store.orderLineItems[0].structuredSpecSnapshot=spec;
+      store.orderLineItems[0].pricingUnitSnapshot='per_page';
+      Object.assign(store.orders[0],{state:'approved_for_matching',fileCheck:{status:'passed'}});
+    });
+    const candidate=async()=>ok(await api('ops','GET','/orders/order/eligible-suppliers')).candidates.find(c=>c.supplier.id==='replacement');
+    assert.equal((await candidate()).eligible,false);
+    ok(await api('supplier','PATCH','/me/catalog-items/item_supplier',{expectedVersion:1,subcategoryCode:'booklets'},supplier));
+    const edited=(await loadStore(db)).catalogItems.find(i=>i.id==='item_supplier');
+    assert.equal(edited.subcategoryCode,'booklets');assert.equal(edited.reviewStatus,'pending');
+    assert.equal(edited.approvedSnapshot.item.subcategoryCode,'document_printing');
+    const after=await candidate();
+    assert.equal(after.eligible,false);assert.ok(after.reasons.includes('document_capability_unavailable'));
+    const assigned=await api('ops','POST','/orders/order/transition',{state:'supplier_assigned',supplierId:'replacement',note:'Review assignment'});
+    assert.equal(assigned.status,409);assert.equal(assigned.body.error,'supplier_not_eligible');
+    assert.ok(assigned.body.reasons.includes('document_capability_unavailable'));
+    const saved=await loadStore(db);
+    assert.equal(saved.orders[0].supplierId,'supplier');
+    assert.deepEqual(saved.orderLineItems[0].structuredSpecSnapshot,spec);
+  });
+}
+
+test('owner rejection reaches the registering Manager inbox and push without granting Staff owner notices',{skip},async t=>{
+  const {db,api}=await setup(t);await enroll(api);
+  const selected={headers:{'X-GRIDGO-Role':'supplier','X-GRIDGO-Shop-Id':'client'}};
+  const invite=ok(await api('client','POST','/me/shop-team/invites',{kind:'owner'},selected));
+  assert.equal(ok(await api('other','POST','/auth/shop-invites/claim',{token:invite.token,choice:'not_right'})).paused,true);
+  const store=await loadStore(db);
+  assert.equal(store.supplierProfiles.find(p=>p.userId==='client').isClosed,true);
+  const notice=store.notifications.find(n=>n.userId==='client'&&n.type==='shop_ownership_disputed');
+  assert.ok(notice);
+  const inbox=ok(await api('client','GET','/notifications?role=supplier',null,selected));
+  assert.ok(inbox.notifications.some(n=>n.id===notice.id));
+  const device={userId:'client',appRole:'supplier',platform:'android'};
+  assert.equal(deviceAcceptsNotification(store,device,notice),true);
+  assert.equal(notificationVisible(store,notice,'client','supplier',{shopId:'supplier'}),false);
+  for(const type of ['supplier_payout_account_changed','shop_invite_claimed']) {
+    assert.equal(notificationVisible(store,{...notice,type},'client','supplier',{shopId:'client'}),false);
+    assert.equal(deviceAcceptsNotification(store,device,{...notice,type}),false);
+  }
+  const member=store.shopMemberships.find(m=>m.userId==='client'&&m.shopId==='client');
+  member.status='removed';
+  assert.equal(notificationVisible(store,notice,'client','supplier',{shopId:'client'}),false);
+  assert.equal(deviceAcceptsNotification(store,device,notice),false);
+  member.status='active';
+  store.shopTeamMemberSettings.find(s=>s.userId==='client'&&s.shopId==='client').manager=false;
+  assert.equal(notificationVisible(store,notice,'client','supplier',{shopId:'client'}),false);
+  assert.equal(deviceAcceptsNotification(store,device,notice),false);
 });
