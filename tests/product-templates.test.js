@@ -540,3 +540,44 @@ test("a zero base with a positive required option remains priced during migratio
     ),
   );
 });
+
+test("legacy variant merges with bulk or rush overrides require manual configuration", () => {
+  const s = setup();
+  s.orders = [];
+  s.orderJobs = [];
+  s.orderLineItems = [];
+  const a = s.catalogItems[0];
+  a.name = "A4";
+  const b = { ...a, id: "a3", name: "A3", sortOrder: 3, basePriceMinor: 2000 };
+  s.catalogItems.push(b);
+  s.catalogPriceTiers.push(
+    ...[a, b].map((i) => ({
+      id: "bulk_" + i.id,
+      catalogItemId: i.id,
+      minQuantity: 100,
+      unitPriceMinor: 500,
+    })),
+  );
+  const plan = migrationPlan(s, "supplier", {
+    mergeGroups: [{ keepId: a.id, sourceIds: [b.id] }],
+  });
+  assert.equal(plan.actions.length, 0);
+  assert.ok(
+    plan.manual.every(
+      (r) => r.reason === "merge_requires_manual_configuration",
+    ),
+  );
+});
+test("legacy colour-tier products cannot silently ignore a replacement full price table", async () => {
+  const s = setup(),
+    a = s.catalogItems[0];
+  a.templateData = { templateId: "tpl_flyers", shopConfirmed: true };
+  a.pricedByColour = true;
+  await assert.rejects(
+    call(s, "supplier", "PUT", `/me/template-products/${a.id}`, {
+      ...product(s),
+      expectedVersion: a.version,
+    }),
+    { code: "template_manual_conversion_required" },
+  );
+});

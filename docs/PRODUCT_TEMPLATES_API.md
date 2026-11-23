@@ -69,7 +69,9 @@ shop headers. Existing shop-team owner restrictions apply.
    ready time and bulk/rush fields with `expectedVersion`. Omitted bulk/rush
    arrays clear those offers. Repricing an unpriced migrated item may select its
    template explicitly. `item.template` carries confirmation, review flags,
-   chosen ready-time code and template version.
+   chosen ready-time code and template version. Colour-tier legacy products retain
+   their existing editor; a full-table PUT returns
+   `409 template_manual_conversion_required` until the team reviews conversion.
 4. **Ready-by example before saving:** `POST /me/template-products/preview` with
    the complete proposed creation body (or `itemId` for an owned product being
    edited). Returns `{item,prices,scheduling,calendar,productionTime}` without
@@ -188,7 +190,7 @@ matches are suggested, exactly identical pricing/configuration duplicates are
 merged, and zero-effective-price products are hidden. Ambiguous families require
 `templateMatches` or manual work. Explicit variant merges accept simple flat
 listings with identical service, pricing unit, turnaround, formats and other
-pricing rules, distinct variant labels, and positive full prices. Complex option
+pricing rules, distinct variant labels, and positive full prices. Bulk/rush override tables, colour tiers, complex options
 or differing pricing configurations are reported for manual work, never guessed.
 
 Review the preview, then repeat it with `dryRun:false` and

@@ -79,6 +79,12 @@ export function createProduct(
   item = null,
 ) {
   object(body);
+  if (item?.pricedByColour)
+    fail(
+      "template_manual_conversion_required",
+      "Keep this colour-tier product in the existing editor until the GRIDGO team reviews its conversion.",
+      409,
+    );
   const template = templateFor(
     store,
     body.templateId || item?.templateData?.templateId,
@@ -196,6 +202,11 @@ export function createProduct(
           ? "per_area"
           : "per_unit",
     measureUnit: template.unit === "sq_ft" ? "ft" : null,
+    minimumWidthMilli:
+      template.unit === "sq_ft" ? (item.minimumWidthMilli ?? null) : null,
+    minimumHeightMilli:
+      template.unit === "sq_ft" ? (item.minimumHeightMilli ?? null) : null,
+    minimumLengthMilli: null,
     packageQty: null,
     printerMaxWidthFeet:
       template.subcategoryCode === "tarpaulins_outdoor_banners" ? width : null,
@@ -212,7 +223,7 @@ export function createProduct(
     templateId: template.id,
     templateVersion: template.version,
     managed: true,
-    priceOnly: true,
+    priceOnly: !store.catalogOptionGroups.some(group => group.catalogItemId === item.id && group.kind === "addon"),
     unit: template.unit,
     readyTime: chip.code,
     stockPhotos: structuredClone(template.stockPhotos),

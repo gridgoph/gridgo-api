@@ -177,6 +177,12 @@ export function migrationPlan(store, supplierId, choices = {}) {
           (row.reviewStatus && row.reviewStatus !== "approved") ||
           row.basePriceMinor <= 0 ||
           row.pricedByColour ||
+          (store.catalogPriceTiers || []).some(
+            (tier) => tier.catalogItemId === row.id,
+          ) ||
+          (store.catalogSpeedTiers || []).some(
+            (tier) => tier.catalogItemId === row.id,
+          ) ||
           catalogGroupsForItem(store, row.id).length ||
           stableShape(row) !== stableShape(rows[0]),
       )
