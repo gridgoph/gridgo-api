@@ -88,6 +88,17 @@ test('accepted document specifications remain guarded without the original docum
   assert.equal(supplierSupportsDocumentOrder(store,'shop_a',{id:'normal'}),true);
 });
 
+test('historical paper-only snapshots recognize full paper labels without a source listing',()=>{
+  const {store}=setup();
+  store.orderLineItems=[{id:'historical',orderId:'normal',structuredSpecSnapshot:{size:'A3 (297 x 420 mm)'}}];
+  assert.equal(supplierSupportsDocumentOrder(store,'shop_a',{id:'normal'}),false);
+  assert.equal(supplierSupportsDocumentOrder(store,'shop_b',{id:'normal'}),true);
+  store.orderLineItems[0].structuredSpecSnapshot={};
+  store.orderLineItemOptions=[{orderLineItemId:'historical',groupNameSnapshot:'Paper size',optionLabelSnapshot:'A3 (297 x 420 mm)'}];
+  assert.equal(supplierSupportsDocumentOrder(store,'shop_a',{id:'normal'}),false);
+  assert.equal(supplierSupportsDocumentOrder(store,'shop_b',{id:'normal'}),true);
+});
+
 test('ordinary checkout keeps document capability requirements after a private product edit',async()=>{
   const {store,client}=setup();let sequence=0;const id=p=>`normal_${p}_${++sequence}`;
   store.files.find(f=>f.fileId==='file_art').detected={pageCount:2};

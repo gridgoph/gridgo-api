@@ -72,7 +72,7 @@ export function supplierSupportsDocumentOrder(store,supplierId,order) {
       const documentFacts=line.expressPrint || spec.subcategoryCode==='document_printing'
         || line.pricingUnitSnapshot==='per_page' || line.pricingBasisSnapshot==='per_page'
         || ['paper','colour','colourMode','sides'].some(key=>spec[key])
-        || /^(?:a[34]|short|long|letter|legal|folio)$/i.test(String(spec.size||'').trim());
+        || /\ba[34]\b|short|long|letter|legal|folio|8[.]5.*(?:11|13)/i.test(String(spec.size||''));
       return documentFacts?[spec]:[];
     });
   return requests.every(request=>services.some(service=>documentRequestSupported({supplierServices:[service]},
