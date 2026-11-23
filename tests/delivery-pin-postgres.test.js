@@ -156,6 +156,10 @@ test('lower-zone credit uses reserved manual refund without cancelling work or s
   const stored = await loadStore(db);
   assert.equal(stored.orders[0].state, 'supplier_self_qc');
   assert.deepEqual(stored.orders[0].payoutMilestones, before.payoutMilestones);
+  const money=await api('supplier','GET','/me/shop-money');
+  assert.equal(money.status,200);
+  assert.equal(money.body.balances.owedMinor,10000,'delivery-only credits retain unpaid shop principal');
+  assert.equal(money.body.balances.owingMinor,0);
   const orderRead = (await api('client', 'GET', '/orders/order')).body.order;
   assert.equal(orderRead.refundHold, false);
   assert.equal(orderRead.refundDisposition, null);

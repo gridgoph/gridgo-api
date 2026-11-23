@@ -1,4 +1,5 @@
 import { shopPaused } from './shop-availability.js';
+import {shopMoneyPaused} from './shop-money-policy.js';
 import { supplierVerified, supplierCanWork, verificationSummary } from "./supplier-verification.js";
 /** Missing standing retains the legacy active-account default. */
 export function supplierAccountIsActive(accountStatus) {
@@ -12,6 +13,7 @@ export function supplierMatchBlockersFor(store, clock = new Date().toISOString()
   const members = new Set((store.userRoleMemberships || []).filter(row => row.role === "supplier").map(row => row.userId));
   return (supplierId, profile) => {
     const missing = [];
+    if(shopMoneyPaused(store,supplierId,at))missing.push('shop_payment_overdue');
     if (!supplierAccountIsActive(accountStatuses.get(supplierId))) missing.push("account_inactive");
     if (!profile) missing.push("supplier_profile");
     else {
