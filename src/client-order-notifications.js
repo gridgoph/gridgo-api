@@ -188,6 +188,7 @@ export function stateOccurrence(order) {
 }
 
 export function clientNotificationDraft(order) {
+  if (order?.groupOrder) return null;
   if (!order?.clientId || !order.id || !order.state) return null;
   const collecting = order.fulfillmentMode === "pickup";
   const copy = resolveCopy(
@@ -440,6 +441,7 @@ export function receiptReadyDraft(order) {
 }
 
 export function notifyClientReceiptReady(store, order, { createId, at }) {
+  if(order.groupOrder)return {notification:null,created:false};
   return writeDraft(store, receiptReadyDraft(order), { id: createId("ntf"), at });
 }
 

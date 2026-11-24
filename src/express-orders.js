@@ -1,3 +1,4 @@
+import { groupExpressMoved, cancelGroupExpressOrder } from './group-express-recovery.js';
 import { supplierVerified, rankVerifiedWithinDistance } from "./supplier-verification.js";
 import { staffExpressProjection } from './shop-staff-order.js';
 import { assertDocumentRequest } from './document-capabilities.js';
@@ -99,25 +100,28 @@ export function expressStatus(order) {
 }
 export function publicExpress(order,user) {
   const e=order.expressOrder;if(!e)return null;
-  const own=user?.id===order.clientId, staff=['ops_admin','super_admin'].includes(user?.role), shop=user?.id===order.supplierId;
+  const own=user?.role==='client'&&user.id===order.clientId, staff=['ops_admin','super_admin'].includes(user?.role), shop=user?.role==='supplier'&&user.id===order.supplierId;
   if(!own&&!staff&&!shop&&user?.id!==order.riderId)return null;
   const result = {status:expressStatus(order),paymentTiming:e.paymentTiming||'checkout',originalSupplierId:e.originalSupplierId,currentSupplierId:order.supplierId,declineCount:e.declines,
     acceptBy:order.shopAcceptance?.status==='pending'?order.shopAcceptance.deadlineAt:null,
     events:structuredClone(e.events||[]),refundRequired:e.refundRequired===true,repickRequired:e.repickRequired===true,payBy:e.payBy||null,
     ...(own&&order.fulfillmentMode==='pickup'&&['ready','picked_up'].includes(expressStatus(order))?{pickupCode:e.pickupCode}:{}),
     ...(own||staff||shop?{printSettings:structuredClone(e.printSettings||[])}:{})};
-  if(own&&!staff&&!shop)for(const print of result.printSettings||[])delete print.rateMinor;
+  if(own&&!staff&&!shop) {
+    if(order.groupOrder)result.printSettings=result.printSettings.filter(p=>p.groupMemberId===user.id);
+    for(const print of result.printSettings||[])delete print.rateMinor;
+  }
   return ['staff','manager'].includes(user?.shopRole) ? staffExpressProjection(result) : result;
 }
 export function startExpressAcceptance(order,at) {
-  order.shopAcceptance={supplierId:order.supplierId,assignedAt:at,deadlineAt:new Date(Date.parse(at)+EXPRESS_ACCEPT_MS).toISOString(),workingMinutes:5,status:'pending'};
+  order.shopAcceptance={supplierId:order.supplierId,assignedAt:at,deadlineAt:new Date(Date.parse(order.groupOrder?.shopDecision?.status==='pending'?order.groupOrder.shopDecision.deadlineAt:at)+EXPRESS_ACCEPT_MS).toISOString(),workingMinutes:5,status:'pending'};
   order.expressOrder.events.push({state:'sending',supplierId:order.supplierId,at});
 }
 export function expressEvent(store,order,state,{at,id,actorId=null,reason=null}) {
   order.updatedAt=at;
   (order.expressOrder.events||=[]).push({state,at,supplierId:order.supplierId});
   (store.auditLog||=[]).push({id:id('aud'),at,actorId,actorRole:actorId?'supplier':'system',action:`express.${state}`,entityType:'order',entityId:order.id,orderId:order.id,reason,detail:{supplierId:order.supplierId,declines:order.expressOrder.declines}});
-  for(const recipient of [{userId:order.clientId,role:'client'},{userId:order.supplierId,role:'supplier'},...privilegedAdminMemberships(store)]) {
+  for(const recipient of [{userId:order.clientId,role:'client'},{userId:order.supplierId,role:'supplier'},...privilegedAdminMemberships(store)].filter(r=>!order.groupOrder||r.userId!==order.clientId)) {
     (store.notifications||=[]).push({id:id('ntf'),at,userId:recipient.userId,appRole:recipient.role,type:'express_order',orderId:order.id,title:'Express order update',body:`Your Express order is ${state.replaceAll('_',' ')}.`,read:false});
   }
   queueOrderInvalidate(store,order,['orders','jobs','notifications']);
@@ -147,6 +151,7 @@ export function declineExpress(store,order,{at,id,kind='declined',actorId=null,r
     if(replacement.nightWindow)e.nightWindow=structuredClone(replacement.nightWindow);else delete e.nightWindow;
     order.pickup=structuredClone(store.supplierProfiles.find(p=>p.userId===replacement.supplierId).shop);
     for(const job of store.orderJobs||[])if(job.orderId===order.id){job.supplierId=order.supplierId;job.pickup=structuredClone(order.pickup);job.updatedAt=at;}
+    groupExpressMoved(store,order,{at,id});
     expressEvent(store,order,'moved',{at,id,actorId,reason:kind==='timed_out'?'No response within five minutes.':reason});startExpressAcceptance(order,at);
   } else {
     if(manual)e.repickRequired=true;
@@ -154,13 +159,14 @@ export function declineExpress(store,order,{at,id,kind='declined',actorId=null,r
     e.refundRequired=Object.values(order.payments||{}).some(p=>p.status==='confirmed');
     for(const job of store.orderJobs||[])if(job.orderId===order.id){job.state='cancelled';job.updatedAt=at;}
     order.timeline.push({at,state:'cancelled',by:'system',note:order.cancellationReason});
+    if(order.groupOrder)cancelGroupExpressOrder(store,order,e.declines>=3?'three_declines':'no_shop_in_zone',{at,id});
     expressEvent(store,order,'cancelled',{at,id,actorId,reason:kind==='timed_out'?'No response within five minutes.':reason});
   }
 }
 export function createExpressSnapshot(cart,lines,at) {
  return {version:1,originalSupplierId:lines[0].supplierId,location:structuredClone(cart.expressLocation),declines:0,declinedSupplierIds:[],
   pickupCode:String(randomInt(1000000)).padStart(6,'0'),events:[{state:'sending',at,supplierId:lines[0].supplierId}],
-  printSettings:lines.map(line=>({fileId:line.artworkFileId,pages:structuredClone(line.documentPages),copies:line.quantity,
+  printSettings:lines.map(line=>({...((line.expressPrint.groupMemberId)?{groupMemberId:line.expressPrint.groupMemberId,groupMemberName:line.expressPrint.groupMemberName}:{}),fileId:line.artworkFileId,pages:structuredClone(line.documentPages),copies:line.quantity,
     colour:line.expressPrint.colour,paper:line.expressPrint.paper,paperStock:line.expressPrint.paperStock,sides:line.expressPrint.sides,
     ...(line.expressPrint.productType?{productType:line.expressPrint.productType}:{}),
     ...(line.expressPrint.paper==='a3'||line.expressPrint.productType==='plans'?{rateMinor:line.expressPrint.rateMinor}:{}),layout:line.printLayout,note:line.specialInstructions||'',acceptedWarnings:structuredClone(line.expressPrint.acceptedWarnings)}))};

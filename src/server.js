@@ -1,3 +1,5 @@
+import { routeExpressGroups } from './express-group-routes.js';
+import { sweepGroups, validateGroupSettings } from './express-groups.js';
 import { templatePhotoKey } from './product-template-media.js';
 import {routeShopMoney,syncShopMoney,sweepShopMoney,shopMoneySettings,shopMoneyWorkDue,shopMoneyChanged} from './shop-money.js';
 import {validateShopMoneySettings} from './shop-money-settings.js';
@@ -495,6 +497,7 @@ async function save(view, { notificationsOnly = false } = {}) {
     await realtimeTransport.enqueue(store, created);
     return;
   }
+  validateGroupSettings(store.settings);
   const scope = clientSaveScope(store);
   const maintenance = saveMaintenanceView(store);
   if (!scope) {
@@ -600,8 +603,13 @@ async function save(view, { notificationsOnly = false } = {}) {
   deriveMissingAudit(store, originalDomainStore(store));
   recordOrderActions(store, originalDomainStore(store));
   deriveDomainEvents(store, originalDomainStore(store), {createId:id,at:now()});
+  sweepGroups(store,{id,at:now()});
   notifyShopStaff(store, originalDomainStore(store), { id });
   labelReviewNotifications(store, originalDomainStore(store));
+  for(const n of store.notifications||[]) {
+    const o=n.orderId&&store.orders.find(o=>o.id===n.orderId);
+    if(o?.groupOrder&&n.userId===o.clientId&&(!n.appRole||n.appRole==='client')&&['express_order','order_supplier_accepted','order_assignment_changed','order_receipt_ready','order_rate_reminder'].includes(n.type))n.push=false;
+  }
   const previousNotificationIds = originalNotificationIds(store);
   const createdNotifications = (store.notifications || []).filter(
     (notification) => !previousNotificationIds.has(notification.id),
@@ -3644,6 +3652,14 @@ async function handleAuditedRequest(req, res) {
       if (shopStatusResponse.mutated) await save(store);
       return send(res, shopStatusResponse.status, shopStatusResponse.body);
     }
+    const groupResponse=await routeExpressGroups({req,url,store,user,readBody,id,now,database});
+    if(groupResponse){
+      if(groupResponse.mutated){
+        audit(store,{actor:user,action:'express_group.change',entityType:'express_group',entityId:groupResponse.body.group?.id||null,orderId:groupResponse.body.orderId||null});
+        await save(store);
+      }
+      return send(res,groupResponse.status,groupResponse.body);
+    }
     const expressResponse=await routeExpressOrders({req,url,store,user,readBody,id,now,audit});
     if(expressResponse) {
       if(expressResponse.mutated) await save(store);
@@ -4560,6 +4576,7 @@ async function handleAuditedRequest(req, res) {
         shopMoney: Object.hasOwn(body,"shopMoney") ? {...shopMoneySettings(store.settings),...body.shopMoney,launchedAt:shopMoneySettings(store.settings).launchedAt} : shopMoneySettings(store.settings),
         supplierVerification: Object.hasOwn(body,"supplierVerification") ? body.supplierVerification : verificationSettings(store.settings),
         expressRates: Object.hasOwn(body,"expressRates") ? body.expressRates : expressRates(store.settings),
+        groupPaymentTimeoutMinutes: Object.hasOwn(body,"groupPaymentTimeoutMinutes") ? body.groupPaymentTimeoutMinutes : (store.settings.groupPaymentTimeoutMinutes??10),
         cash: Object.hasOwn(body,'cash') ? (body.cash && typeof body.cash==='object' && !Array.isArray(body.cash)
           ? {...cashSettings(store.settings),...body.cash}:body.cash) : cashSettings(store.settings),
         riderOfferTimeoutSeconds: Object.hasOwn(body, 'riderOfferTimeoutSeconds') ? body.riderOfferTimeoutSeconds : offerTimeoutSeconds(store.settings),
@@ -8532,6 +8549,10 @@ async function runLifecycleWork() {
           AND p.status='not_submitted'
           AND (o.data#>>'{expressOrder,payBy}')::timestamptz <= now() LIMIT 1`);
         if(candidate.rowCount)await enqueueMutation(async()=>{const store=await load();if(expireExpressPayments(store,{at:now(),id}))await save(store);});
+      },
+      async () => {
+        const due=await database.query(`SELECT 1 FROM express_groups WHERE state IN ('open','checkout_open','ordered') AND ${activeOrderSql("(data->>'orderId')")} UNION ALL SELECT 1 FROM express_group_members m JOIN express_groups g ON g.id=m.group_id WHERE jsonb_array_length(COALESCE(m.data->'pushPending','[]'))>0 AND ${activeOrderSql("(g.data->>'orderId')")} LIMIT 1`);
+        if(due.rowCount)await enqueueMutation(async()=>{const s=await load();if(sweepGroups(s,{id,at:now()}))await save(s);});
       },
       () => sweepDispatchOffers(true),
       async () => {
