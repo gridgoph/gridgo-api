@@ -100,7 +100,7 @@ export function expressStatus(order) {
 }
 export function publicExpress(order,user) {
   const e=order.expressOrder;if(!e)return null;
-  const own=user?.id===order.clientId, staff=['ops_admin','super_admin'].includes(user?.role), shop=user?.id===order.supplierId;
+  const own=user?.role==='client'&&user.id===order.clientId, staff=['ops_admin','super_admin'].includes(user?.role), shop=user?.role==='supplier'&&user.id===order.supplierId;
   if(!own&&!staff&&!shop&&user?.id!==order.riderId)return null;
   const result = {status:expressStatus(order),paymentTiming:e.paymentTiming||'checkout',originalSupplierId:e.originalSupplierId,currentSupplierId:order.supplierId,declineCount:e.declines,
     acceptBy:order.shopAcceptance?.status==='pending'?order.shopAcceptance.deadlineAt:null,

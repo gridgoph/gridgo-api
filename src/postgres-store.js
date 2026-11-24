@@ -172,6 +172,8 @@ export function emptyStore() {
   return {
     ...emptyStaffStore(),
     ...emptyShopTeam(),
+    expressGroups: [],
+    expressGroupMembers: [],
     supplierVerificationLedger: [],
     shopMoneyLedger: [],
     shopMoneyEvents: [],

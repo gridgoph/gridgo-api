@@ -28,3 +28,10 @@ test('allocation keeps empty people at zero printing and handles a fully funded 
  const amounts=groupAmounts(ms,'h',{printingMinor:601,deliveryMinor:0,totalMinor:601},[300,300,0]);assert.equal(amounts[2].amountOwedMinor,0);assert.equal(amounts.reduce((n,a)=>n+a.amountOwedMinor,0),601);
  const funded=groupAmounts(ms,'h',{printingMinor:0,deliveryMinor:0,totalMinor:0},[300,300,0]);assert.ok(funded.every(a=>a.amountOwedMinor===0));
 });
+test('shared host/shop identity uses the selected role for peer files and pickup codes',async()=>{
+ const {publicExpress}=await import('../src/express-orders.js');
+ const order={clientId:'shared',supplierId:'shared',state:'ready_for_dispatch',fulfillmentMode:'pickup',groupOrder:{id:'g'},expressOrder:{pickupCode:'123456',events:[],printSettings:[{fileId:'host_file',groupMemberId:'shared'},{fileId:'peer_file',groupMemberId:'peer'}]}};
+ const client=publicExpress(order,{id:'shared',role:'client'}),shop=publicExpress(order,{id:'shared',role:'supplier'});
+ assert.deepEqual(client.printSettings.map(p=>p.fileId),['host_file']);assert.equal(client.pickupCode,'123456');
+ assert.equal(shop.pickupCode,undefined);assert.equal(shop.printSettings.length,2);
+});
