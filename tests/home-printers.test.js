@@ -159,7 +159,7 @@ test('legacy home orders keep old pickup coordinates private after the profile m
 test('home names and address interpolated in legacy text are redacted without corrupting role or IDs',()=>{
  const {store,profile,client}=setup();
  profile.contactName='Private named contact';
- const body={supplier:{id:profile.userId,role:'supplier',name:profile.contactName},note:`Ask ${profile.contactName} at ${profile.shop.label}`};
+ const body={supplierId:profile.userId,supplier:{id:profile.userId,role:'supplier',name:profile.contactName},note:`Ask ${profile.contactName} at ${profile.shop.label}`};
  const result=home.homePrinterResponse(store,body,client);
  assert.equal(JSON.stringify(result).includes(profile.contactName),false);assert.equal(JSON.stringify(result).includes(profile.shop.label),false);
  assert.equal(result.supplier.id,profile.userId);assert.equal(result.supplier.role,'supplier');
@@ -174,4 +174,16 @@ test('home shop imagery stays private even when a client retains old media or fi
  assert.equal(publicCatalogMediaFile(store,file.fileId),null);
  assert.throws(()=>authorizeFileRead(client,store,file),e=>e.status===403);
  assert.doesNotThrow(()=>authorizeFileRead({id:profile.userId,role:'supplier'},store,file));
+});
+test('untrusted home names cannot corrupt signed URLs or unrelated client text',()=>{
+ const {store,profile,client}=setup();profile.shopName='https';profile.contactName='client';
+ const url='https://storage.example.invalid/private/file?signature=opaque';
+ const body={supplierId:profile.userId,photos:[{downloadUrl:url}],artworkLink:'https://design.example.invalid/view',reference:'https',layout:'client',
+  unrelated:{id:client.id,role:'client',name:'client'}};
+ const result=home.homePrinterResponse(store,body,client);
+ assert.equal(result.photos[0].downloadUrl,url);
+ assert.equal(result.artworkLink,body.artworkLink);
+ assert.equal(result.reference,'https');assert.equal(result.layout,'client');
+ const unrelated=home.homePrinterResponse(store,{title:'client document',user:{id:client.id,role:'client',name:'client'}},client);
+ assert.equal(unrelated.title,'client document');assert.equal(unrelated.user.name,'client');
 });

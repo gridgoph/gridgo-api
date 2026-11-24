@@ -100,12 +100,22 @@ export function homePrinterResponse(store,value,user) {
   privateNames:[p.shopName,p.contactName,store.users?.find(u=>u.id===p.userId)?.name],privateDetails:[p.shop?.label,p.homePrinter.landmark]}));
  for(const o of orders)for(const h of [metadata.get(o.id),o.homePrinter,...o.homePrinterHistory||[]].filter(h=>h&&!(user?.role==='supplier'&&user.id===h.supplierId)))privateHomes.push({...h,privateDetails:[h.pin?.label,h.landmark]});
  const lookup=id=>privateHomes.find(h=>h.supplierId===id);
- const strings=new Map();
- for(const h of privateHomes)for(const secret of [...h.privateNames||[],...h.privateDetails||[]])if(secret)strings.set(secret,h.barangay);
+ const stringsBySupplier=new Map();
+ for(const h of privateHomes) {
+  const strings=stringsBySupplier.get(h.supplierId)||new Map();
+  for(const secret of [...h.privateNames||[],...h.privateDetails||[]])if(secret)strings.set(secret,h.barangay);
+  stringsBySupplier.set(h.supplierId,strings);
+ }
  function visit(item,context=null,home=null,key='') {
   if(typeof item==='string') {
    if(key==='street'&&context&&homePickupProjection(context,user,metadata.get(context.id)||home||{}).street===item)return item;
+   if(!home)return item;
+   const strings=stringsBySupplier.get(home.supplierId)||new Map();
+   if(/^(?:[a-z][a-z0-9+.-]*:\/\/|\/)/i.test(item))return item;
    if(key==='id'||/(?:Id|Ids)$/.test(key)||['role','appRole','type','state','status','error','purpose','printerType','verificationLevel'].includes(key))return item;
+   // Redact human-readable identity/text fields, never protocol values or
+   // opaque references whose bytes must survive an unrelated profile edit.
+   if(!/(?:Name|Filename)$/.test(key)&&!['name','label','title','body','note','reason','message','address','street','contact','description','text','content','summary','filename'].includes(key))return item;
    if(strings.has(item))return strings.get(item);
    let text=item;
    for(const [secret,barangay] of strings)if(secret.length>=4)text=text.split(secret).join(barangay);
@@ -126,7 +136,7 @@ export function homePrinterResponse(store,value,user) {
   for(const [k,v] of Object.entries(item)) {
    if(k==='homePrinterHistory'||k==='homePrinter'&&!v?.level)continue;
    if(home&&['contactName','phone','email','landmark','propertyType','privateNames','privateDetails','hours','shopHours','schedule'].includes(k))continue;
-   if(home&&['shopName','supplierName'].includes(k)){out[k]=home.barangay;continue;}
+   if(home&&(['shopName','supplierName'].includes(k)||k==='name'&&(item.id===home.supplierId||item.userId===home.supplierId||item.printerType==='home'))){out[k]=home.barangay;continue;}
    if(home&&['distanceMeters','deliveryDistanceMeters','distanceKm'].includes(k)&&Number.isFinite(v)) {
     out[k]=k==='distanceKm'?Math.max(0.5,Math.ceil(v*2)/2):Math.max(500,Math.ceil(v/500)*500);out.distanceApproximate=true;continue;
    }
