@@ -195,4 +195,6 @@ test('home printers retain their personal client identity while their home remai
  assert.equal(own.shop.lat,undefined);assert.equal(own.supplierName,profile.homePrinter.barangay);
  const other=home.homePrinterResponse(store,{user},{id:'another_client',role:'client'}).user;
  assert.equal(other.name,profile.homePrinter.barangay);assert.equal(other.email,undefined);assert.equal(other.phone,undefined);
+ const anonymous=home.homePrinterResponse(store,{supplierId:owner.id,printerType:'home',name:profile.contactName,email:user.email,phone:user.phone});
+ assert.equal(anonymous.name,profile.homePrinter.barangay);assert.equal(anonymous.email,undefined);assert.equal(anonymous.phone,undefined);
 });

@@ -136,7 +136,7 @@ export function homePrinterResponse(store,value,user) {
   for(const [k,v] of Object.entries(item)) {
    // A multi-role identity may read its own personal account in the client app;
    // this does not grant access to its home's shop details or job pickup pin.
-   if(item.id===user?.id&&['name','email','phone'].includes(k)){out[k]=v;continue;}
+   if(user?.id&&item.id===user.id&&['name','email','phone'].includes(k)){out[k]=v;continue;}
    if(k==='homePrinterHistory'||k==='homePrinter'&&!v?.level)continue;
    if(home&&['contactName','phone','email','landmark','propertyType','privateNames','privateDetails','hours','shopHours','schedule'].includes(k))continue;
    if(home&&(['shopName','supplierName'].includes(k)||k==='name'&&(item.id===home.supplierId||item.userId===home.supplierId||item.printerType==='home'))){out[k]=home.barangay;continue;}
