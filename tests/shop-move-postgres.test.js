@@ -5,6 +5,7 @@ import { loadStore, saveStore } from '../src/postgres-store.js';
 import { resetDatabase } from './fixtures/reset-database.js';
 import { fixture, AT } from './fixtures/reschedule.js';
 import { apiForTest } from './fixtures/reschedule-http.js';
+import { parityApiForTest } from './fixtures/read-parity.js';
 
 // Substitute-shop price rule end to end: the database triggers must accept the
 // adjusted stages, the price-difference credit and the fee-free top-up.
@@ -17,11 +18,13 @@ async function setup(t, replacementUnitPriceMinor) {
   const store = fixture(), order = store.orders[0];
   order.readyBy = '2030-10-10T00:00:00.000Z';
   order.promiseBy = '2030-10-10T01:00:00.000Z';
-  order.timeline = [{ at: new Date().toISOString(), state: order.state, by: 'supplier' }];
+  order.timeline = [{ at: AT, state: order.state, by: 'supplier' }];
   store.catalogItems.find((item) => item.supplierId === 'replacement').basePriceMinor = replacementUnitPriceMinor;
   store.files.push(file('refundqr', 'client', 'refund_qr'), file('topup_proof', 'client', 'payment_proof'), file('refundreceipt', 'ops', 'refund_receipt'));
   await db.transaction(() => saveStore(db, store));
-  const api = await apiForTest(t);
+  // The consent compares exact promises across requests. Keep the clock fixed
+  // so a pre-opening request cannot move its promise by a few milliseconds.
+  const api = await parityApiForTest(t, false, Date.parse(AT));
   const cancelled = await api('supplier', 'POST', '/orders/order/shop-cancel', { reason: 'Press broke down' });
   assert.equal(cancelled.status, 200, JSON.stringify(cancelled.body));
   const recovery = (await api('client', 'GET', '/orders/order/shop-recovery')).body.recovery;
@@ -51,7 +54,7 @@ test('cheaper substitute persists net stages and a non-stopping credit paid thro
   };
   await step('ops', 'review', { reason: 'Account verified', destinationVerified: true });
   await step('ops', 'payment-attempts', { reason: 'Sending difference', destinationRevision: 1, destinationVerified: true, provider: 'gcash', sourceWallet: 'ops-wallet' });
-  await step('ops', 'payments', { reason: 'Sent', attemptId: refund.attempt.id, amountMinor: 2000, reference: 'DIFF-1', receiptFileId: 'refundreceipt', paidAt: new Date().toISOString() });
+  await step('ops', 'payments', { reason: 'Sent', attemptId: refund.attempt.id, amountMinor: 2000, reference: 'DIFF-1', receiptFileId: 'refundreceipt', paidAt: AT });
   assert.equal(refund.status, 'paid');
   stored = await loadStore(db);
   assert.equal(stored.orders[0].shopRecovery.status, 'accepted', 'paying the difference never touches the recovery');
