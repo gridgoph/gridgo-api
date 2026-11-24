@@ -4,6 +4,7 @@ import { assertDocumentRequest } from './document-capabilities.js';
 import { pingPrinterDemand } from './printer-demand.js';
 import { isDeepStrictEqual } from 'node:util';
 import { expressRates, expressLinePrice, expressPoint, expressShopList, assertExpressNightJob, expressGuide, updateExpressGuide, createExpressSnapshot, publicExpress, expressClientProjection, expressCatalogOptions } from './express-orders.js';
+import { expressPrinterChoices, fastestPermittedPrinter } from './express-printers.js';
 import { isReviewData, markReviewPayment, reviewCatalogView, REVIEW_CATALOG_TABLES } from './review-data.js';
 import { approvalPolicy, recordApprovalProof } from './approval-proof.js';
 import { publicColourQuote, publicColourListing } from './colour-projection.js';
@@ -463,6 +464,7 @@ function assertListingArtwork(store, item, line) {
 }
 
 function syncDocumentPages(store, item, line, body, { required = false, previousFileId = line.artworkFileId } = {}) {
+  if(line.expressPrint?.productType==='plans')item={...item,pricingUnit:'per_page'};
   const range = Object.hasOwn(body, "pageRange") ? body.pageRange
     : previousFileId !== line.artworkFileId ? null : line.documentPages?.range ?? null;
   const file = (store.files || []).find(row => row.fileId === line.artworkFileId && row.state === "ready" && row.purpose === "artwork");
@@ -1184,7 +1186,8 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   // Snapshotted here, like the rider delivery split: the setting moving later
   // never changes what this client owes.
   const cash = body.payment?.method === 'cash';
-  const paymentAfterAcceptance=cart.orderType==='express'&&cartLines.some(line=>line.expressPrint?.paper==='a3');
+  const paymentAfterAcceptance=cart.orderType==='express'&&cartLines.some(line=>line.expressPrint?.paper==='a3'||line.expressPrint?.productType==='plans');
+  if(paymentAfterAcceptance&&!zeroCashBoundary&&body.payment!=null)fail(409,'express_payment_after_acceptance','Pay for this Express order after the shop accepts.');
   const downpaymentPercent = cash || basketId ? 100 : downpaymentPercentSetting(store.settings);
   const order = {
     id: orderId,
@@ -1319,7 +1322,16 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
         sortOrder: line.sortOrder,
       }, createId);
       snapshot.lineItem.jobId = jobId;
-      if(line.expressPrint) {snapshot.lineItem.expressPrint=structuredClone(line.expressPrint); snapshot.lineItem.effectiveUnitPriceMinor=line.expressPrint.rateMinor; snapshot.lineItem.baseUnitPriceMinor=line.expressPrint.rateMinor;}
+      if(line.expressPrint) {
+        snapshot.lineItem.expressPrint=structuredClone(line.expressPrint);
+        snapshot.lineItem.effectiveUnitPriceMinor=line.expressPrint.rateMinor;
+        snapshot.lineItem.baseUnitPriceMinor=line.expressPrint.rateMinor;
+        // A per-unit plan listing sells sheets. Copies remain on the immutable
+        // Express settings; the invoice/counter quantity is the billed sheets.
+        if(line.expressPrint.productType==='plans'&&item.pricingUnit==='per_unit') {
+          snapshot.lineItem.quantity=expressLinePrice(line).billableMilliUnits/1000;
+        }
+      }
       applySampleFirstSnapshot(store, line, snapshot);
       snapshot.lineItem.documentPages = structuredClone(line.documentPages ?? null);
       if (line.quantityMode) snapshot.lineItem.quantityMode = line.quantityMode;
@@ -1380,6 +1392,11 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   order.supplierId = job.supplierId;
   snapshotShopClock(store, order);
   order.pickup = { ...job.pickup };
+  if(order.expressOrder) {
+    order.expressOrder.printerZone=distanceZoneForDistance(distanceMetersBetween(order.pickup,
+      cart.fulfillmentMode==='delivery'?cart.defaultDropoff:cart.expressLocation),store.settings);
+    order.expressOrder.deliveryFeeBands=structuredClone(store.settings.deliveryFeeBands);
+  }
   order.distanceZone = job.deliveryDistanceMeters == null ? null
     : distanceZoneForDistance(job.deliveryDistanceMeters, store.settings);
   // The shop's own date, which it is held to. Never shown to the client.
@@ -1703,12 +1720,20 @@ function linkSampleFirstOrder(store, user, order, cartLines, { at, createId }) {
 function checkoutBasket(store, user, cart, body, createId, at, req) {
   if (cart.orderType === 'express') {
     const lines=store.cartLines.filter(l=>l.cartId===cart.id);
-    const shop=expressShopList(store,user,{location:cart.expressLocation,fulfillmentMode:cart.fulfillmentMode},at).find(s=>s.supplierId===lines[0]?.supplierId);
+    const productType=lines.some(line=>line.expressPrint?.productType==='plans')?'plans':'documents';
+    const shop=expressShopList(store,user,{location:cart.expressLocation,fulfillmentMode:cart.fulfillmentMode,productType},at).find(s=>s.supplierId===lines[0]?.supplierId);
     if(!shop || lines.some(line=>!line.expressPrint || !shop.catalogItemIds.includes(line.catalogItemId) || line.supplierId!==shop.supplierId)) fail(409,'express_shop_unavailable','Choose an open Express shop.');
+    const permission=lines[0]?.expressPrint?.selection;
+    if(permission) {
+      const pickup=store.supplierProfiles.find(profile=>profile.userId===shop.supplierId).shop;
+      const distance=distanceMetersBetween(pickup,cart.fulfillmentMode==='delivery'?cart.defaultDropoff:cart.expressLocation);
+      fastestPermittedPrinter({shops:[{...shop,zone:{...shop.zone,code:({nearby:'A',away:'B',long_distance:'C'})[distanceZoneForDistance(distance,store.settings).key]||null},
+        deliveryFareMinor:deliveryFeeForDistance(distance,store.settings)}]},permission.fareLimit);
+    }
     assertExpressNightJob(store,shop.supplierId,lines,cart.fulfillmentMode,at);
     for(const line of lines) {
       const item=store.catalogItems.find(row=>row.id===line.catalogItemId);
-      if(!isDeepStrictEqual(documentPagesFor(store,item,line,undefined,{required:true}),line.documentPages)) fail(409,'express_preview_required','The detected pages changed. Review a new draft.');
+      if(!isDeepStrictEqual(documentPagesFor(store,line.expressPrint?.productType==='plans'?{...item,pricingUnit:'per_page'}:item,line,undefined,{required:true}),line.documentPages)) fail(409,'express_preview_required','The detected pages changed. Review a new draft.');
     }
     if(body.looksRight!==true || body.expressConfirmation!==expressConfirmation(cart,lines)) fail(409,'express_preview_required','Review the current print settings and accept the preview.');
   }
@@ -1956,9 +1981,23 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     const mutated = pingPrinterDemand(store, user, record(await readBody(req)), { at: now(), id });
     return {status:200,body:{ok:true},mutated};
   }
+  if (pathname === '/express/shops' && req.method === 'POST') {
+    return {status:200,body:quotedExpressPrinters(store,user,record(await readBody(req)),now()),mutated:false};
+  }
   if (pathname === '/express/shops' && req.method === 'GET') {
     if(!url.searchParams.has('lat')||!url.searchParams.has('lng'))fail(400,'invalid_express_location','Send lat and lng.');
-    return {status:200,body:{shops:expressShopList(store,user,{location:{lat:Number(url.searchParams.get('lat')),lng:Number(url.searchParams.get('lng'))},sort:url.searchParams.get('sort')||'nearest',fulfillmentMode:url.searchParams.get('fulfillmentMode')||'pickup'},now())},mutated:false};
+    const filters={};
+    for(const key of ['shopsOnly','verifiedOnly'])if(url.searchParams.has(key)) {
+      if(!['true','false'].includes(url.searchParams.get(key)))fail(400,'invalid_express_filter');
+      filters[key]=url.searchParams.get(key)==='true';
+    }
+    const options={location:{lat:Number(url.searchParams.get('lat')),lng:Number(url.searchParams.get('lng'))},sort:url.searchParams.get('sort')||'nearest',fulfillmentMode:url.searchParams.get('fulfillmentMode')||'pickup',...filters};
+    // Released clients do not understand disabled cards or automatic widening.
+    // Keep their three legacy sorts open-only; the file-aware POST opts in.
+    const body=['nearest','top_rated','fewest_jobs'].includes(options.sort)
+      ?{shops:expressShopList(store,user,options,now()).filter(shop=>(!filters.shopsOnly||shop.printerType==='shop')&&(!filters.verifiedOnly||shop.verified))}
+      :expressPrinterChoices(store,user,options,now());
+    return {status:200,body,mutated:false};
   }
   if(pathname==='/me/express-guide' && ['GET','PATCH'].includes(req.method)) {
     const guide=req.method==='PATCH'?updateExpressGuide(store,user,await readBody(req),now()):expressGuide(store,user,now());
@@ -2678,10 +2717,20 @@ function expressConfirmation(cart,lines) {
    (_key,value)=>value && !Array.isArray(value) && typeof value==='object'
      ? Object.fromEntries(Object.keys(value).sort().map(key=>[key,value[key]])) : value)).digest('hex');
 }
-function createExpressDraft(store,user,body,id,at) {
+function createExpressDraft(store,user,body,id,at,selectionPolicy=null) {
  const location=expressPoint(body.location);
+ const matchingPoint=body.fulfillmentMode==='delivery'&&body.dropoff?expressPoint(body.dropoff):location;
  if(!['pickup','delivery'].includes(body.fulfillmentMode)) fail(400,'invalid_fulfillment_mode','Choose pickup or delivery.');
- const shop=expressShopList(store,user,{location,fulfillmentMode:body.fulfillmentMode},at).find(s=>s.supplierId===body.supplierId);
+ const productType=body.productType||'documents';
+ if(!['documents','plans'].includes(productType))fail(400,'invalid_express_product_type');
+ if(body.selection!=null&&body.selection!=='just_print_it')fail(400,'invalid_express_selection');
+ if(body.selection==='just_print_it') {
+  if(body.supplierId!=null)fail(400,'invalid_express_selection');
+  if(productType==='plans'||body.files?.some(file=>file.paper==='a3'))fail(409,'express_manual_selection_required');
+  const choice=fastestPermittedPrinter(quotedExpressPrinters(store,user,{...body,sort:'all_davao'},at),body.fareLimit);
+  return createExpressDraft(store,user,{...body,selection:undefined,supplierId:choice.supplierId},id,at,{mode:'just_print_it',fareLimit:body.fareLimit});
+ }
+ const shop=expressShopList(store,user,{location:matchingPoint,fulfillmentMode:body.fulfillmentMode,productType},at).find(s=>s.supplierId===body.supplierId);
  if(!shop)fail(409,'express_shop_unavailable','Choose an open Express shop.');
  if(!Array.isArray(body.files)||!body.files.length||body.files.length>20)fail(400,'invalid_express_files','Send one to twenty files.');
  const cart={id:id('cart'),clientId:user.id,state:'draft',version:1,orderType:'express',expressLocation:location,
@@ -2689,20 +2738,20 @@ function createExpressDraft(store,user,body,id,at) {
  const lines=body.files.map((input,index)=>{
    record(input,'file');
    const item=input.catalogItemId?store.catalogItems.find(i=>i.id===input.catalogItemId):shop.catalogItemIds.map(id=>store.catalogItems.find(i=>i.id===id)).find(i=>{
-     try{expressCatalogOptions(store,i,input);return true;}catch(error){if(error.status)return false;throw error;}
+     try{expressCatalogOptions(store,i,{...input,productType});return true;}catch(error){if(error.status)return false;throw error;}
    });
    if(!item||!shop.catalogItemIds.includes(item.id))fail(409,'express_listing_unavailable','Choose an Express document listing.');
    fileFor(store,user,input.fileId,'artwork','fileId');
-   if(!['bw','colour'].includes(input.colour)||!['a4','short','long','a3'].includes(input.paper)||!['one','two'].includes(input.sides)) fail(400,'invalid_express_print','Choose colour, paper and sides.');
+   if(!['bw','colour'].includes(input.colour)||!(productType==='plans'?['a4','a3','a2','a1','a0','30x40']:['a4','short','long','a3']).includes(input.paper)||!['one','two'].includes(input.sides)) fail(400,'invalid_express_print','Choose colour, paper and sides.');
    if(!Array.isArray(input.acceptedWarnings)||input.acceptedWarnings.length>20||input.acceptedWarnings.some(w=>!['paper_size_mismatch','rgb_colour'].includes(w))) fail(400,'invalid_express_warnings','Send accepted warning codes.');
    if(input.optionIds != null)fail(400,'express_options_managed','Express selects standard print options from the print settings.');
-   const standard=expressCatalogOptions(store,item,input);
+   const standard=expressCatalogOptions(store,item,{...input,productType});
    const line={id:id('line'),cartId:cart.id,supplierId:shop.supplierId,catalogItemId:item.id,quantity:positiveInteger(input.copies,'copies'),
      optionIds:standard.optionIds,artworkFileId:input.fileId,printLayout:parseCartPrintLayout(item,input.layout,fail),sortOrder:index,createdAt:at,updatedAt:at,
      specialInstructions:specialInstructions(input.note),
-     expressPrint:{colour:input.colour,paper:input.paper,paperStock:standard.paperStock,sides:input.sides,rateMinor:standard.rateMinor,acceptedWarnings:[...new Set(input.acceptedWarnings)]},
+     expressPrint:{...(selectionPolicy?{selection:structuredClone(selectionPolicy)}:{}),...(productType==='plans'?{productType}:{}),colour:input.colour,paper:input.paper,paperStock:standard.paperStock,sides:input.sides,rateMinor:standard.rateMinor,acceptedWarnings:[...new Set(input.acceptedWarnings)]},
      structuredSpec:{size:input.paper,colourMode:input.colour,sides:input.sides}};
-   line.documentPages=documentPagesFor(store,item,line,input.pageRange??null,{required:true});line.measurement={pages:line.documentPages.printed};
+   line.documentPages=documentPagesFor(store,productType==='plans'?{...item,pricingUnit:'per_page'}:item,line,input.pageRange??null,{required:true});line.measurement={pages:line.documentPages.printed};
    expressLinePrice(line);assertListingArtwork(store,item,line);
    return line;
  });
@@ -2714,5 +2763,30 @@ function createExpressDraft(store,user,body,id,at) {
  if(!tester){tester={clientId:user.id};store.foundingTesters.push(tester);}tester.addedAt ||= at;
  const quote=clientCartQuote(store,cart,lines,at);
  delete quote.voucherGroups; delete quote.downpaymentPercent;
- return {status:201,body:{cartId:cart.id,confirmation:expressConfirmation(cart,lines),paymentTiming:lines.some(l=>l.expressPrint.paper==='a3')?'after_acceptance':'checkout',quote,shop},mutated:true};
+ shop.readyAt=projectListingGroup(store,lines,{now:at}).projection.promiseBy;
+ return {status:201,body:{cartId:cart.id,confirmation:expressConfirmation(cart,lines),paymentTiming:lines.some(l=>l.expressPrint.paper==='a3'||l.expressPrint.productType==='plans')?'after_acceptance':'checkout',quote,shop},mutated:true};
+}
+
+/** Preview the same draft builder with isolated draft arrays. No carts, missions,
+ * vouchers, notifications or IDs are persisted by the printer-list read. */
+function quotedExpressPrinters(store,user,body,at) {
+ if(!Array.isArray(body.files)||!body.files.length||body.files.length>20)fail(400,'invalid_express_files');
+ const location=expressPoint(body.fulfillmentMode==='delivery'?body.dropoff:body.location);
+ const rows=expressShopList(store,user,{location,fulfillmentMode:body.fulfillmentMode,includeClosed:true,productType:body.productType},at);
+ const quoted=[];
+ for(const shop of rows) {
+  // Closed cards remain visible but cannot manufacture a current checkout quote.
+  if(!shop.selectable){quoted.push(shop);continue;}
+  const preview={...store,carts:[],cartLines:[],foundingTesters:[]};let sequence=0;
+  try {
+   const result=createExpressDraft(preview,user,{...body,selection:undefined,supplierId:shop.supplierId},prefix=>`preview_${prefix}_${++sequence}`,at).body;
+   if(result.quote.status!=='priced')continue;
+   const privatePoint=store.supplierProfiles.find(profile=>profile.userId===shop.supplierId).shop;
+   quoted.push({...shop,readyAt:result.shop.readyAt,quote:result.quote,paymentTiming:result.paymentTiming,
+    deliveryFareMinor:deliveryFeeForDistance(distanceMetersBetween(privatePoint,location),store.settings)});
+  } catch(error) {
+   if(!['express_listing_unavailable','express_listing_configuration_required','document_capability_unavailable','express_night_capacity','express_shop_unavailable','print_layout_not_supported','artwork_file_format_not_accepted'].includes(error.code))throw error;
+  }
+ }
+ return expressPrinterChoices(store,user,{...body,location},at,quoted);
 }

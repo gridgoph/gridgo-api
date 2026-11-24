@@ -96,6 +96,7 @@ export async function routeExpressOrders({req,url,store,user,readBody,id,now,aud
  if(!order.cash&&!payAfterAcceptance&&!paymentSettled(order.payments?.initial))fail(409,'payment_required');
  acknowledgeInstructions(store,order,user,body,at,(_store,event)=>store.auditLog.push({id:id('aud'),at,actorId:actorUserId(user),actorRole:'supplier',...event,actor:undefined}));
  order.shopAcceptance.status='accepted';order.shopAcceptance.acceptedAt=at;order.shopAcceptance.acceptedBy=actorUserId(user);
+ if(payAfterAcceptance&&!paymentSettled(order.payments?.initial))order.expressOrder.payBy=new Date(Date.parse(at)+5*60000).toISOString();
  order.state=payAfterAcceptance&&!paymentSettled(order.payments?.initial)?'awaiting_initial_payment':'payment_authorized';order.timeline.push({at,state:order.state,by:actorUserId(user),note:'Shop accepted Express order.'});
  expressEvent(store,order,'accepted',{at,id,actorId:actorUserId(user)});return response();
 }

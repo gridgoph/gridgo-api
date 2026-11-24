@@ -201,9 +201,10 @@ Preview and fee arithmetic still use the existing cart builder. For A3:
    an already-reviewed, accepted A3 job to `payment_authorized`, without repeating
    artwork review. Work/readiness/collection cannot bypass payment.
 
-Standard Express keeps its existing checkout payment. A3 replacement matching
-also checks the snapshotted page price; it never substitutes a different shop's
-price into an accepted order. Existing immutable money, print settings, client
+Standard Express keeps its existing checkout payment. A3 and plans now require
+a new client pick after decline/timeout and never automatically move to another
+shop. Acceptance opens a five-minute payment-evidence submission window; see
+[Who prints it?](EXPRESS_API.md#who-prints-it-b26328c8). Existing immutable money, print settings, client
 privacy and refund/recovery rules remain in force.
 
 ## Let GRIDGO set it up
