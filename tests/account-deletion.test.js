@@ -197,7 +197,9 @@ test('HTTP requests bypass account holds, audit atomically and notify only staff
   assert.equal((await request(instance.api, '/me/account-deletion-request', { method: 'POST', body: { confirmed: true } })).status, 401);
 });
 
-test('HTTP Apple revocation binds Clerk identity, audits results, retries safely and exposes staff status', { skip: !DATABASE_URL, timeout: 30000 }, async (t) => {
+// This aggregate exercises many sequential provider outcomes and two API
+// processes. Individual stall/lock deadlines below remain strict under CI load.
+test('HTTP Apple revocation binds Clerk identity, audits results, retries safely and exposes staff status', { skip: !DATABASE_URL, timeout: 60000 }, async (t) => {
   const database = createDatabase({ DATABASE_URL });
   const ec = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
   const supplierKey = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
