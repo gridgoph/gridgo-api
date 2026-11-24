@@ -30,6 +30,27 @@ test('bounded Clerk Apple lookup pins the installed BAPI version, maps provider 
     assert.equal(await loadClerkAppleAccount(config, 'user_test', { fetcher }), null);
   }
 });
+test('Clerk body stalls cancel the reader when the existing lookup deadline expires', async t => {
+  let controller, signal, timer, cancelled = false;
+  // Model a transport whose body does not receive fetch's abort notification.
+  const body = new ReadableStream({
+    start(value) { controller = value; controller.enqueue(new TextEncoder().encode('{"id":"partial",')); },
+    cancel() { cancelled = true; },
+  });
+  t.after(() => {
+    clearTimeout(timer);
+    if (!cancelled) controller.error(new Error('fixture cleanup'));
+  });
+  const lookup = loadClerkAppleAccount({ apiUrl: 'http://127.0.0.1:12345', secretKey: 'test' }, 'user_test', {
+    timeoutMs: 20,
+    fetcher: async (_, options) => { signal = options.signal; return new Response(body); },
+  });
+  const result = await Promise.race([lookup, new Promise(resolve => { timer = setTimeout(() => resolve('still_pending'), 500); })]);
+  assert.equal(result, null, 'a stalled body must not outlive the lookup deadline');
+  assert.equal(signal.aborted, true);
+  assert.equal(cancelled, true, 'the transport body must be cancelled, not merely abandoned');
+  assert.equal(body.locked, false);
+});
 function identity(claims = {}, header = {}) {
   const now = Math.floor(Date.now() / 1000);
   const input = [ { alg: 'RS256', kid: jwk.kid, ...header },

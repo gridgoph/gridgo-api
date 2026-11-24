@@ -73,6 +73,28 @@ export function createClerkBackend(config) {
   });
 }
 
+async function clerkJsonBeforeDeadline(response, signal) {
+  const reader = response.body.getReader();
+  const chunks = [];
+  // A transport may stop forwarding fetch's abort after headers arrive.
+  // Own the reader so the same deadline also closes a stalled response body.
+  const abort = () => { void reader.cancel(signal.reason).catch(() => {}); };
+  signal.addEventListener('abort', abort, { once: true });
+  if (signal.aborted) abort();
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+    }
+    signal.throwIfAborted();
+    return JSON.parse(new TextDecoder().decode(Buffer.concat(chunks)));
+  } finally {
+    signal.removeEventListener('abort', abort);
+    reader.releaseLock();
+  }
+}
+
 /**
  * Only the Apple-deletion lookup needs this bounded BAPI read. Backend SDK
  * 3.16.5 cannot pass a per-request AbortSignal; do not alter its global fetch.
@@ -80,12 +102,13 @@ export function createClerkBackend(config) {
  */
 export async function loadClerkAppleAccount(config, clerkUserId, { fetcher = fetch, timeoutMs = 5_000 } = {}) {
   try {
+    const signal = AbortSignal.timeout(timeoutMs);
     const response = await fetcher(`${(config.apiUrl || 'https://api.clerk.com').replace(/\/$/, '')}/v1/users/${encodeURIComponent(clerkUserId)}`, {
       headers: { Authorization: `Bearer ${config.secretKey}`, 'Clerk-API-Version': '2026-05-12', Accept: 'application/json' },
-      redirect: 'error', signal: AbortSignal.timeout(timeoutMs),
+      redirect: 'error', signal,
     });
     if (!response.ok) { await response.body?.cancel(); return null; }
-    const user = await response.json();
+    const user = await clerkJsonBeforeDeadline(response, signal);
     if (!user || typeof user.id !== 'string' || !Array.isArray(user.external_accounts)) return null;
     return { id: user.id, externalAccounts: user.external_accounts.map(account => ({
       provider: account?.provider, providerUserId: account?.provider_user_id, verification: account?.verification,
