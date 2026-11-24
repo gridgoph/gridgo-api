@@ -59,6 +59,23 @@ test('HTTP home catalog, quotes, cart, unpaid/paid pickup and order lists keep t
  await db.transaction(()=>saveStore(db,store));
  privateResponse(ok(await api('rider','GET',path)));
 });
+test('group Express home pickup keeps host and member responses private before and after payment',{skip},async t=>{
+ const {api,request}=await setup(t);
+ const created=ok(await api('client','POST','/express/groups',{fulfillmentMode:'pickup',location:request.location,timeLimitMinutes:30}));
+ privateResponse(created);
+ privateResponse(ok(await api('other','POST',`/express/groups/invites/${created.inviteToken}/join`,{})));
+ const path=`/express/groups/${created.group.id}`;
+ privateResponse(ok(await api('client','PUT',`${path}/files`,{files:request.files})));
+ privateResponse(ok(await api('client','POST',`${path}/close`,{})));
+ const prepared=ok(await api('client','POST',`${path}/prepare`,{supplierId:'supplier'}));privateResponse(prepared);
+ privateResponse(ok(await api('client','GET',`/me/carts/${prepared.cartId}`)));
+ const placed=ok(await api('client','POST',`${path}/checkout`,{looksRight:true,expressConfirmation:prepared.confirmation,payment:{method:'qr_manual',reference:'HOME-GROUP',proofFileId:'home_payment'}}));
+ privateResponse(placed);privateResponse(ok(await api('client','GET',`/orders/${placed.orderId}`)));
+ for(const actor of ['client','other'])for(const endpoint of [path,`${path}/tracking`])privateResponse(ok(await api(actor,'GET',endpoint)));
+ ok(await api('ops','POST',`/orders/${placed.orderId}/payments/initial/confirm`,{}));
+ const paid=ok(await api('client','GET',`/orders/${placed.orderId}`));privateResponse(paid,{street:true});assert.equal(paid.order.pickup.street,'Private street');
+ for(const actor of ['client','other'])for(const endpoint of [path,`${path}/tracking`])privateResponse(ok(await api(actor,'GET',endpoint)),{street:actor==='client'});
+});
 test('persisted home give-back reoffers unchanged money; home state survives legacy profile upserts',{skip},async t=>{
  const {db,api,request}=await setup(t);request.fulfillmentMode='delivery';request.dropoff={lat:7.065,lng:125.605,label:'Client destination'};
  const orderId=await checkout(api,request);ok(await api('ops','POST',`/orders/${orderId}/payments/initial/confirm`,{}));

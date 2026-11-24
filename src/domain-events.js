@@ -731,6 +731,6 @@ export function deriveDomainEvents(store, before, { createId, at }) {
   for (const n of store.notifications || [])
     if (changed(oldNotifications.get(n.id), n)) {
       hint("notifications", null, [n.userId]);
-      if (!oldNotificationIds.has(n.id) && n.userId === actor) n.push = false;
+      if (!oldNotificationIds.has(n.id) && n.userId === actor && !n.type?.startsWith('group_')) n.push = false;
     }
 }

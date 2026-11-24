@@ -81,6 +81,7 @@ export function publicNotification(notification, order) {
     at: notification.at,
   };
   if (notification.type) item.type = notification.type;
+  if (notification.groupId) item.groupId = notification.groupId;
   if (notification.type === 'shop_invite_claimed') item.shopId = notification.shopId;
   if (notification.type === "support_message" && notification.threadId) item.threadId = notification.threadId;
   if (notification.voucherId) item.voucherId = notification.voucherId;
@@ -429,6 +430,8 @@ export function notificationVisible(store, notification, userId, role, { shopId 
   if (notification.type === 'dispatch_available' && (!availableDispatch(orderFromNotification(store, notification), store)
     || !riderOfferVisible(orderFromNotification(store, notification), userId)
     || notification.offerId && notification.offerId !== orderFromNotification(store, notification)?.dispatchOffer?.id)) return false;
+  // Persisted recipient-scoped group notices grant no general order or file access.
+  if(notification.groupId&&notification.type?.startsWith('group_')&&requiredRole==='client')return true;
   if (notification.orderId) return canAccessOrder(store,userId,orderFromNotification(store,notification),{role:role || (legacySuperSeesOps ? 'super_admin' : requiredRole),offer:notification.type === 'dispatch_available'});
   return true;
 }

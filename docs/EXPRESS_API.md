@@ -1,5 +1,7 @@
 # Express API
 
+Group document ordering and companion client/rider calls: [Group Express API](GROUP_EXPRESS_API.md).
+
 Express is an order type on the existing checkout, payment, refund, production,
 artwork review and payout model. Express document production skips finished photos
 and product QA; regular orders retain their evidence gates. It is not the legacy scheduling override represented by a

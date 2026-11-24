@@ -1,3 +1,4 @@
+import { groupTables, groupRows, loadGroupRows } from './express-group-store.js';
 import { verificationLedgerTable, verificationLedgerRows, loadVerificationLedgerRows } from "./supplier-verification-store.js";
 import {shopMoneyTables,shopMoneyRows,loadShopMoneyRows} from './shop-money-store.js';
 import {clientPaymentSnapshot} from './shop-payment-method.js';
@@ -124,6 +125,7 @@ const TABLES = [
   performanceTable,
   ...staffTables,
   ...shopTeamTables.filter(table => table.name !== 'order_actions'),
+  ...groupTables,
   { name: "client_carts", keys: ["id"], columns: ["id", "client_id", "state", "version", "service_level", "scheduled_for", "fulfillment_mode", "default_dropoff_lat", "default_dropoff_lng", "default_dropoff_label", "checked_out_order_id", "created_at", "updated_at", "checked_out_at", "deadline", "request_fulfillment", "order_type", "express_location"] },
   { name: "client_cart_lines", keys: ["id"], columns: ["id", "cart_id", "supplier_id", "catalog_item_id", "option_ids", "speed_tier_id", "quantity", "service_fee_snapshot", "structured_spec", "artwork_file_id", "artwork_links", "artwork_attachments", "artwork_warning_acceptances", "express_print", "print_layout", "quantity_mode", "color_targets", "cover_spine", "special_instructions", "document_pages", "match_deadline", "deadline", "delivery_key", "sample", "sample_batch_draft_id", "sample_batch_pricing", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "created_at", "updated_at"] },
   { name: "order_jobs", keys: ["id"], columns: ["id", "order_id", "supplier_id", "rider_id", "state", "fulfillment_mode", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "supplier_subtotal_minor", "delivery_distance_meters", "delivery_fee_minor", "rider_commission_bps", "estimated_hours", "estimated_production_minutes", "scheduled_for", "deadline", "created_at", "updated_at"] },
@@ -170,6 +172,8 @@ export function emptyStore() {
   return {
     ...emptyStaffStore(),
     ...emptyShopTeam(),
+    expressGroups: [],
+    expressGroupMembers: [],
     supplierVerificationLedger: [],
     shopMoneyLedger: [],
     shopMoneyEvents: [],
@@ -265,6 +269,7 @@ function rowsFromStore(store) {
   const rows = Object.fromEntries(TABLES.map(({ name }) => [name, []]));
   ensureShopOwners(store);
   shopTeamRows(store, rows);
+  groupRows(store, rows);
   verificationLedgerRows(store, rows);
   shopMoneyRows(store, rows);
   rows.shop_file_accesses = fileAccessRows(store);
@@ -2360,6 +2365,7 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
   const store = emptyStore();
   store.legalPenaltyGate = legalPenaltyGate;
   loadShopTeamRows(store, loaded);
+  loadGroupRows(store, loaded);
   loadVerificationLedgerRows(store, loaded);
   loadShopMoneyRows(store, loaded);
   Object.defineProperty(store,'shopMoneyDeadlines',{value:new Map(loaded.supplier_profiles.filter(row=>Object.hasOwn(row,'shop_money_deadline_at'))
