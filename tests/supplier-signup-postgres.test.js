@@ -211,4 +211,9 @@ test('guided home signup persists private consent, documents-only capabilities a
  const store=await loadStore(db),profile=store.supplierProfiles.find(p=>p.userId==='client');
  assert.equal(profile.supplierType,'home');assert.equal(profile.homePrinter.pinConsent.wording,HOME_PIN_CONSENT);assert.equal(profile.pickupAvailable,false);
  assert.ok(store.catalogItems.filter(i=>i.supplierId==='client').every(i=>i.subcategoryCode==='document_printing'&&i.express));
+ const clientIdentity=ok(await api('client','GET','/auth/me/client'));
+ const personal=store.users.find(u=>u.id==='client');
+ for(const key of ['id','name','email','phone'])assert.equal(clientIdentity.user[key],personal[key],key);
+ assert.equal(JSON.stringify(clientIdentity).includes(String(pin.point.lat)),false);
+ assert.equal(JSON.stringify(clientIdentity).includes(pin.street),false);
 });

@@ -126,6 +126,8 @@ alone reveals no street. **Clients never receive the exact pin**, including
 paid pickup. Checkout and reassignment freeze private home metadata so later
 profile edits cannot change order privacy or expose an older pin. Pickup at a
 home is available only when Verified and explicitly enabled.
+An owner using their client membership retains their own personal account name
+and contacts; their home-printer card and pickup details still follow these rules.
 
 ## Rider app
 
