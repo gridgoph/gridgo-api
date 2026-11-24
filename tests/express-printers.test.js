@@ -58,7 +58,7 @@ test('pickup estimates and home privacy are explicit; shop and verification filt
   const home=answer.body.shops.find(s=>s.supplierId==='shop_a');
   assert.equal(home.printerType,'home');assert.equal(home.name,'Sample barangay');
   assert.equal(home.address,'Sample barangay');assert.equal(home.location,null);
-  assert.equal(home.walkingTimeMinutes,0);assert.equal(home.deliveryFeeMinor,null);
+  assert.equal(home.walkingTimeMinutes,7);assert.equal(home.deliveryFeeMinor,null);
   assert.equal(home.verificationLevel,'verified');
   store.supplierProfiles[0].shop.lat+=0.001;
   const rough=(await call('POST','/express/shops',{...request,fulfillmentMode:'pickup',sort:'all_davao'})).body.shops.find(s=>s.supplierId==='shop_a');

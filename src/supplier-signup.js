@@ -1,3 +1,4 @@
+import { homePin, HOME_PIN_CONSENT } from './home-printers.js';
 import { CatalogError } from './supplier-catalog.js';
 import { philippineMobileNumber } from './phone.js';
 import { documentCapabilities } from './document-capabilities.js';
@@ -24,7 +25,7 @@ export function signupProjection(store,row) {
     const owner=(store.shopMemberships||[]).some(m=>m.shopId===row.supplierId&&m.role==='owner'&&m.status==='active');
     const account=(store.supplierPayoutAccounts||[]).find(a=>a.supplierId===row.supplierId);
     const policy=(store.supplierPayoutPolicies||[]).find(p=>p.supplierId===row.supplierId);
-    nextStep=!profile?.schedule?'hours':!(store.shopTeamSettings||[]).some(s=>s.shopId===row.supplierId)?'team':!owner?'owner_claim'
+    nextStep=!profile?.homePrinter&&!profile?.schedule?'hours':!(store.shopTeamSettings||[]).some(s=>s.shopId===row.supplierId)?'team':!owner?'owner_claim'
       :!account?.qrFileId||!policy?.consent?'payout':(store.catalogItems||[]).some(i=>i.supplierId===row.supplierId
         &&!(store.catalogItemPhotos||[]).some(p=>p.catalogItemId===i.id))?'listing_photos':'complete';
   }
@@ -35,11 +36,18 @@ export function signupEnrollment(store,clerkUserId,version) {
   if(!signup||signup.version!==version)fail(409,'supplier_signup_stale');
   if(['eligibility','shop','location','prints'].some(step=>!signup.steps[step]))fail(409,'supplier_signup_incomplete');
   const {shop,location}=signup.steps;
+  if(signup.steps.eligibility.shopKind==='home_printer'&&!location.pinConsent?.accepted)fail(409,'home_pin_consent_required');
   return {signup,body:{profile:{shopName:shop.shopName,contactName:shop.contactName,phone:shop.phone,location:location.point},
     serviceCategories:['document_publication']}};
 }
 export function completeSignupEnrollment(store,signup,supplierId,at) {
   signup.supplierId=supplierId;signup.updatedAt=at;
+  if(signup.steps.eligibility.shopKind==='home_printer') {
+    const profile=store.supplierProfiles.find(p=>p.userId===supplierId), location=signup.steps.location;
+    profile.homePrinter={barangay:location.barangay,street:location.street,propertyType:location.propertyType,landmark:location.landmark,
+      pinConsent:location.pinConsent,startedAt:at,pinChangedAt:at,online:false,consecutiveMisses:0};
+    profile.supplierType='home';profile.barangay=location.barangay;profile.pickupAvailable=false;
+  }
   if(signup.steps.eligibility.registrantRole==='manager') {
     const member=store.shopMemberships.find(m=>m.shopId===supplierId&&m.userId===supplierId);
     member.role='staff';
@@ -60,7 +68,7 @@ export async function routeSupplierSignup({req,url,store,claims,clerkUser,readBo
     const {step,value}=body;let saved;
     if(step==='eligibility') {
       if(!['print_shop','home_printer'].includes(value.shopKind)||!['owner','manager'].includes(value.registrantRole)||value.adult!==true)fail(400,undefined,'eligibility');
-      if(row?.steps.shop&&row.steps.eligibility.registrantRole!==value.registrantRole)fail(409,'supplier_signup_restart_required');
+      if(row?.steps.shop&&(row.steps.eligibility.registrantRole!==value.registrantRole||row.steps.eligibility.shopKind!==value.shopKind))fail(409,'supplier_signup_restart_required');
       saved={shopKind:value.shopKind,registrantRole:value.registrantRole,adult:true,attestedAt:now()};
     } else if(step==='shop') {
       if(!row?.steps.eligibility)fail(409,'supplier_signup_step_required');
@@ -75,16 +83,18 @@ export async function routeSupplierSignup({req,url,store,claims,clerkUser,readBo
     } else if(step==='location') {
       const p=value.point,c=value.consent;
       if(!object(p)||!Number.isFinite(p.lat)||Math.abs(p.lat)>90||!Number.isFinite(p.lng)||Math.abs(p.lng)>180)fail(400,undefined,'point');
-      if(c?.accepted!==true||c.wording!==LOCATION_CONSENT_WORDING)fail(400,undefined,'consent');
-      saved={point:{lat:p.lat,lng:p.lng,label:text(p.label,'label',500)},consent:{accepted:true,wording:LOCATION_CONSENT_WORDING,at:now()}};
+      if(row?.steps.eligibility?.shopKind!=='home_printer'&&(c?.accepted!==true||c.wording!==LOCATION_CONSENT_WORDING))fail(400,undefined,'consent');
+      saved=row?.steps.eligibility?.shopKind==='home_printer'?homePin(value,now()):{point:{lat:p.lat,lng:p.lng,label:text(p.label,'label',500)},consent:{accepted:true,wording:LOCATION_CONSENT_WORDING,at:now()}};
     } else if(step==='prints') {
+      if(row?.steps.eligibility?.shopKind==='home_printer'&&(value.groups?.length!==1||value.groups[0]!=='documents'
+        ||value.documents?.papers?.some(p=>!['short','a4','long'].includes(p))||Object.keys(value.documents?.finishing||{}).length))fail(400,'home_documents_only');
       if(!Array.isArray(value.groups)||!value.groups.length||value.groups.length>8||value.groups.some(g=>!PRINT_GROUPS.includes(g)))fail(400,undefined,'groups');
       saved={groups:[...new Set(value.groups)],...(value.groups.includes('documents')?{documents:documentCapabilities(value.documents)}:{})};
     } else fail(400,undefined,'step');
     if(!row){row={clerkUserId:claims.sub,supplierId:null,version:0,steps:{}};store.supplierSignups.push(row);}
     row.steps[step]=saved;row.version++;row.updatedAt=now();
   }
-  return {status:200,body:{signup:signupProjection(store,row),printGroups:PRINT_GROUPS,locationConsentWording:LOCATION_CONSENT_WORDING,
+  return {status:200,body:{signup:signupProjection(store,row),printGroups:PRINT_GROUPS,locationConsentWording:row?.steps.eligibility?.shopKind==='home_printer'?HOME_PIN_CONSENT:LOCATION_CONSENT_WORDING,
     payoutConsentWording:PAYOUT_CONSENT_WORDING,documentRates:expressRates(store.settings)},mutated:req.method==='PATCH'};
 }
 

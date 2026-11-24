@@ -204,7 +204,7 @@ function approvedOpenSuppliers(store, at) {
   const blockersFor = supplierMatchBlockersFor(store, at);
   const profiles = new Map();
   for (const profile of (store.supplierProfiles || [])) {
-    if (blockersFor(profile.userId, profile).length) continue;
+    if (profile.homePrinter || blockersFor(profile.userId, profile).length) continue;
     profiles.set(profile.userId, {...profile, verified:supplierVerified(store,profile.userId)});
   }
   return profiles;
@@ -324,7 +324,8 @@ export function listingTiming(store, item, line = {}) {
 }
 
 export function projectExpressNightFinish(store, supplierId, hours, now, units = 1) {
-  const profile = store.supplierProfiles.find(p => p.userId === supplierId), window = nightWindow(profile, now);
+  const profile = store.supplierProfiles.find(p => p.userId === supplierId);
+  const window = profile?.homePrinter ? {startsAt:now,endsAt:new Date(Date.parse(now)+86400000).toISOString(),home:true} : nightWindow(profile, now);
   if (!window) return null;
   const queue = queueMinutesFor(store, supplierId, hours);
   const readyBy = new Date(Date.parse(now) + (queue.minutes + hours * 60) * 60000).toISOString();

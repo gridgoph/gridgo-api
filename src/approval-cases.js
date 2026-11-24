@@ -1,3 +1,4 @@
+import { homeVerificationMissing } from './home-printers.js';
 import { currentApplication, decideClientApplication, sentBackNotificationBody } from "./client-applications.js";
 import { resolveCategoryCode } from "./taxonomy.js";
 import { assertRiderApprovalReady } from "./enrollment.js";
@@ -69,6 +70,7 @@ export function supplierApprovalReadiness(store, supplierId) {
   const reviewableServices = (store.supplierServices || []).filter(
     (service) => service.supplierId === supplierId && ["pending_verification", "live"].includes(service.state),
   );
+  missing.push(...homeVerificationMissing(store,profile));
   const publishableServices = reviewableServices.filter(
     (service) =>
       Boolean(activeCategory(store, service.categoryCode)) &&
@@ -374,6 +376,10 @@ export function decideApprovalCase({
     });
   }
 
+  if(action==='restore'&&approvalCase.kind==='supplier') {
+    const missing=homeVerificationMissing(store,store.supplierProfiles.find(p=>p.userId===approvalCase.userId));
+    if(missing.length)fail(409,'supplier_profile_incomplete','Complete home printer verification.',{missing});
+  }
   let readiness = null;
   if (action === "approve" && approvalCase.kind === "supplier") {
     readiness = supplierApprovalReadiness(store, approvalCase.userId);

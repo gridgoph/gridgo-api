@@ -1,3 +1,4 @@
+import { homeProfile, snapshotHomePrinter, homePrinterResponse } from './home-printers.js';
 import { assertVerifiedCashShop } from "./supplier-verification.js";
 import { shopPaused } from './shop-availability.js';
 import { assertDocumentRequest } from './document-capabilities.js';
@@ -874,7 +875,10 @@ export function clientCartQuote(store, cart, lines, at) {
   return cart.orderType === "express" ? expressClientProjection(projected) : projected;
 }
 
-function publicCart(store, cart, at, { compactListings = false } = {}) {
+function publicCart(store,cart,at,options={}) {
+ return homePrinterResponse(store,cartInternal(store,cart,at,options),{id:cart.clientId,role:'client'});
+}
+function cartInternal(store, cart, at, { compactListings = false } = {}) {
   const lines = (store.cartLines || [])
     .filter((line) => line.cartId === cart.id)
     .sort((left, right) => left.sortOrder - right.sortOrder || left.id.localeCompare(right.id));
@@ -1106,7 +1110,10 @@ function attachOrderFile(file, orderId, field) {
   }
 }
 
-function publicMatchedOrder(store, order) {
+function publicMatchedOrder(store,order) {
+ return homePrinterResponse(store,matchedOrderInternal(store,order),{id:order.clientId,role:'client'});
+}
+function matchedOrderInternal(store, order) {
   const jobs = (store.orderJobs || [])
     .filter((job) => job.orderId === order.id)
     .sort((left, right) => left.id.localeCompare(right.id))
@@ -1400,6 +1407,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   order.supplierId = job.supplierId;
   snapshotShopClock(store, order);
   order.pickup = { ...job.pickup };
+  snapshotHomePrinter(store,order);
   if(order.expressOrder) {
     order.expressOrder.printerZone=distanceZoneForDistance(distanceMetersBetween(order.pickup,
       cart.fulfillmentMode==='delivery'?cart.defaultDropoff:cart.expressLocation),store.settings);
@@ -2735,6 +2743,7 @@ export function createExpressDraft(store,user,body,id,at,selectionPolicy=null,gr
  const matchingPoint=body.fulfillmentMode==='delivery'&&body.dropoff?expressPoint(body.dropoff):location;
  if(!['pickup','delivery'].includes(body.fulfillmentMode)) fail(400,'invalid_fulfillment_mode','Choose pickup or delivery.');
  const productType=body.productType||'documents';
+ if(homeProfile(store,body.supplierId)&&(productType!=='documents'||body.files?.some(f=>!['short','a4','long'].includes(f.paper))))fail(409,'home_documents_only');
  if(!['documents','plans'].includes(productType))fail(400,'invalid_express_product_type');
  if(body.selection!=null&&body.selection!=='just_print_it')fail(400,'invalid_express_selection');
  if(body.selection==='just_print_it') {

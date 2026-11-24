@@ -1,3 +1,5 @@
+import { homePrinterResponse, homePrinterStatus, homeSettings, homeProfile, snapshotHomePrinter } from './home-printers.js';
+import { routeHomePrinters } from './home-printer-routes.js';
 import { routeExpressGroups } from './express-group-routes.js';
 import { sweepGroups, validateGroupSettings } from './express-groups.js';
 import { templatePhotoKey } from './product-template-media.js';
@@ -808,6 +810,7 @@ function transitionRefusalMessage(code) {
 }
 
 function send(res, status, body, { afterCommit = true } = {}) {
+  if(res.gridgoHomePrivacy)body=res.gridgoHomePrivacy(body);
   if (status >= 400 && status < 500 && res.gridgoTransitionRefusal) {
     const record = res.gridgoTransitionRefusal;
     delete res.gridgoTransitionRefusal;
@@ -989,6 +992,7 @@ function publicOperationalSettings(settings, store = null, user = null) {
     testerSignupFormUrlTemplate: rest.testerSignupFormUrlTemplate ?? null,
     colourDetection: colourSettings(settings),
     operatingHours: operatingHours(settings),
+    homePrinter: homeSettings(settings),
     shopMoney: shopMoneySettings(settings),
     riderCommissionBps: rest.riderCommissionBps ?? 8_000,
     riderOfferTimeoutSeconds: offerTimeoutSeconds(rest),
@@ -1669,6 +1673,7 @@ function fixedAuthProjection(store, auth, role) {
       approvalCase: approvalCaseSummary(approvalCase),
       readiness: supplierReadiness(store, auth.user.id, approvalCase),
       verification: verificationSummary(store,auth.user.id,now()),
+      ...(store.supplierProfiles.find(p=>p.userId===auth.user.id)?.homePrinter ? {homePrinter:homePrinterStatus(store,store.supplierProfiles.find(p=>p.userId===auth.user.id),now())} : {}),
       capabilities: {
         editCatalogue: canEdit,
         editSettings: canEdit,
@@ -1901,6 +1906,7 @@ function setOrderPickup(order, store) {
   const profile = (store.supplierProfiles || []).find((candidate) => candidate.userId === order.supplierId);
   const supplier = store.users.find((candidate) => candidate.id === order.supplierId);
   order.pickup = profile?.shop ? structuredClone(profile.shop) : pickupFromSupplier(supplier);
+  snapshotHomePrinter(store,order);
 }
 
 function supplierTermsFor(store, supplierId) {
@@ -2725,6 +2731,7 @@ async function handleAuditedRequest(req, res) {
         sessionHash: notificationClaims?.claims?.sid ? crypto.createHash('sha256').update(notificationClaims.claims.sid).digest('hex') : null,
       }) : scopedClientStore || await load();
 
+    res.gridgoHomePrivacy = body => homePrinterResponse(store,body,res.gridgoHomeUser);
     await hydrateCashWallets(database,store);
     if (clientSaveScope(store)) {
       const maintenance = saveMaintenanceView(store);
@@ -2792,6 +2799,9 @@ async function handleAuditedRequest(req, res) {
     const signupResponse=pathname==='/auth/clerk/supplier-signup'?await routeSupplierSignup({req,url,store,claims:(await verifiedClerkClaimsFor(req))?.claims,
       clerkUser:req.gridgoClerkUser?.clerkUser,readBody,now,id}):null;
     if(signupResponse){
+      const sub=(await verifiedClerkClaimsFor(req))?.claims?.sub;
+      const identity=store.users.find(u=>u.clerkUserId===sub);
+      if(identity)res.gridgoHomeUser={...identity,role:'supplier'};
       if(signupResponse.mutated)await save(store);
       res.setHeader('Cache-Control','private, no-store');
       return send(res,signupResponse.status,signupResponse.body);
@@ -2802,6 +2812,7 @@ async function handleAuditedRequest(req, res) {
     }
     if (req.method === "GET" && pathname === "/auth/me") {
       const auth = await authenticateRequest(req, store);
+      res.gridgoHomeUser=auth.user;
       if (!auth.user) return send(res, auth.status || 401, authFailureBody(auth));
       const supplierBootstrap = shopBootstrap(req, store, auth.user, pathname);
       if (supplierBootstrap) { res.setHeader('Cache-Control', 'private, no-store'); return send(res, 200, supplierBootstrap); }
@@ -2834,6 +2845,7 @@ async function handleAuditedRequest(req, res) {
         const supplierProfile = (store.supplierProfiles || []).find(p=>p.userId===user.id);
         user = {...user,role:requestedRole,...(['supplier','rider'].includes(requestedRole)?{verificationStatus:approval?.status || 'unverified'}:{}),...(requestedRole==='supplier' && supplierProfile?{supplierName:supplierProfile.shopName,shop:supplierProfile.shop}:{})};
       }
+      res.gridgoHomeUser=user;
       await recordStaffSignIn(req, store, user);
       if (user.role === 'client') store = await refreshFoundingTester(store, user.id);
       const projected = userWithAccountState(user);
@@ -2856,6 +2868,7 @@ async function handleAuditedRequest(req, res) {
     const fixedAuthRole = FIXED_AUTH_ROLES.get(pathname);
     if (req.method === "GET" && fixedAuthRole) {
       const auth = await authenticateRequest(req, store);
+      res.gridgoHomeUser=auth.user;
       if (!auth.user) return send(res, auth.status || 401, authFailureBody(auth));
       const supplierBootstrap = fixedAuthRole === 'supplier' ? shopBootstrap(req, store, auth.user, pathname) : null;
       if (supplierBootstrap) { res.setHeader('Cache-Control', 'private, no-store'); return send(res, 200, supplierBootstrap); }
@@ -2872,6 +2885,7 @@ async function handleAuditedRequest(req, res) {
           requiredRole: fixedAuthRole,
         });
       }
+      res.gridgoHomeUser={...auth.user,role:fixedAuthRole};
       await recordStaffSignIn(req, store, { ...auth.user, role: fixedAuthRole });
       if (fixedAuthRole === 'client') store = await refreshFoundingTester(store, auth.user.id);
       res.setHeader('Cache-Control', 'private, no-store');
@@ -2937,6 +2951,7 @@ async function handleAuditedRequest(req, res) {
       if (result.status === 201) await save(store);
       await recordEnrollmentConsent(database, result.user, consent);
       const refreshed = await authenticateRequest(req, store);
+      res.gridgoHomeUser={...refreshed.user,role};
       const response = fixedAuthProjection(store, refreshed, role);
       if (role === "supplier") {
         response.supplierServices = (result.supplierServices || []).map(service => summarizeService(service, store));
@@ -2947,6 +2962,7 @@ async function handleAuditedRequest(req, res) {
 
     if (req.method === "POST" && pathname === "/me/business-application") {
       const auth = await authenticateRequest(req, store);
+      res.gridgoHomeUser=auth.user;
       if (!auth.user) {
         return send(res, auth.status || 401, {
           error: "unauthorized",
@@ -2981,6 +2997,7 @@ async function handleAuditedRequest(req, res) {
       const deviceToken = normalizeDeviceToken(body?.deviceToken);
       let released = false;
       const auth = await authenticateRequest(req, store);
+      res.gridgoHomeUser=auth.user;
       if (!auth.user) {
         return send(res, auth.status || 401, { error: auth.status === 403 ? "forbidden" : "unauthorized" });
       }
@@ -3001,6 +3018,7 @@ async function handleAuditedRequest(req, res) {
     }
 
     const auth = await authenticateRequest(req, store);
+    res.gridgoHomeUser=auth.user;
     let user = auth.user;
     if (user && pathname.startsWith('/me/shop-team') && !pathname.startsWith('/me/shop-team/working')) {
       const m=selectedShop(store,user,req.headers['x-gridgo-shop-id']);
@@ -3068,6 +3086,7 @@ async function handleAuditedRequest(req, res) {
       }
     }
 
+    res.gridgoHomeUser=user;
     if (user && ['rider', 'ops_admin', 'super_admin'].includes(user.role)
       && (pathname === '/dispatch/offers' || req.method === 'POST' && /^\/dispatch\/[^/]+\/(accept|decline)$/.test(pathname))) {
       if (database.inWriteTransaction()) {
@@ -3261,6 +3280,9 @@ async function handleAuditedRequest(req, res) {
       return send(res, riderProfileResponse.status, riderProfileResponse.body);
     }
 
+    res.gridgoHomeUser=user;
+    const homeResponse=await routeHomePrinters({req,url,store,user,readBody,now,id,audit});
+    if(homeResponse){if(homeResponse.mutated)await save(store);return send(res,homeResponse.status,homeResponse.body);}
     const signupSetup=await routeSignupSetup({req,url,store,user,readBody,now,id,audit});
     if(signupSetup){if(signupSetup.mutated)await save(store);res.setHeader('Cache-Control','private, no-store');return send(res,signupSetup.status,signupSetup.body);}
     if(req.method==='GET'&&['/me/supplier-signup','/me/payout-status'].includes(pathname)) {
@@ -4575,6 +4597,7 @@ async function handleAuditedRequest(req, res) {
         ...store.settings,
         shopMoney: Object.hasOwn(body,"shopMoney") ? {...shopMoneySettings(store.settings),...body.shopMoney,launchedAt:shopMoneySettings(store.settings).launchedAt} : shopMoneySettings(store.settings),
         supplierVerification: Object.hasOwn(body,"supplierVerification") ? body.supplierVerification : verificationSettings(store.settings),
+        homePrinter: Object.hasOwn(body,"homePrinter") ? body.homePrinter : homeSettings(store.settings),
         expressRates: Object.hasOwn(body,"expressRates") ? body.expressRates : expressRates(store.settings),
         groupPaymentTimeoutMinutes: Object.hasOwn(body,"groupPaymentTimeoutMinutes") ? body.groupPaymentTimeoutMinutes : (store.settings.groupPaymentTimeoutMinutes??10),
         cash: Object.hasOwn(body,'cash') ? (body.cash && typeof body.cash==='object' && !Array.isArray(body.cash)
@@ -4938,6 +4961,7 @@ async function handleAuditedRequest(req, res) {
       const validation = validatedShop(body.shop);
       if (!validation.shop) return send(res, 400, validation);
       const profile = (store.supplierProfiles || []).find((candidate) => candidate.userId === target.id);
+      if(profile?.homePrinter)return send(res,409,{error:'home_pin_route_required'});
       const previousShop = profile?.shop
         ? structuredClone(profile.shop)
         : (target.shop ? structuredClone(target.shop) : null);
@@ -6991,6 +7015,8 @@ async function handleAuditedRequest(req, res) {
       const order = store.orders.find((o) => o.id === orderId);
       if (!order) return send(res, 404, { error: "order_not_found" });
       const next = body.state;
+      if(order.orderType==='express'&&homeProfile(store,order.supplierId)&&order.shopAcceptance?.status!=='accepted'
+        &&['supplier_accepted','payment_authorized','production','supplier_self_qc','ready_for_dispatch'].includes(next))return send(res,409,{error:'home_express_accept_required'});
       if(order.expressOrder?.paymentTiming==='after_acceptance'&&['supplier_accepted','payment_authorized','production','supplier_self_qc','ready_for_dispatch'].includes(next)
         && !paymentSettled(order.payments?.initial))return send(res,409,{error:'payment_required',message:'The shop must accept A3 Express through its accept action, then the client pays before work starts.'});
       if(order.orderType==='express' && order.fulfillmentMode==='pickup' && ['rider_assigned','picked_up','out_for_delivery','awaiting_collection','delivered','issue_window_open','completed'].includes(next)) {
