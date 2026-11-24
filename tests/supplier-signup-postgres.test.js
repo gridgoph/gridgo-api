@@ -41,7 +41,7 @@ async function enroll(api) {
   const sample=await api('client','GET',`${path}/document-sample`,null,{raw:true});
   assert.equal(sample.status,200);assert.equal(sample.headers.get('content-type'),'image/png');
   assert.ok(Number(sample.headers.get('content-length'))>100);
-  ok(await api('client','PATCH',path,{expectedVersion:0,step:'eligibility',value:{shopKind:'home_printer',registrantRole:'manager',adult:true}}));
+  ok(await api('client','PATCH',path,{expectedVersion:0,step:'eligibility',value:{shopKind:'print_shop',registrantRole:'manager',adult:true}}));
   ok(await api('client','PATCH',path,{expectedVersion:1,step:'shop',value:{shopName:'New shop',contactName:'Contact',phone:'+639170000001',ownerPhone:'+639170000002'}}));
   const wording=ok(await api('client','GET',path)).locationConsentWording;
   ok(await api('client','PATCH',path,{expectedVersion:2,step:'location',value:{point:{lat:7.06,lng:125.6,label:'Pickup'},consent:{accepted:true,wording}}}));
@@ -194,4 +194,26 @@ test('owner rejection reaches the registering Manager inbox and push without gra
   store.shopTeamMemberSettings.find(s=>s.userId==='client'&&s.shopId==='client').manager=false;
   assert.equal(notificationVisible(store,notice,'client','supplier',{shopId:'client'}),false);
   assert.equal(deviceAcceptsNotification(store,device,notice),false);
+});
+test('guided home signup persists private consent, documents-only capabilities and an offline Starter checklist',{skip},async t=>{
+ const {db,api}=await setup(t,true),path='/auth/clerk/supplier-signup';
+ const {HOME_PIN_CONSENT}=await import('../src/home-printers.js');
+ ok(await api('client','PATCH',path,{expectedVersion:0,step:'eligibility',value:{shopKind:'home_printer',registrantRole:'owner',adult:true}}));
+ ok(await api('client','PATCH',path,{expectedVersion:1,step:'shop',value:{shopName:'Home printer',contactName:'Private contact',phone:'+639170000001'}}));
+ const pin={point:{lat:7.061234,lng:125.601234},barangay:'Test barangay',street:'Private street',propertyType:'house',landmark:'Private landmark',consent:{accepted:true,wording:HOME_PIN_CONSENT}};
+ ok(await api('client','PATCH',path,{expectedVersion:2,step:'location',value:pin}));
+ assert.equal((await api('client','PATCH',path,{expectedVersion:3,step:'prints',value:{groups:['marketing']}})).body.error,'home_documents_only');
+ ok(await api('client','PATCH',path,{expectedVersion:3,step:'prints',value:{groups:['documents'],documents:{papers:['short','a4','long'],colours:['bw'],duplex:false}}}));
+ const result=ok(await api('client','POST','/auth/clerk/enroll/supplier',{signupVersion:4},{key:'home-enrollment'}));
+ assert.equal(result.supplierProfile.shop.lat,7.061234);assert.equal(result.homePrinter.level,'pending');assert.equal(result.capabilities.receiveJobOffers,false);
+ const own=ok(await api('client','GET','/me/home-printer',null,supplier));assert.equal(own.homePrinter.online,false);assert.equal(own.pin.barangay,'Test barangay');
+ const resumed=ok(await api('client','GET','/me/supplier-signup',null,supplier));assert.equal(resumed.signup.nextStep,'payout');
+ const store=await loadStore(db),profile=store.supplierProfiles.find(p=>p.userId==='client');
+ assert.equal(profile.supplierType,'home');assert.equal(profile.homePrinter.pinConsent.wording,HOME_PIN_CONSENT);assert.equal(profile.pickupAvailable,false);
+ assert.ok(store.catalogItems.filter(i=>i.supplierId==='client').every(i=>i.subcategoryCode==='document_printing'&&i.express));
+ const clientIdentity=ok(await api('client','GET','/auth/me/client'));
+ const personal=store.users.find(u=>u.id==='client');
+ for(const key of ['id','name','email','phone'])assert.equal(clientIdentity.user[key],personal[key],key);
+ assert.equal(JSON.stringify(clientIdentity).includes(String(pin.point.lat)),false);
+ assert.equal(JSON.stringify(clientIdentity).includes(pin.street),false);
 });

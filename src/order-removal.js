@@ -13,7 +13,9 @@ const activeOrderAndBasketSql = (expression) => `${activeOrderSql(expression)} A
  * unrelated save cannot delete or rewrite the retained history. Audit is exempt. */
 export function orderReadQuery({ name, columns }, where = '', { select = columns } = {}) {
   let predicate;
-  if (name === 'orders') predicate = activeOrderSql('orders.id');
+  if(name==='express_groups')predicate=activeOrderAndBasketSql("(express_groups.data->>'orderId')");
+  else if(name==='express_group_members')predicate=`NOT EXISTS (SELECT 1 FROM express_groups parent WHERE parent.id=express_group_members.group_id AND NOT (${activeOrderAndBasketSql("(parent.data->>'orderId')")}))`;
+  else if (name === 'orders') predicate = activeOrderSql('orders.id');
   else if (name === 'order_invoices') predicate = activeOrderAndBasketSql('order_invoices.order_id');
   else if (name !== 'audit_log' && columns.includes('order_id')) predicate = activeOrderSql(`${name}.order_id`);
   else if (name === 'order_line_item_options') predicate = `NOT EXISTS (SELECT 1 FROM order_line_items parent

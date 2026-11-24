@@ -1,3 +1,4 @@
+import { homeDistance } from './home-printers.js';
 import { expressFail, expressShopList } from './express-orders.js';
 
 /** Filter/expand after capability and exact-file quotes, so closed or incapable
@@ -24,7 +25,7 @@ export function expressPrinterChoices(store,user,options,at,quotedRows=null) {
    :sort==='top_rated'?(b.rating?.average||0)-(a.rating?.average||0)
    :sort==='lowest_price'?(a.quote?.clientItemSubtotalMinor??Infinity)-(b.quote?.clientItemSubtotalMinor??Infinity)
    :sort==='fewest_jobs'?a.jobsAhead-b.jobsAhead:0)
-  ||a.distanceMeters-b.distanceMeters||a.supplierId.localeCompare(b.supplierId));
+  ||homeDistance(location,store.supplierProfiles.find(p=>p.userId===a.supplierId)?.shop)-homeDistance(location,store.supplierProfiles.find(p=>p.userId===b.supplierId)?.shop)||a.supplierId.localeCompare(b.supplierId));
  return {shops:rows,sort,expandedZones,expanded:expandedZones.length>0,
   expansionReason:expandedZones.length?'fewer_than_three_open_printers':null,
   fareBands:structuredClone(store.settings.deliveryFeeBands),walkingEstimateSource:'straight_line_80m_per_minute'};

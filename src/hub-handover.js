@@ -13,7 +13,7 @@ export const hubRecord = settings => ({ id: 'primary', name: 'GRIDGO pickup hub'
 
 /** Mint once at the physical handover boundary, never on a read. */
 export function prepareHandover(store, order, { at }) {
-  if (store.settings.handoverOtpEnabled !== true || order.handover || !(carriedToOffice(order) ? order.state === 'awaiting_collection' : order.fulfillmentMode === 'delivery' && READY_STATES.includes(order.state))) return false;
+  if ((store.settings.handoverOtpEnabled !== true && !order.groupOrder) || order.handover || !(carriedToOffice(order) ? order.state === 'awaiting_collection' : order.fulfillmentMode === 'delivery' && READY_STATES.includes(order.state))) return false;
   const hub = hubRecord(store.settings);
   const activeCodes = new Set((store.orders || []).filter(o => o.handover && !o.handover.consumedAt && !['cancelled', 'completed', 'payout_released'].includes(o.state)).map(o => o.handover.otp));
   if (activeCodes.size >= 1000000) fail(503, 'handover_codes_exhausted');

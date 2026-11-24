@@ -1,5 +1,7 @@
 # Express API
 
+Group document ordering and companion client/rider calls: [Group Express API](GROUP_EXPRESS_API.md).
+
 Express is an order type on the existing checkout, payment, refund, production,
 artwork review and payout model. Express document production skips finished photos
 and product QA; regular orders retain their evidence gates. It is not the legacy scheduling override represented by a
@@ -116,8 +118,9 @@ the fare-limit choice even for pickup. Display walking time for pickup.
 Home cards expose `barangay` as their name/address, `location:null`, rounded-up
 500 m distance estimates and `distanceApproximate:true`. Shop cards retain their
 public location. This release supplies the discriminator/privacy projection;
-home-printer enrollment, persistence and operational rules remain API issue 412.
-Its future profile adapter must supply `supplierType:"home"` and `barangay`.
+home-printer enrollment, persistence and operational rules are defined in
+[Home printers](HOME_PRINTERS_API.md). Its profile adapter supplies
+`supplierType:"home"` and `barangay`; public responses never expose its pin.
 
 The existing shared `settings.deliveryFeeBands` remains the only fare source.
 Zone A maps to `nearby`, B to `away`, C to `long_distance`; bounds are inclusive.

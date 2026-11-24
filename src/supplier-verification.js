@@ -1,3 +1,4 @@
+import { homeSettings, homePrinterStatus, homeVerified } from './home-printers.js';
 import { randomUUID } from 'node:crypto';
 
 const DAY = 86400000;
@@ -28,6 +29,8 @@ export function assertVerificationPolicyChange(store,next) {
   }
 }
 export function supplierVerified(store,supplierId) {
+  const home=store.supplierProfiles?.find(p=>p.userId===supplierId&&p.homePrinter);
+  if(home)return homeVerified(store,home);
   return (store.approvalCases||[]).some(c=>c.userId===supplierId&&c.kind==='supplier'&&c.status==='approved');
 }
 /** Existing jobs survive the new-order deadline, closure and payout limits. */
@@ -83,10 +86,11 @@ function reservations(store,supplierId) {
   return ledgerFor(store,supplierId).filter(e=>e.kind==='reserved' && latest(store,e.payoutKey)===e);
 }
 export function verificationSummary(store,supplierId,at=new Date().toISOString()) {
-  const policy=verificationSettings(store.settings),verified=supplierVerified(store,supplierId);
+  const home=store.supplierProfiles?.find(p=>p.userId===supplierId&&p.homePrinter);
+  const policy={...verificationSettings(store.settings),...(home?{windowDays:homeSettings(store.settings).verificationWindowDays}:{})},verified=supplierVerified(store,supplierId);
   const approval=store.approvalCases?.find(c=>c.userId===supplierId&&c.kind==='supplier');
   const membership=store.userRoleMemberships?.find(m=>m.userId===supplierId&&m.role==='supplier');
-  const startedAt=membership?.createdAt||approval?.createdAt||store.users?.find(u=>u.id===supplierId)?.createdAt||null;
+  const startedAt=home?.homePrinter.startedAt||membership?.createdAt||approval?.createdAt||store.users?.find(u=>u.id===supplierId)?.createdAt||null;
   const deadlineAt=startedAt&&Number.isFinite(Date.parse(startedAt))?new Date(Date.parse(startedAt)+policy.windowDays*DAY).toISOString():null;
   const daysLeft=deadlineAt?Math.max(0,Math.ceil((Date.parse(deadlineAt)-Date.parse(at))/DAY)):0;
   const ledger=ledgerFor(store,supplierId),events=paidEvents(store,supplierId);
@@ -107,7 +111,7 @@ export function verificationSummary(store,supplierId,at=new Date().toISOString()
     capReached:!verified&&paidBeforeVerificationMinor>=policy.payoutCapMinor,
     remainingCapMinor:Math.max(0,policy.payoutCapMinor-paidBeforeVerificationMinor-sum(reservations(store,supplierId).map(e=>e.data.netAmountMinor))),
     heldMinor:sum(held.map(e=>e.amountMinor)),recoveryDueMinor,paidOpenRegularJobs:openJobs.size,
-    newOrdersPaused:!supplierCanWork(store,supplierId)||(!verified&&recoveryDueMinor>0)||(!verified&&(!deadlineAt||Date.parse(at)>=Date.parse(deadlineAt)))};
+    newOrdersPaused:(home&&homePrinterStatus(store,home,at).newOrdersPaused)||!supplierCanWork(store,supplierId)||(!verified&&recoveryDueMinor>0)||(!verified&&(!deadlineAt||Date.parse(at)>=Date.parse(deadlineAt)))};
 }
 export function assertVerifiedCashShop(store,supplierId) {if(!supplierVerified(store,supplierId))fail('cash_supplier_verification_required');}
 /** Reserve before a manual transfer. A retry returns the same frozen amount. */

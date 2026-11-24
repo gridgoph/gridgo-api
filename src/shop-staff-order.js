@@ -1,6 +1,6 @@
 // An allowlist prevents future order money/private fields leaking through the
 // legacy supplier projection. Nested production specs also discard money.
-const FIELDS = new Set(['id', 'title', 'orderType', 'expressOrder', 'fileAccesses', 'state', 'createdAt', 'updatedAt', 'version', 'supplierId', 'riderId',
+const FIELDS = new Set(['id', 'title', 'orderType', 'groupOrder', 'expressOrder', 'fileAccesses', 'state', 'createdAt', 'updatedAt', 'version', 'supplierId', 'riderId',
   'readyBy', 'promisedDate', 'fulfillmentMode', 'pickup', 'productionItems', 'jobDetails', 'timeline', 'actions',
   'artworkFileIds', 'mockupFileIds', 'artworkLinks', 'artworkAttachments', 'productionProgress', 'packingProgress',
   'shopAcceptance', 'shopHandover', 'pickupChecklist', 'pickupChat', 'clientShopChat', 'fileCheck', 'specialInstructions',
@@ -12,7 +12,7 @@ export function staffExpressProjection(express) {
   return {
     ...pick(express, ['status', 'originalSupplierId', 'currentSupplierId', 'declineCount', 'acceptBy']),
     printSettings: (express.printSettings || []).map(print => ({
-      ...pick(print, ['fileId', 'copies', 'colour', 'paper', 'paperStock', 'sides', 'layout', 'note', 'acceptedWarnings']),
+      ...pick(print, ['fileId', 'groupMemberId', 'groupMemberName', 'copies', 'colour', 'paper', 'paperStock', 'sides', 'layout', 'note', 'acceptedWarnings']),
       pages: pick(print.pages, ['total', 'range', 'printed']),
     })),
   };

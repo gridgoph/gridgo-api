@@ -40,7 +40,7 @@ test('signup resumes the first unfinished step and stores consent wording and se
 });
 test('manager contact requires an owner mobile and the contact mobile must be Clerk verified',async()=>{
   const f=fixture();
-  await f.call('PATCH',{expectedVersion:0,step:'eligibility',value:{shopKind:'home_printer',registrantRole:'manager',adult:true}});
+  await f.call('PATCH',{expectedVersion:0,step:'eligibility',value:{shopKind:'print_shop',registrantRole:'manager',adult:true}});
   await assert.rejects(f.call('PATCH',{expectedVersion:1,step:'shop',value:{shopName:'Shop',contactName:'Contact',phone:PHONE}}),e=>e.code==='invalid_supplier_signup');
   f.clerkUser.phoneNumbers[0].verification.status='unverified';
   await assert.rejects(f.call('PATCH',{expectedVersion:1,step:'shop',value:{shopName:'Shop',contactName:'Contact',phone:PHONE,ownerPhone:'+639170000002'}}),e=>e.code==='shop_mobile_verification_required');

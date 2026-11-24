@@ -1,3 +1,4 @@
+import { homePrinterStatus } from './home-printers.js';
 import { shopPaused } from './shop-availability.js';
 import {shopMoneyPaused} from './shop-money-policy.js';
 import { supplierVerified, supplierCanWork, verificationSummary } from "./supplier-verification.js";
@@ -23,6 +24,8 @@ export function supplierMatchBlockersFor(store, clock = new Date().toISOString()
     if (!members.has(supplierId)) {
       missing.push("supplier_membership");
     }
+    if(profile?.homePrinter && !supplierCanWork(store,supplierId))missing.push('supplier_not_approved');
+    if(profile?.homePrinter) { const status=homePrinterStatus(store,profile,at);if(status.reason)missing.push(status.reason); }
     if (!supplierVerified(store,supplierId)) {
       if (!supplierCanWork(store,supplierId)) missing.push("supplier_not_approved");
       const hasDocumentService=(store.supplierServices||[]).some(service=>service.supplierId===supplierId
@@ -32,7 +35,7 @@ export function supplierMatchBlockersFor(store, clock = new Date().toISOString()
       const account=(store.supplierPayoutAccounts||[]).find(row=>row.supplierId===supplierId);
       if (!account?.qrFileId || !(store.files||[]).some(f=>f.fileId===account.qrFileId&&f.ownerId===supplierId&&f.purpose==="supplier_payout_qr"&&f.state==="ready"&&!f.deleteRequestedAt&&!f.deletedAt)) missing.push("payout_qr");
       const summary=verificationSummary(store,supplierId,at);
-      if (!summary.deadlineAt || Date.parse(at)>=Date.parse(summary.deadlineAt)) missing.push("verification_deadline");
+      if (!profile?.homePrinter && (!summary.deadlineAt || Date.parse(at)>=Date.parse(summary.deadlineAt))) missing.push("verification_deadline");
     }
     if (!supplierVerified(store,supplierId) && verificationSummary(store,supplierId,at).recoveryDueMinor>0) missing.push("verification_recovery");
     return missing;
