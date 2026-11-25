@@ -81,6 +81,9 @@ export async function up(pgm) {
         RETURN NEW;
       END IF;
       IF NEW.status = 'returned' THEN RETURN NEW; END IF;
+      -- The store saves by upsert, which fires INSERT triggers for a row that is already
+      -- counted. The UPDATE branch then guards the change itself.
+      IF EXISTS (SELECT 1 FROM member_perk_uses u WHERE u.id = NEW.id) THEN RETURN NEW; END IF;
       PERFORM 1 FROM organization_partners WHERE user_id = NEW.organization_user_id FOR UPDATE;
       PERFORM 1 FROM organization_memberships m WHERE m.id = NEW.membership_id
         AND m.organization_user_id = NEW.organization_user_id AND m.client_id = NEW.client_id

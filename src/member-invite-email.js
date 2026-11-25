@@ -47,7 +47,7 @@ export function createMemberInviteWorker({ database, env = process.env, createTr
         const message = memberInviteMessage({ label: row.label, term: row.term, kind: row.kind, expiresAt: row.expires_at });
         let status = 'failed';
         try {
-          if (interpretSmtpResult(await transport.sendMail({ from: env.EMAIL_USER, to: row.contact, ...message, messageId: `<${row.id}@gridgo.members>` })).sent) status = 'sent';
+          if (interpretSmtpResult(await transport.sendMail({ from: env.EMAIL_USER, to: { name: '', address: row.contact }, ...message, messageId: `<${row.id}@gridgo.members>` })).sent) status = 'sent';
         } catch (error) { if (NOT_SENT.has(error?.code) && row.attempts < 3) status = 'pending'; }
         await write(async () => {
           await database.query('UPDATE member_invite_outbox SET status = $2, next_at = $3 WHERE id = $1', [row.id, status, status === 'pending' ? eveningSlot(clock(), 1) : at]);

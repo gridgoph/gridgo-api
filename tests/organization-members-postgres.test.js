@@ -11,7 +11,7 @@ import { AT, id } from './fixtures/reschedule.js';
 import { schoolYear, selectMemberPerk, reserveMemberPerk } from '../src/member-perks.js';
 import { sweepMembers } from '../src/organization-members.js';
 import { createMemberInviteWorker } from '../src/member-invite-email.js';
-import { eveningSlot, saveMemberList } from '../src/member-list.js';
+import { eveningSlot, saveMemberList, parseContact } from '../src/member-list.js';
 import { createPayoutMilestones } from '../src/operational-model.js';
 import { up, down } from '../migrations/1795622400000_organization_members.js';
 
@@ -221,18 +221,18 @@ test('invites go out once in the early evening with one reminder at most, and a 
     { name: 'Gamma', contact: '09181112222', memberSince: '2024-01-01' }] }, { at: noon, id, secret: 'test' }));
   const sent = []; let at = noon, failWith = null;
   const env = { EMAIL_USER: 'mailer@example.invalid', EMAIL_PASSWORD: 'test' };
-  const createTransport = () => ({ sendMail: async message => { if (failWith) throw Object.assign(new Error('mail'), { code: failWith }); sent.push(message); return { accepted: [message.to], rejected: [], messageId: 'm' }; } });
+  const createTransport = () => ({ sendMail: async message => { if (failWith) throw Object.assign(new Error('mail'), { code: failWith }); sent.push(message); return { accepted: [message.to.address], rejected: [], messageId: 'm' }; } });
   const run = createMemberInviteWorker({ database: db, env, createTransport, clock: () => at, id });
   await run(); assert.equal(sent.length, 0, 'never before 18:00 Manila');
   at = '2026-11-10T10:05:00.000Z'; await Promise.all([run(), run()]);
-  assert.deepEqual(sent.map(row => row.to).sort(), ['alpha@example.invalid', 'beta@example.invalid']);
+  assert.deepEqual(sent.map(row => row.to.address).sort(), ['alpha@example.invalid', 'beta@example.invalid']);
   assert.match(sent[0].text, /not a member until you confirm/); assert.doesNotMatch(sent[0].text, /Alpha|Beta|perk/i);
   at = '2026-11-11T10:05:00.000Z'; await run(); assert.equal(sent.length, 2);
   // One accepts; only the other is reminded, once.
   await db.query("UPDATE member_list_entries SET status = 'accepted', contact = NULL, name = NULL, closed_at = now() WHERE name = 'Alpha'");
   at = '2026-11-17T10:05:00.000Z'; failWith = 'ECONNREFUSED'; await run();
   at = '2026-11-18T10:05:00.000Z'; failWith = null; await run();
-  assert.deepEqual(sent.slice(2).map(row => [row.to, /^Reminder/.test(row.subject)]), [['beta@example.invalid', true]]);
+  assert.deepEqual(sent.slice(2).map(row => [row.to.address, /^Reminder/.test(row.subject)]), [['beta@example.invalid', true]]);
   for (const day of ['19', '25', '26']) { at = `2026-11-${day}T10:05:00.000Z`; await run(); }
   assert.equal(sent.length, 3);
   // An unknown outcome is never sent again, and the address is stored nowhere but the open entry.
@@ -392,6 +392,21 @@ test('HTTP: after payment only a no-fault cancellation returns the use', { skip 
   }
 });
 
+test('a payment confirms or a use returns at the member cap, at the budget cap, with the perk off and after the member left', { skip }, async t => {
+  const { db, store, api } = await setup(t, s => { setPerk(s, null, { ...PERK, maxOrdersPerTerm: 2, budgetCapMinor: 2000 }, AT); addMember(s, 'client', { at: NOW() }); });
+  const placed = [];
+  for (const reference of ['ONE', 'TWO']) placed.push((await ok(api, 'client', 'POST', `${await cart(api, store)}/checkout`, pay(reference), 201)).order.id);
+  await ok(api, 'ops', 'POST', `/orders/${placed[0]}/payments/initial/confirm`, { reason: 'Received' });
+  await mutate(db, s => { s.memberPerkSettings[0].enabled = false; });
+  const membership = (await ok(api, 'client', 'GET', '/me/memberships')).memberships[0];
+  await ok(api, 'client', 'DELETE', `/me/memberships/${membership.id}`);
+  await ok(api, 'ops', 'POST', `/orders/${placed[1]}/payments/initial/confirm`, { reason: 'Received' });
+  assert.deepEqual((await rows(db, 'member_perk_uses')).map(row => row.status), ['confirmed', 'confirmed']);
+  await mutate(db, s => { s.memberPerkUses[0].status = 'returned'; });
+  assert.deepEqual((await rows(db, 'member_perk_uses')).map(row => row.status).sort(), ['confirmed', 'returned']);
+  await assert.rejects(mutate(db, s => { s.memberPerkUses.find(row => row.status === 'confirmed').amountMinor = 1; }), { code: '23514' });
+});
+
 test('concurrent checkouts never pass the member cap or the organization budget', { skip }, async t => {
   const { db, store, api } = await setup(t, s => {
     setPerk(s, null, { ...PERK, maxOrdersPerTerm: 2, budgetCapMinor: 3000 }, AT);
@@ -458,6 +473,13 @@ test('event records group own orders once and download as a statement pack', { s
   assert.equal((await ok(api, 'org', 'GET', '/me/organization/partnership')).partnership.events.length, 1);
   await ok(api, 'org', 'DELETE', `/me/organization/events/${event.id}`, { expectedVersion: 2 });
   assert.equal((await ok(api, 'org', 'GET', '/me/organization/events')).events.length, 0);
+});
+
+test('a list contact is one plain address or one Philippine mobile number', () => {
+  assert.deepEqual(parseContact(' First.Last+tag@Example.invalid '), { kind: 'email', contact: 'first.last+tag@example.invalid' });
+  assert.deepEqual(parseContact('(0917) 123-4567'), { kind: 'mobile', contact: '+639171234567' });
+  for (const value of ['group:a@example.invalid', 'a@example.invalid,b@example.invalid', 'a(x)@example.invalid', 'a@[127.0.0.1]', 'a\\b@example.invalid', '"a b"@example.invalid', 'a@b@example.invalid',
+    'a@example', 'a@-x.invalid', 'a\r\nBcc:b@example.invalid', 'a\u0000@example.invalid', '<a@example.invalid>', '12345', '', null]) assert.equal(parseContact(value), null, String(value));
 });
 
 test('the migration is additive and forward only', async () => {

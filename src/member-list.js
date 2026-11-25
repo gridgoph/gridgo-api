@@ -17,9 +17,11 @@ export function parseMemberSince(value, at) {
   if (!day || Number.isNaN(Date.parse(`${day}T00:00:00Z`)) || new Date(`${day}T00:00:00Z`).toISOString().slice(0, 10) !== day) return null;
   return day >= '1950-01-01' && day <= manilaDay(at) ? day : null;
 }
+// A plain addr-spec only: no groups, comments, quotes, literals or lists a mail parser could read differently.
+const EMAIL = /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i;
 export function parseContact(value) {
   const text = typeof value === 'string' ? value.trim() : '';
-  if (text.includes('@')) return text.length <= 254 && /^[^\s@,;<>"]+@[^\s@,;<>"]+\.[^\s@,;<>"]+$/.test(text) ? { kind: 'email', contact: text.toLowerCase() } : null;
+  if (text.includes('@')) return text.length <= 254 && EMAIL.test(text) ? { kind: 'email', contact: text.toLowerCase() } : null;
   try { return { kind: 'mobile', contact: philippineMobileNumber(text) }; } catch { return null; }
 }
 
