@@ -192,6 +192,9 @@ must print this **order-time snapshot**, never the live profile's name. `GET /or
 field for statement consumers. The JSON, CSV and PDF exports in `docs/ORGANIZATION_MONEY_API.md` read this immutable snapshot, including during a pending handover.
 Older orders stay unattributed if no verified officer was recorded then.
 
+A handover also keeps a partner organization's member list, invites and event records; they
+belong to the account, not to the officer. See [organization members](ORGANIZATION_MEMBERS_API.md).
+
 ## Quarterly confirmation and manual notices
 
 The existing transactional lifecycle worker checks each organization's persisted due date.

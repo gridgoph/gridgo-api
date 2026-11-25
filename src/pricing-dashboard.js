@@ -457,7 +457,8 @@ function orderEarnings(order, refunds, paymentFeeBps) {
     feeMinor: Number.isSafeInteger(feeMinor) ? feeMinor : null,
     paymentFeeMinor,
     voucherMinor: null,
-    discountMinor: Number.isSafeInteger(order.organizationDiscountMinor) ? order.organizationDiscountMinor : null,
+    // Both are GRIDGO's own reductions of the gross fee.
+    discountMinor: Number.isSafeInteger(order.organizationDiscountMinor) ? order.organizationDiscountMinor + (order.memberPerkMinor ?? 0) : null,
     reprintShareMinor: null,
     refundShareMinor,
     deliveryAbsorbedMinor,

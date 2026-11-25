@@ -688,6 +688,9 @@ Returns `{ invoice }` with immutable line snapshots, one delivery line per job, 
 
 Common errors are `invalid_preference_ranking`, `dropoff_required`, `match_not_found`, `cart_not_found`, `cart_checked_out`, `cart_empty`, `catalog_item_stale`, `file_not_ready`, and `payment_method_not_allowed`.
 
+A member perk is applied automatically at checkout. Cart, order and invoice fields and the
+optional `expectedMemberPerkMinor` check: [organization members](ORGANIZATION_MEMBERS_API.md#perk-at-checkout).
+
 ## Order reads for reorder
 
 For the owning client, `GET /orders` and `GET /orders/:id` include

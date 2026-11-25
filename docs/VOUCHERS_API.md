@@ -139,6 +139,10 @@ Orders also store `voucherDiscountMinor`, `voucherServiceFeeMinor`, `voucherDeli
 
 Client/Operations order and invoice projections include the voucher line. Ordinary supplier/rider projections omit wallet identifiers and discount funding fields. Operations money reporting additionally includes `voucherFunding`, while platform revenue reports the voucher discount and net fee. Supplier settlement and rider entitlements are unchanged.
 
+A member perk may be used with a voucher. The perk comes off GRIDGO's fee first; the
+voucher's service-fee capacity is what is left. If the perk would not lower the total, its
+use is not spent. See [organization members](ORGANIZATION_MEMBERS_API.md#perk-at-checkout).
+
 ## Confirmation, expiry and cancellation
 
 Existing single-order initial-payment confirmation and basket confirmation consume the reservation atomically with payments, audit and notices. Basket groups cannot confirm through individual order payment routes. Confirmation checks the exact owning payment boundary, voucher availability, voucher expiry and reservation expiry. Expiry is exclusive: confirmation at the timestamp is refused. Pausing a campaign does not invalidate an existing reservation; voiding a reserved submitted checkout is refused.

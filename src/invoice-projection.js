@@ -1,6 +1,7 @@
 import { publicColourQuote } from './colour-projection.js';
 import { splitVoucherMinor } from './voucher-money.js';
 import { clientVoucher } from './voucher-projection.js';
+import { clientPerk } from './member-perk-projection.js';
 import { clientMoneyMinor } from './supplier-catalog.js';
 
 /** Add client display amounts using only the immutable receipt's fee snapshot. */
@@ -31,6 +32,7 @@ export function clientInvoice(snapshot, { exposeWorking = false, hideSupplierAmo
       delete section.serviceFeeSchedule; delete section.serviceFeeWorking;
       for (const field of ['voucherSupplierMinor', 'gridgoSupplierTopupMinor', 'gridgoRiderTopupMinor']) delete section[field];
       if (section.voucher) section.voucher = clientVoucher(section.voucher);
+      if (section.memberPerk) section.memberPerk = clientPerk(section.memberPerk);
     }
     if (hideSupplierAmounts) {
       delete section.itemSubtotalMinor;

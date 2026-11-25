@@ -117,7 +117,7 @@ export function assertStaffFile(user, store, file, { upload = false, purpose = f
   }))) shopTeamError(403, 'forbidden');
 }
 
-function verifiedIdentities(clerkUser) {
+export function verifiedIdentities(clerkUser) {
   const email = (clerkUser?.emailAddresses || clerkUser?.email_addresses || [])
     .filter(row => row.verification?.status === 'verified').map(row => String(row.emailAddress || row.email_address || '').trim().toLowerCase());
   const phone = (clerkUser?.phoneNumbers || clerkUser?.phone_numbers || [])

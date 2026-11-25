@@ -99,3 +99,23 @@ test('group checkout uses approved listing controls while a private revision wai
  const paid=await call(client,'POST',`/express/groups/${g.id}/checkout`,{looksRight:true,expressConfirmation:draft.body.confirmation,payment:{method:'qr_manual',reference:'GROUP-APPROVED',proofFileId:'file_qr'}});
  assert.equal(paid.status,201);assert.ok(store.catalogItems.every(item=>item.reviewStatus==='pending'&&item.printLayouts[0]==='actual_size_centered'));
 });
+test('the host member perk lowers one Express group total, is shared by printing and never changes shop or rider pay',async()=>{
+ const {addPartner,addMember}=await import('./fixtures/organization-members.js');
+ const run=async (perk)=>{
+  const f=await groupFixture(),{store,client,member,call,g}=f;
+  if(perk)addPartner(store,{at:AT,perk:{amountMinor:101}});
+  // A joiner's own membership never prices the host's order.
+  if(perk==='host')addMember(store,client.id,{at:AT});if(perk==='joiner')addMember(store,member.id,{at:AT});
+  await call(client,'POST',`/express/groups/${g.id}/close`);const d=await call(client,'POST',`/express/groups/${g.id}/prepare`);
+  await call(client,'POST',`/express/groups/${g.id}/checkout`,{looksRight:true,expressConfirmation:d.body.confirmation,payment:{method:'qr_manual',reference:'GROUP-TEST',proofFileId:'file_qr'}});
+  return {store,order:store.orders.at(-1),group:store.expressGroups[0],quote:d.body.quote};
+ };
+ const plain=await run(null),host=await run('host'),joiner=await run('joiner');
+ assert.equal(joiner.order.totalMinor,plain.order.totalMinor);assert.equal(joiner.store.memberPerkUses.length,0);
+ assert.equal(host.order.memberPerkMinor,101);assert.equal(host.quote.totalMinor,host.order.totalMinor);assert.equal(host.order.totalMinor,plain.order.totalMinor-101);
+ assert.equal(host.group.amounts.reduce((n,a)=>n+a.amountOwedMinor,0),host.order.totalMinor);
+ for(const [i,a] of host.group.amounts.entries())assert.ok(a.amountOwedMinor<plain.group.amounts[i].amountOwedMinor);
+ for(const key of ['supplierSubtotalMinor','supplierPlatformPayoutMinor','riderPayoutMinor','deliveryFeeMinor'])assert.equal(host.order[key],plain.order[key],key);
+ assert.deepEqual(host.order.payoutMilestones.map(m=>m.amountMinor),plain.order.payoutMilestones.map(m=>m.amountMinor));
+ assert.equal(host.store.memberPerkUses.length,1);
+});

@@ -58,6 +58,13 @@ records the discount; immutable order data and payment allocations persist atomi
 No supplier payout stage, payout entitlement, delivery fee, or rider split changes.
 A basket owns one payment but each group owns its own discount and finance record.
 
+### Member perk
+
+A client may also hold a GRIDGO-set member perk. Only the larger of this discount and one
+member perk applies; a tie keeps the discount. Orders carry `organizationDiscountMinor`
+or `memberPerkMinor`, never both. An organization's own event packs use the statement
+columns below. See [organization members](ORGANIZATION_MEMBERS_API.md).
+
 ## Statements
 
 - Client: `GET /me/organization/statements`

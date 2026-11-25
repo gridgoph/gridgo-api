@@ -17,6 +17,8 @@ import { snapshotShopClock } from './shop-hours.js';
 import { feeSchedule, feeSettings } from './service-fee.js';
 import { voucherMoney, applyVoucherMoney, splitVoucherMinor } from './voucher-money.js';
 import { clientVoucher } from './voucher-projection.js';
+import { selectMemberPerk, withMemberPerk, publicPerkChoice, perkSnapshot, reserveMemberPerk } from './member-perks.js';
+import { publicMemberPerk } from './member-perk-projection.js';
 import { selectVoucher, settleVoucherInitial, reserveVoucher, releaseVoucherReservations, availableVouchers, addVoucherCode, publicVoucher, confirmVoucher } from './vouchers.js';
 import { cashSettings, requireCashCheckout, cashFail } from './cash-policy.js';
 import { createPayoutMilestones as cashPayoutStages } from './operational-model.js';
@@ -782,8 +784,23 @@ export function cartVoucherPlan(store, cart, lines, at) {
     return { supplierSubtotalMinor, deliveryFeeMinor, ...organizationFeeMoney(supplierSubtotalMinor, groupFeeSettings(store, cart, group.lines, at), approvedOrganization(store, cart.clientId)) };
   });
   if (money.some(group => !group)) return null;
-  const voucher = selectVoucher(store, cart, money, at);
-  return { voucher, money, ...voucherMoney(money, voucher?.valueMinor || 0, voucher?.data) };
+  const voucherPlan = groupMoney => {
+    const voucher = selectVoucher(store, cart, groupMoney, at);
+    return { voucher, money: groupMoney, memberPerk: null, ...voucherMoney(groupMoney, voucher?.valueMinor || 0, voucher?.data) };
+  };
+  const plan = voucherPlan(money);
+  const perk = selectMemberPerk(store, cart.clientId, money, at);
+  if (!perk) return plan;
+  // The larger of the organization discount and one member perk applies (a tie
+  // keeps the discount and the perk use). A voucher still stacks on a perk, and
+  // where a voucher already replaced the discount the perk is free to apply.
+  const organizationMinor = addMinor(money.map(group => group.organizationDiscountMinor), 'perk.organizationDiscount');
+  if (perk.amountMinor <= organizationMinor && !plan.voucherDiscountMinor) return plan;
+  const withPerk = voucherPlan(withMemberPerk(money, perk));
+  const totalOf = candidate => addMinor(candidate.groups.map(group => group.totalMinor), 'perk.total');
+  // Never spend a use that changes nothing, such as under a voucher that covers everything.
+  return totalOf(withPerk) < totalOf(plan)
+    ? { ...withPerk, memberPerk: perk, discountKind: withPerk.discountKind ?? 'member_perk' } : plan;
 }
 
 function clientCartLineAmounts(store,cart,lines,at) {
@@ -848,10 +865,11 @@ export function clientCartQuote(store, cart, lines, at) {
   if (voucherPlan?.voucher) {
     downpaymentMinor = addMinor(voucherPlan.money.map((group, index) => {
       const allocation = voucherPlan.groups[index], rate = downpaymentPercent * 100;
-      return roundBps(addMinor([group.supplierSubtotalMinor, group.grossServiceFeeMinor, group.deliveryFeeMinor], 'voucher.gross'), rate)
-        - Math.min(allocation.voucherServiceFeeMinor, roundBps(group.grossServiceFeeMinor, rate))
+      const feeMinor = group.grossServiceFeeMinor - (group.memberPerkMinor ?? 0);
+      return roundBps(addMinor([group.supplierSubtotalMinor, feeMinor, group.deliveryFeeMinor], 'voucher.gross'), rate)
+        - Math.min(allocation.voucherServiceFeeMinor, roundBps(feeMinor, rate))
         - Math.min(allocation.voucherDeliveryMinor, roundBps(group.deliveryFeeMinor, rate))
-        - Math.min(allocation.voucherSupplierMinor || 0, roundBps(addMinor([group.supplierSubtotalMinor, group.grossServiceFeeMinor, group.deliveryFeeMinor], 'voucher.gross'), rate) - roundBps(group.grossServiceFeeMinor, rate) - roundBps(group.deliveryFeeMinor, rate));
+        - Math.min(allocation.voucherSupplierMinor || 0, roundBps(addMinor([group.supplierSubtotalMinor, feeMinor, group.deliveryFeeMinor], 'voucher.gross'), rate) - roundBps(feeMinor, rate) - roundBps(group.deliveryFeeMinor, rate));
     }), 'voucher.downpayment');
   }
   const projected = {
@@ -860,12 +878,14 @@ export function clientCartQuote(store, cart, lines, at) {
     voucher: voucherPlan?.voucher ? publicVoucher(store, voucherPlan.voucher, at) : null,
     voucherDiscountMinor: voucherPlan?.voucherDiscountMinor || 0,
     discountKind: voucherPlan?.discountKind || null,
+    memberPerk: publicPerkChoice(store, voucherPlan?.memberPerk ?? null),
+    memberPerkMinor: voucherPlan?.memberPerk?.amountMinor ?? 0,
     voucherGroups: voucherPlan?.groups.map((group, index) => {
       const { voucherSupplierMinor: _supplierFunding, clientSupplierSubtotalMinor: _supplierCash, ...visible } = group;
       return { groupId: grouped[index].lines[0].id,
       ...(voucherPlan.money[index].serviceFeeSchedule?.version === 2 ? {
         organizationDiscountMinor: group.organizationDiscountMinor, voucherDiscountMinor: group.voucherDiscountMinor,
-        totalMinor: group.totalMinor,
+        ...(group.memberPerkMinor ? { memberPerkMinor: group.memberPerkMinor } : {}), totalMinor: group.totalMinor,
       } : visible) }; }) || [],
     clientItemSubtotalMinor, deliveryLines, deliveryFeeMinor, totalMinor, organizationDiscountMinor, organizationDiscountLabel: "Organization discount",
     ...(hubPickup ? { pickupFeeMinor: hubPickup.feeMinor } : {}),
@@ -991,6 +1011,7 @@ function cartInternal(store, cart, at, { compactListings = false } = {}) {
     if (plan) groups.forEach((group, index) => Object.assign(group, {
       totalMinor: plan.groups[index].totalMinor, organizationDiscountMinor: plan.groups[index].organizationDiscountMinor,
       voucherDiscountMinor: plan.groups[index].voucherDiscountMinor,
+      ...(plan.groups[index].memberPerkMinor ? { memberPerkMinor: plan.groups[index].memberPerkMinor } : {}),
     }));
   }
   const colourAmounts = clientCartLineAmounts(store,cart,lines,at);
@@ -1177,6 +1198,7 @@ function matchedOrderInternal(store, order) {
     },
     jobs,
     ...(order.voucher ? { voucher: clientVoucher(order.voucher), voucherDiscountMinor: order.voucherDiscountMinor } : {}),
+    ...publicMemberPerk(order),
     invoiceNumber: order.invoiceNumber,
     organizationOfficer: structuredClone(order.organizationOfficer || null),
     fileCheck: { status: order.fileCheck.status, requestedAt: order.fileCheck.requestedAt, waitingSeconds: fileCheckProjection(order).waitingSeconds },
@@ -1189,7 +1211,7 @@ function invoiceNumber(orderId, at) {
   return `GG-${stamp}-${orderId.replace(/^ord_/, "").toUpperCase()}`;
 }
 
-function checkout(store, user, cart, body, createId, at, req, { groupLines = null, basketId = null, groupLabel = null, delivery = null, pickupFeeMinor = null, voucher = null, voucherAllocation = null, offeredProjection = null, zeroCashBoundary = false } = {}) {
+function checkout(store, user, cart, body, createId, at, req, { groupLines = null, basketId = null, groupLabel = null, delivery = null, pickupFeeMinor = null, voucher = null, voucherAllocation = null, memberPerk = null, offeredProjection = null, zeroCashBoundary = false } = {}) {
   assertRequestFulfillment(cart, body);
   const cartLines = (groupLines || store.cartLines || [])
     .filter((line) => line.cartId === cart.id)
@@ -1440,7 +1462,10 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   // Pickup is a per-order platform charge. The internal trip to the hub keeps
   // the existing zero-charge job contract and never earns a share of this fee.
   const deliveryTotalMinor = addMinor([...jobs.map((job) => job.deliveryFeeMinor), order.pickupFeeMinor ?? 0], "order.deliveryFeeMinor");
-  const fee = organizationFeeMoney(itemSubtotalMinor, groupFeeSettings(store, cart, cartLines, at), !voucher && approvedOrganization(store, user.id));
+  const baseFee = organizationFeeMoney(itemSubtotalMinor, groupFeeSettings(store, cart, cartLines, at), !voucher && !memberPerk && approvedOrganization(store, user.id));
+  const memberPerkMinor = voucherAllocation?.memberPerkMinor ?? 0;
+  const fee = memberPerkMinor ? { ...baseFee, serviceFeeMinor: baseFee.serviceFeeMinor - memberPerkMinor, memberPerkMinor,
+    memberPerk: perkSnapshot(store, memberPerk, memberPerk.useId, memberPerkMinor) } : baseFee;
   const { serviceFeeMinor } = fee;
   const totalMinor = addMinor([itemSubtotalMinor, serviceFeeMinor, deliveryTotalMinor], "order.totalMinor");
   const downpaymentRateBps = downpaymentPercent * 100;
@@ -1777,10 +1802,18 @@ export function checkoutBasket(store, user, cart, body, createId, at, req) {
   const honouredOffers = groups.map(group => offeredGroupProjection(store, cart, group.lines, at));
   const plan = cartVoucherPlan(store, cart, lines, at);
   const voucher = plan?.voucher;
+  const memberPerk = plan?.memberPerk ? { ...plan.memberPerk, useId: createId('mpu') } : null;
+  // A perk can end between the quote and this moment; a client that sends what it
+  // showed is stopped here instead of being charged a different total.
+  const perkMinor = memberPerk?.amountMinor ?? 0;
+  if (body.expectedMemberPerkMinor !== undefined && body.expectedMemberPerkMinor !== perkMinor) {
+    fail(409, 'member_perk_changed', 'Your member perk changed. Check the new total before you pay.', { memberPerkMinor: perkMinor });
+  }
   const zeroCashBoundary = !cash && Boolean(voucher?.data?.coversOrderTotal && clientCartQuote(store, cart, lines, at).downpaymentMinor === 0);
   if (groups.length < 2) {
-    const result = checkout(store, user, cart, body, createId, at, req, { voucher, voucherAllocation: plan?.groups[0], offeredProjection: honouredOffers[0], zeroCashBoundary });
+    const result = checkout(store, user, cart, body, createId, at, req, { voucher, voucherAllocation: plan?.groups[0], memberPerk, offeredProjection: honouredOffers[0], zeroCashBoundary });
     if (cash) { const order = store.orders.find(o => o.id === result.order.id); requireCashCheckout(store.settings, user, order.supplierSubtotalMinor + order.serviceFeeMinor); }
+    if (memberPerk) reserveMemberPerk(store, memberPerk, memberPerk.useId, [store.orders.find(o => o.id === result.order.id)], { id: createId, at });
     if (voucher) reserveVoucher(store, voucher, cart, { id: createId, at, orderIds: [result.order.id], amountMinor: plan.voucherDiscountMinor });
     else releaseVoucherReservations(store, { id: createId, at }, r => r.cartId === cart.id);
     if (cash && voucher) confirmVoucher(store,[store.orders.find(o=>o.id===result.order.id)],{id:createId,at,actorId:user.id});
@@ -1804,12 +1837,13 @@ export function checkoutBasket(store, user, cart, body, createId, at, req) {
     .sort((a, b) => Date.parse(a.group.deadline) - Date.parse(b.group.deadline) || a.index - b.index)) {
     results[index] = checkout(store, user, cart, body, createId, at, req, {
       groupLines: group.lines, basketId, groupLabel: shopLabel(suppliers.indexOf(group.supplierId)), delivery: group,
-      pickupFeeMinor: hubPickup ? pickupShares[index] : null, voucher, voucherAllocation: plan?.groups[index],
+      pickupFeeMinor: hubPickup ? pickupShares[index] : null, voucher, voucherAllocation: plan?.groups[index], memberPerk,
       offeredProjection: honouredOffers[index], zeroCashBoundary,
     });
   }
   const orders = results.map((result) => store.orders.find((order) => order.id === result.order.id));
   if (cash) requireCashCheckout(store.settings, user, addMinor(orders.map(o => o.supplierSubtotalMinor + o.serviceFeeMinor), 'cash.cartSubtotal'));
+  if (memberPerk) reserveMemberPerk(store, memberPerk, memberPerk.useId, orders.filter(order => order.memberPerkMinor > 0), { id: createId, at });
   if (voucher) reserveVoucher(store, voucher, cart, { id: createId, at, orderIds: orders.map(o => o.id), amountMinor: plan.voucherDiscountMinor });
   else releaseVoucherReservations(store, { id: createId, at }, r => r.cartId === cart.id);
   if (cash && voucher) confirmVoucher(store,orders,{id:createId,at,actorId:user.id});
@@ -1840,12 +1874,14 @@ export function checkoutBasket(store, user, cart, body, createId, at, req) {
       ...(result.invoice.voucher ? { voucher: result.invoice.voucher, voucherDiscountMinor: result.invoice.voucherDiscountMinor } : {}),
       serviceFeeSchedule: result.invoice.serviceFeeSchedule, serviceFeeWorking: result.invoice.serviceFeeWorking, serviceFeeRateBps: result.invoice.serviceFeeRateBps,
       grossServiceFeeMinor: result.invoice.grossServiceFeeMinor, organizationDiscountMinor: result.invoice.organizationDiscountMinor,
+      ...(result.invoice.memberPerkMinor ? { memberPerkMinor: result.invoice.memberPerkMinor, memberPerk: result.invoice.memberPerk } : {}),
       serviceFeeMinor: result.invoice.serviceFeeMinor, deliveryFeeMinor: result.invoice.deliveryFeeMinor, totalMinor: result.invoice.totalMinor,
       ...(hubPickup ? { pickupFeeMinor: pickupShares[index] } : {}) })),
     itemSubtotalMinor: addMinor(orders.map((order) => order.supplierSubtotalMinor), "basket.itemSubtotalMinor"),
     serviceFeeRateBps: first.serviceFeeRateBps,
     organizationDiscountRateBps: first.organizationDiscountRateBps,
     organizationDiscountMinor: addMinor(orders.map((order) => order.organizationDiscountMinor), "basket.discount"),
+    ...(memberPerk ? { memberPerkMinor: memberPerk.amountMinor, memberPerk: perkSnapshot(store, memberPerk, memberPerk.useId, memberPerk.amountMinor) } : {}),
     grossServiceFeeMinor: addMinor(orders.map((order) => order.grossServiceFeeMinor), "basket.grossFee"),
     serviceFeeMinor: addMinor(orders.map((order) => order.serviceFeeMinor), "basket.serviceFeeMinor"),
     deliveryLines: results.flatMap((result, index) => result.invoice.deliveryLines.map((line) => ({ jobId: line.jobId, shopName: result.order.groupLabel, deadline: groups[index].deadline, amountMinor: line.amountMinor }))),
