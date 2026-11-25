@@ -160,12 +160,13 @@ test('a member list needs consent, checks rows, matches only verified contacts w
   await refused(api, 'org', 'POST', '/me/organization/members/list/check', { csv: 'a,b\n1,2' }, 400, 'invalid_member_csv_header');
   await refused(api, 'org', 'POST', '/me/organization/members/list', { consent: true, rows: [] }, 400, 'invalid_member_list');
   const { check } = await ok(api, 'org', 'POST', '/me/organization/members/list/check', { csv: LIST });
-  assert.deepEqual([check.rowCount, check.readyCount, check.needsFixCount, check.onGridgoCount, check.getsInviteCount, check.mobileOnlyCount], [8, 5, 3, 2, 1, 2]);
+  assert.deepEqual([check.rowCount, check.readyCount, check.needsFixCount, check.emailCount, check.mobileCount], [8, 5, 3, 3, 2]);
   assert.deepEqual(check.needsFix.map(row => [row.row, row.code]), [[6, 'invalid_member_contact'], [7, 'invalid_member_since'], [8, 'duplicate_member_contact']]);
   assert.equal((await rows(db, 'member_list_entries')).length, 0, 'checking stores nothing');
-  // A one-row list must not say whether that person has an account.
-  const one = (await ok(api, 'org', 'POST', '/me/organization/members/list/check', { rows: [{ name: 'Alpha', contact: 'member@example.invalid', memberSince: '2024-08-01' }] })).check;
-  assert.deepEqual([one.countsHidden, one.onGridgoCount, one.getsInviteCount, one.mobileOnlyCount], [true, null, null, null]);
+  // No list, short or padded, tells whether a person has an account: the same shape answers the same.
+  const probe = async contact => (await ok(api, 'org', 'POST', '/me/organization/members/list/check', { rows: [contact, ...[1, 2, 3, 4, 5].map(n => `padding${n}@example.invalid`)]
+    .map(value => ({ name: 'Alpha', contact: value, memberSince: '2024-08-01' })) })).check;
+  assert.deepEqual(await probe('member@example.invalid'), await probe('nobody.here@example.invalid'));
   const { list } = await ok(api, 'org', 'POST', '/me/organization/members/list', { csv: LIST, consent: true }, 201);
   assert.equal(list.savedCount, 5);
   assert.equal((await ok(api, 'org', 'POST', '/me/organization/members/list', { csv: LIST, consent: true }, 201)).list.savedCount, 0);

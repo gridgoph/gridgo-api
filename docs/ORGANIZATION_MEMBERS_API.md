@@ -115,10 +115,12 @@ Send `{ csv }` with the columns `Name`, `Email or mobile`, `Member since`, or
 `{ rows: [{ name, contact, memberSince }] }` for one or several. Limits: 500 rows a
 call, 2,000 rows per organization per Manila day.
 
-The result gives `readyCount`, `alreadyListedCount`, `onGridgoCount`, `getsInviteCount`,
-`mobileOnlyCount`, `needsFixCount` and `needsFix: [{ row, field, code, message }]`.
-With fewer than five valid rows the three account counts are `null`, so a one-row list
-does not tell who has an account.
+The result gives `rowCount`, `readyCount`, `alreadyListedCount`, `emailCount`, `mobileCount`,
+`needsFixCount` and `needsFix: [{ row, field, code, message }]`. Email rows match in the
+app or get the invite; mobile rows match in the app or use the link. The result never says
+how many rows already have an account: a list padded with known contacts would turn that
+count into a way to look people up. The officer sees `counts.accepted` grow as members
+confirm. Saving answers the same fields plus `savedCount`.
 
 A listed person is **not** a member until they confirm.
 

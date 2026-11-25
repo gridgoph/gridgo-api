@@ -6,8 +6,6 @@ import { philippineMobileNumber } from './phone.js';
 // transaction. They never enter the domain store, the audit log or an inbox row.
 export const LIST_ROW_LIMIT = 500;
 export const LIST_DAILY_ROW_LIMIT = 2000;
-/** Below this many valid rows the account counts are withheld: one row would tell who has an account. */
-export const LIST_COUNTS_MINIMUM = 5;
 const LIST_DAYS = 30;
 const DAY_MS = 86400000;
 const MANILA_MS = 8 * 3600000;
@@ -95,14 +93,14 @@ async function checkRows(database, partner, body, at, secret) {
   for (const row of fresh) Object.assign(row, { hasAccount: accounts.has(row.contact), invited: invited.has(row.key) });
   return { rows, term, fixes, valid, fresh };
 }
+/**
+ * Counts what was typed, never who has an account: a list padded with contacts the
+ * officer already knows would turn any account count, however rounded, into a lookup.
+ */
 function checkResult({ rows, fixes, valid, fresh }) {
-  const countsHidden = valid.length < LIST_COUNTS_MINIMUM;
-  const onGridgo = fresh.filter(row => row.hasAccount).length;
-  const invites = fresh.filter(row => !row.hasAccount && !row.invited && row.kind === 'email').length;
   return { rowCount: rows.length, readyCount: fresh.length, alreadyListedCount: valid.length - fresh.length, needsFixCount: fixes.length, needsFix: fixes,
-    countsHidden, onGridgoCount: countsHidden ? null : onGridgo, getsInviteCount: countsHidden ? null : invites,
-    // Mobile numbers get no message: they match in the app or use the QR or link.
-    mobileOnlyCount: countsHidden ? null : fresh.filter(row => !row.hasAccount && row.kind === 'mobile').length };
+    // Email rows match in the app, or get the one invite. Mobile rows get no message: they match in the app or use the QR or link.
+    emailCount: fresh.filter(row => row.kind === 'email').length, mobileCount: fresh.filter(row => row.kind === 'mobile').length };
 }
 export async function checkMemberList(database, partner, body, { at, secret }) {
   const rows = inputRows(body);
