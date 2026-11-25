@@ -3,7 +3,7 @@ import { identityHasMembership } from './authorization-context.js';
 import { approvedOrganization, organizationMoneyError } from './organization-money.js';
 import { statementPdf } from './statement-pdf.js';
 
-const NOTICE = 'Not a tax document. Official receipts are issued separately.';
+export const NOTICE = 'Not a tax document. Official receipts are issued separately.';
 const fail = (code, message, status) => { throw organizationMoneyError(code, message, status); };
 const day = (date) => new Date(date.getTime() + 8 * 3600000).toISOString().slice(0, 10);
 function parseDay(value) {
@@ -49,7 +49,7 @@ function officerFor(order, invoice) {
   const value = order.organizationOfficer ?? invoice?.organizationOfficer ?? order.officerOfRecord ?? invoice?.officerOfRecord;
   return typeof value === 'string' ? value : typeof value?.fullName === 'string' ? value.fullName : typeof value?.name === 'string' ? value.name : '';
 }
-function csvCell(value) {
+export function csvCell(value) {
   let text = String(value ?? '');
   if (/^[\s]*[=+\-@\t\r\n]/.test(text)) text = `'${text}`;
   return `"${text.replaceAll('"', '""')}"`;
@@ -60,6 +60,16 @@ function csv(statement) {
     ['Date', 'Order ID', 'Product', 'Amount (PHP)', 'Discount earned (PHP)', 'Invoice number', 'Officer of record'],
     ...statement.orders.map((row) => [row.date, row.orderId, row.product, statementPesos(row.amountMinor), statementPesos(row.organizationDiscountMinor), row.invoiceNumber, row.officerOfRecord])];
   return Buffer.from('\ufeff' + rows.map((row) => row.map(csvCell).join(',')).join('\r\n') + '\r\n');
+}
+export const isClosedOrder = (order) => ['completed', 'payout_released'].includes(order.state);
+/** One order as a statement line; `closedAt` is null while it is still open. */
+export function statementOrder(store, order) {
+  const at = isClosedOrder(order) ? closedAt(order) : null;
+  const invoice = (store.orderInvoices || []).find((row) => row.orderId === order.id)?.snapshot;
+  return { date: day(new Date(at || order.createdAt)), closedAt: at, orderId: order.id,
+    product: (store.orderLineItems || []).filter((row) => row.orderId === order.id).map((row) => row.itemNameSnapshot || '').filter(Boolean).join('; ') || order.productName || '',
+    amountMinor: order.totalMinor, organizationDiscountMinor: order.organizationDiscountMinor ?? 0,
+    invoiceNumber: order.invoiceNumber || invoice?.invoiceNumber || '', officerOfRecord: officerFor(order, invoice) };
 }
 export function routeOrganizationStatements({ req, url, store, user, now }) {
   const own = url.pathname === '/me/organization/statements';
@@ -74,15 +84,11 @@ export function routeOrganizationStatements({ req, url, store, user, now }) {
   const period = periodFor(url.searchParams, now());
   const format = url.searchParams.get('format') || 'json';
   if (!['json', 'csv', 'pdf'].includes(format)) fail('invalid_statement_format', 'Choose json, pdf or csv.');
-  const orders = (store.orders || []).filter((order) => !isReviewData(order) && order.clientId === clientId && ['completed', 'payout_released'].includes(order.state))
+  const orders = (store.orders || []).filter((order) => !isReviewData(order) && order.clientId === clientId && isClosedOrder(order))
     .flatMap((order) => {
-      const at = closedAt(order), time = Date.parse(at);
+      const time = Date.parse(closedAt(order));
       if (!Number.isFinite(time) || time < period.start || time >= period.end) return [];
-      const invoice = (store.orderInvoices || []).find((row) => row.orderId === order.id)?.snapshot;
-      return [{ date: day(new Date(time)), closedAt: at, orderId: order.id,
-        product: (store.orderLineItems || []).filter((row) => row.orderId === order.id).map((row) => row.itemNameSnapshot || '').filter(Boolean).join('; ') || order.productName || '',
-        amountMinor: order.totalMinor, organizationDiscountMinor: order.organizationDiscountMinor ?? 0,
-        invoiceNumber: order.invoiceNumber || invoice?.invoiceNumber || '', officerOfRecord: officerFor(order, invoice) }];
+      return [statementOrder(store, order)];
     }).sort((a, b) => Date.parse(a.closedAt) - Date.parse(b.closedAt) || a.orderId.localeCompare(b.orderId));
   const statement = { notice: NOTICE, currency: 'PHP', period: { from: period.from, to: period.to, timezone: period.timezone },
     orderCount: orders.length, totalSpendMinor: safeSum(orders.map((row) => row.amountMinor)),

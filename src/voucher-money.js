@@ -17,6 +17,10 @@ export function splitVoucherMinor(total, weights) {
   return shares;
 }
 
+// A member perk already took its share of GRIDGO's fee; a voucher may only use what is left.
+const voucherFeeMinor = group => minor(minor(group.grossServiceFeeMinor ?? group.serviceFeeMinor) - minor(group.memberPerkMinor ?? 0));
+const perkShare = group => group.memberPerkMinor ? { memberPerkMinor: group.memberPerkMinor } : {};
+
 /** Client discounts leave gross supplier and rider entitlements intact. */
 export function voucherMoney(groups, valueMinor = 0, { coversOrderTotal = false, expressDeliveryReward = false } = {}) {
   if (expressDeliveryReward) {
@@ -24,12 +28,12 @@ export function voucherMoney(groups, valueMinor = 0, { coversOrderTotal = false,
     const organizationDiscountMinor=sumMinor(groups.map(g=>minor(g.organizationDiscountMinor??0)));
     const candidate=sumMinor(amounts), applies=candidate>organizationDiscountMinor;
     return {voucherDiscountMinor:applies?candidate:0,organizationDiscountMinor:applies?0:organizationDiscountMinor,discountKind:applies?'voucher':organizationDiscountMinor?'organization':null,
-      groups:groups.map((g,i)=>{const fee=minor(g.grossServiceFeeMinor??g.serviceFeeMinor),discount=applies?amounts[i]:0,org=applies?0:(g.organizationDiscountMinor??0);
-        return {organizationDiscountMinor:org,organizationDiscountRateBps:applies?0:(g.organizationDiscountRateBps??0),serviceFeeMinor:fee-org,
+      groups:groups.map((g,i)=>{const fee=voucherFeeMinor(g),discount=applies?amounts[i]:0,org=applies?0:(g.organizationDiscountMinor??0);
+        return {...perkShare(g),organizationDiscountMinor:org,organizationDiscountRateBps:applies?0:(g.organizationDiscountRateBps??0),serviceFeeMinor:fee-org,
           voucherDiscountMinor:discount,voucherServiceFeeMinor:0,voucherDeliveryMinor:discount,clientServiceFeeMinor:fee-org,clientDeliveryFeeMinor:g.deliveryFeeMinor-discount,
           totalMinor:sumMinor([g.supplierSubtotalMinor,fee-org,g.deliveryFeeMinor-discount])};})};
   }
-  const fees = groups.map(g => minor(g.grossServiceFeeMinor ?? g.serviceFeeMinor));
+  const fees = groups.map(voucherFeeMinor);
   const deliveries = groups.map(g => !coversOrderTotal && g.serviceFeeSchedule?.version === 2 ? 0 : minor(g.deliveryFeeMinor));
   const principals = groups.map(g => coversOrderTotal ? minor(g.supplierSubtotalMinor) : 0);
   const feeTotal = sumMinor(fees), deliveryTotal = sumMinor(deliveries), principalTotal = sumMinor(principals);
@@ -57,7 +61,7 @@ export function voucherMoney(groups, valueMinor = 0, { coversOrderTotal = false,
     groups: groups.map((group, index) => {
       const organization = voucherDiscountMinor ? 0 : (group.organizationDiscountMinor ?? 0);
       const discount = feeShares[index] + deliveryShares[index] + principalShares[index];
-      return { organizationDiscountMinor: organization, organizationDiscountRateBps: voucherDiscountMinor ? 0 : group.organizationDiscountRateBps ?? 0,
+      return { ...perkShare(group), organizationDiscountMinor: organization, organizationDiscountRateBps: voucherDiscountMinor ? 0 : group.organizationDiscountRateBps ?? 0,
         serviceFeeMinor: fees[index] - organization, voucherDiscountMinor: discount,
         ...(coversOrderTotal ? { voucherSupplierMinor: principalShares[index], clientSupplierSubtotalMinor: group.supplierSubtotalMinor - principalShares[index], coversOrderTotal: true } : {}),
         voucherServiceFeeMinor: feeShares[index], voucherDeliveryMinor: deliveryShares[index],

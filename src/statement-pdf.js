@@ -49,9 +49,10 @@ export function statementPdf(statement, pesos) {
     draw(part, size, color);
   };
   const header = () => {
-    draw('GRIDGO | Organization statement', 18);
+    draw(statement.title ? 'GRIDGO | Event statement' : 'GRIDGO | Organization statement', 18);
     draw('Not a tax document. Official receipts are issued separately.', 10, '0.5 0.2 0.1');
-    draw(`${statement.period.from} to ${statement.period.to} | Asia/Manila | PHP`, 10);
+    if (statement.title) line(`${statement.title} | ${statement.month} | Asia/Manila | PHP`, 10);
+    else draw(`${statement.period.from} to ${statement.period.to} | Asia/Manila | PHP`, 10);
     y -= 10;
   };
   const draw = (text, size = 10, color = '0.12 0.17 0.23') => {
@@ -63,7 +64,7 @@ export function statementPdf(statement, pesos) {
   line(`Total spend: PHP ${pesos(statement.totalSpendMinor)}`, 14);
   line(`Closed orders: ${statement.orderCount}    Discount earned: PHP ${pesos(statement.discountEarnedMinor)}`, 11);
   y -= 12;
-  if (!statement.orders.length) line('No closed orders in this period.');
+  if (!statement.orders.length) line(statement.title ? 'No closed orders in this event.' : 'No closed orders in this period.');
   for (const row of statement.orders) {
     if (y < 165) { pages.push([]); y = 792; header(); }
     line(`${row.date} | ${row.orderId}`, 11);

@@ -100,7 +100,7 @@ export function orderRemovalBlock(store, order) {
     'refundSupplierPayouts', 'voucherReservations', 'voucherRedemptions', 'voucherLedger'];
   if (finance.some(key => (store[key] || []).some(row => related(row, order)))
       || Object.values(store.credits || {}).some(account => (account.ledger || []).some(row => related(row, order)))
-      || (order.revenueAdjustments || []).length || order.voucherRedemptionId || order.voucherDiscountMinor > 0 || order.voucher?.amountMinor > 0
+      || (order.revenueAdjustments || []).length || order.voucherRedemptionId || order.voucherDiscountMinor > 0 || order.voucher?.amountMinor > 0 || order.memberPerkMinor > 0
       || (store.orderChanges || []).some(row => related(row, order) && row.status === 'pending_confirmation')
       || order.deliveryPin?.change?.status === 'pending_confirmation') {
     return 'financial_activity';

@@ -132,7 +132,7 @@ test('cart graph query count and rows ignore other clients and unrelated operati
     assert.equal(store.supplierPerformanceEvents.length,2);
     assert.ok(store.orders.some(row => row.id === 'review' && row.reviewData), 'incident parents retain report scope');
     assert.ok(store.orderLineItems.length > 0, 'line-based scheduling exemptions are hydrated');
-    assert.ok(queries.length <= 49, `queries=${queries.length}`);
+    assert.ok(queries.length <= 50, `queries=${queries.length}`);
     assert.ok(!queries.some(q => /FROM (audit_log|notifications|location_pings|notification_push_outbox|order_payments)\b/.test(q.sql)));
     await assert.rejects(database.transaction(() => saveStore(database,store)), /read-only/);
     return queries;
@@ -141,7 +141,7 @@ test('cart graph query count and rows ignore other clients and unrelated operati
     const { db, queries } = instrument(database);
     await loadHotReadStore(db,'clerk_client',path);
     assert.ok(isHotReadPath(path),path);
-    assert.ok(queries.length <= (path.startsWith('/me/carts/') ? 49 : 5),`${path}: ${queries.length} queries`);
+    assert.ok(queries.length <= (path.startsWith('/me/carts/') ? 50 : 5),`${path}: ${queries.length} queries`);
     assert.ok(!queries.some(q => /FROM (audit_log|notifications|location_pings|notification_push_outbox|order_payments)\b/.test(q.sql)),path);
   }
   const before = await sample();

@@ -62,8 +62,9 @@ export function acknowledgementSnapshot(store, order, at) {
   const deliveryFeeMinor = sum([order.deliveryFeeMinor,redelivery?.feeMinor||0]);
   const organizationDiscountMinor = money(order.organizationDiscountMinor ?? 0);
   const voucherDiscountMinor = money(order.voucherDiscountMinor ?? 0);
+  const memberPerkMinor = money(order.memberPerkMinor ?? 0);
   const grandTotalMinor = sum([order.totalMinor,redelivery?.feeMinor||0]);
-  const roundingAdjustmentMinor = sum([grandTotalMinor, -deliveryFeeMinor, organizationDiscountMinor, voucherDiscountMinor,
+  const roundingAdjustmentMinor = sum([grandTotalMinor, -deliveryFeeMinor, organizationDiscountMinor, voucherDiscountMinor, memberPerkMinor,
     ...lines.map(line => -line.subtotalMinor)]);
   if (Math.abs(roundingAdjustmentMinor) > lines.length) fail('acknowledgement_amount_mismatch');
   const issuedTo = store.users.find(user => user.id === order.clientId)?.name;
@@ -82,7 +83,8 @@ export function acknowledgementSnapshot(store, order, at) {
     amountMinor:redelivery.feeMinor,amountReceivedMinor:null,changeMinor:null});
   if (sum(payments.map(p => p.amountMinor)) !== grandTotalMinor) fail('acknowledgement_amount_mismatch');
   return { version: 1, orderId: order.id, orderNumber: order.id, issuedAt: at, issuedTo, currency: 'PHP',
-    lines, deliveryFeeMinor, organizationDiscountMinor, voucherDiscountMinor, roundingAdjustmentMinor,
+    lines, deliveryFeeMinor, organizationDiscountMinor, voucherDiscountMinor,
+    ...(memberPerkMinor ? { memberPerkMinor, memberPerkLabel: order.memberPerk.label } : {}), roundingAdjustmentMinor,
     grandTotalMinor, payments, note: ACKNOWLEDGEMENT_NOTE };
 }
 
@@ -131,6 +133,7 @@ export function acknowledgementPdf(receipt, signature = null) {
   lines.push('', 'Unit prices are indicative; use the item subtotals for this receipt.',
     `Delivery fee: ${pesos(receipt.deliveryFeeMinor)}`);
   if (receipt.organizationDiscountMinor) lines.push(`Organization discount: ${pesos(-receipt.organizationDiscountMinor)}`);
+  if (receipt.memberPerkMinor) lines.push(`${receipt.memberPerkLabel} perk: ${pesos(-receipt.memberPerkMinor)}`);
   if (receipt.voucherDiscountMinor) lines.push(`Voucher discount: ${pesos(-receipt.voucherDiscountMinor)}`);
   if (receipt.roundingAdjustmentMinor) lines.push(`Rounding adjustment: ${pesos(receipt.roundingAdjustmentMinor)}`);
   lines.push(`Grand total: ${pesos(receipt.grandTotalMinor)}`, '', 'Recorded payments (no amount to collect at the door)');

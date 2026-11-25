@@ -31,6 +31,7 @@ import { surveyTable, surveyRows, loadSurveyRows } from './survey-store.js';
 import { sharingTables, emptySharingStore, sharingRows, loadSharingRows } from './sharing-store.js';
 import { checkoutExitTables, checkoutExitRows, loadCheckoutExitRows } from './checkout-exit-store.js';
 import { voucherTables, emptyVoucherStore, voucherRows, loadVoucherRows } from './voucher-store.js';
+import { memberTables, emptyMemberStore, memberRows, loadMemberRows } from './member-store.js';
 import { loadLegalPenaltyGate } from './legal.js';
 import { manilaDate } from './season-windows.js';
 import { synchronizeProductionHours, productionHoursSynchronized } from "./production-days.js";
@@ -142,6 +143,7 @@ const TABLES = [
   { name: "production_lapses", keys: ["id"], columns: ["id", "order_id", "supplier_id", "tier", "deadline_at", "detected_at", "rate_bps", "deduction_minor", "remaining_balance_minor", "applied_at", "data"] },
   ...refundTableDefinitions,
   ...voucherTables,
+  ...memberTables,
   surveyTable,
   ...sharingTables,
   foundingTesterTable,
@@ -179,6 +181,7 @@ export function emptyStore() {
     shopMoneyEvents: [],
     shopFileAccesses: [],
     ...emptyVoucherStore(),
+    ...emptyMemberStore(),
     orderSurveys: [],
     ...emptySharingStore(),
     ...emptyQuoteRequestStore(),
@@ -275,6 +278,7 @@ function rowsFromStore(store) {
   rows.shop_file_accesses = fileAccessRows(store);
   staffRows(store, rows);
   voucherRows(store, rows);
+  memberRows(store, rows);
   performanceRows(store, rows);
   surveyRows(store, rows);
   sharingRows(store, rows);
@@ -1006,6 +1010,26 @@ async function readIdentity(graph, userIds) {
   if(pendingSuppliers.length)await graph.read('supplier_verification_ledger', 'WHERE supplier_id = ANY($1::text[])', [pendingSuppliers]);
 }
 
+/** What prices a client's member perk: their memberships, those organizations' live
+ * verification, and the uses that count against the member and budget caps.
+ */
+async function readMemberPerkContext(graph, clientId, { all = false, also: extra = [] } = {}) {
+  const { loaded, read } = graph;
+  await read('organization_memberships', 'WHERE client_id = $1', [clientId]);
+  const organizations = [...new Set([...extra, ...loaded.organization_memberships.filter(row => row.client_id === clientId && (all || row.status === 'active')).map(row => row.organization_user_id)])];
+  if (!organizations.length) return;
+  // Unscoped graphs replace a table on every read; keep what is already there.
+  const also = async (name, where, values) => {
+    const table = TABLES.find(entry => entry.name === name), previous = loaded[name];
+    await read(name, where, values);
+    loaded[name] = [...new Map([...previous, ...loaded[name]].map(row => [rowKey(row, table.keys), row])).values()];
+  };
+  await also('users', 'WHERE id = ANY($1::text[])', [organizations]);
+  for (const name of ['user_role_memberships', 'approval_cases', 'organization_accounts', 'organization_partners']) await also(name, 'WHERE user_id = ANY($1::text[])', [organizations]);
+  await also('member_perk_settings', "WHERE id = 'standard' OR id = ANY($1::text[])", [organizations]);
+  await also('member_perk_uses', "WHERE organization_user_id = ANY($1::text[]) AND status <> 'returned'", [organizations]);
+}
+
 async function readNotificationContext(graph, { orderIds = [], caseIds = [], activeRiderIds = [] } = {}) {
   const { loaded, read } = graph;
   await read('shop_memberships', 'WHERE user_id = ANY($1::text[])', [loaded.users.map(row => row.id)]);
@@ -1333,6 +1357,7 @@ async function readCartGraph(graph, actorIds, pathname) {
     await read('voucher_campaigns', 'WHERE id = ANY($1::text[])', [loaded.vouchers.map(row => row.campaign_id)]);
     await read('voucher_reservations', 'WHERE voucher_id = ANY($1::text[])', [loaded.vouchers.map(row => row.id)]);
     await read('voucher_cart_choices', 'WHERE id = $1', [cartId]);
+    await readMemberPerkContext(graph, cart.client_id);
     await read('order_basket_groups', 'WHERE basket_id IN (SELECT basket_id FROM order_basket_groups WHERE order_id = $1)', [cart.checked_out_order_id]);
     await read('order_baskets', 'WHERE id = ANY($1::text[])', [loaded.order_basket_groups.map(row => row.basket_id)]);
     // Preserve catalogue files and references while adding every artwork/preview
@@ -1431,7 +1456,7 @@ async function readFileGraph(graph, actorIds, pathname) {
   return graph.finish();
 }
 
-const HOT_READ_PATHS = new Set(['/orders', '/jobs', '/settings', '/taxonomy', '/zones', '/catalog', '/ops/product-type-requests', '/ops/catalog-reviews', '/ops/shop-failures', '/ops/colour-price-checks', '/auth/me/ops', '/auth/me/admin', '/auth/me/supplier', '/auth/me/rider', '/auth/me/client', '/auth/me', '/me', '/me/home-summary', '/me/legal/pending', '/featured-prints', '/support-chat/me', '/api/support-chat/me', '/season-windows', '/devices']);
+const HOT_READ_PATHS = new Set(['/orders', '/jobs', '/settings', '/taxonomy', '/zones', '/catalog', '/ops/product-type-requests', '/ops/catalog-reviews', '/ops/shop-failures', '/ops/colour-price-checks', '/auth/me/ops', '/auth/me/admin', '/auth/me/supplier', '/auth/me/rider', '/auth/me/client', '/auth/me', '/me', '/me/home-summary', '/me/memberships', '/me/legal/pending', '/featured-prints', '/support-chat/me', '/api/support-chat/me', '/season-windows', '/devices']);
 const OPS_QUEUE_READ = /^\/(claims|issues)(?:\/[^/]+)?$|^\/escalations$/;
 const USER_READ = /^\/users(?:\/[^/]+(?:\/(?:verification-documents|payout-account))?)?$/;
 const AUDIT_READ = /^\/audit$|^\/orders\/[^/]+\/audit$/;
@@ -2000,6 +2025,7 @@ export async function loadClientSaveStore(database, clerkSubject, pathname, body
   await read('voucher_reservations', 'WHERE client_id=$1', [clientId]);
   await read('voucher_redemptions', 'WHERE client_id=$1', [clientId]);
   await read('voucher_cart_choices', 'WHERE id=ANY($1::text[])', [loaded.client_carts.map(row => row.id)]);
+  await readMemberPerkContext(graph, clientId);
   await read('promotion_settings', "WHERE id='launch'");
   const email = String(actor.email || '').trim().toLowerCase();
   for (const name of ['tester_invites', 'promotion_invites']) await read(name, 'WHERE client_id=$1 OR email=$2', [clientId, email]);
@@ -2117,6 +2143,11 @@ export async function loadHotReadStore(database, clerkSubject, pathname, { after
     if (['/me/legal/pending', '/support-chat/me', '/api/support-chat/me'].includes(pathname)) return graph.finish();
     if (pathname === '/devices') {
       await read('device_tokens', 'WHERE user_id = ANY($1::text[])', [ids]);
+      return graph.finish();
+    }
+    if (pathname === '/me/memberships') {
+      const matched = ids.length ? (await database.query("SELECT organization_user_id FROM member_list_entries WHERE matched_client_id = ANY($1::text[]) AND status = 'open'", [ids])).rows : [];
+      if (ids.length) await readMemberPerkContext(graph, ids[0], { all: true, also: matched.map(row => row.organization_user_id) });
       return graph.finish();
     }
     if (pathname === '/season-windows') {
@@ -2373,6 +2404,7 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
   store.shopFileAccesses = loadFileAccessRows(loaded.shop_file_accesses);
   loadStaffRows(store, loaded);
   loadVoucherRows(store, loaded);
+  loadMemberRows(store, loaded);
   loadPerformanceRows(store, loaded);
   loadSurveyRows(store, loaded);
   loadSharingRows(store, loaded);

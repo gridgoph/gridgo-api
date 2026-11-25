@@ -13,6 +13,7 @@ import { collectedVoucherFundingMinor } from './voucher-funding.js';
 import { DEFAULT_SAVED_FILES_LIMIT_BYTES } from './file-retention-policy.js';
 import { deliveryPackagePhotoId } from './delivery-package-photos.js';
 import { clientVoucher } from './voucher-projection.js';
+import { clientPerk } from './member-perk-projection.js';
 import { isReviewData, assertReviewMoneyAllowed } from './review-data.js';
 import { performanceEnabled } from './supplier-performance-policy.js';
 import { approvalProofSummary, canReadApprovalProof } from './approval-proof.js';
@@ -641,6 +642,7 @@ export function deliveryFeeForDistance(distanceMeters, settings) {
 
 export function calculateOrderMoney({
   organizationEligible = false,
+  memberPerkMinor = 0,
   supplierSubtotalMinor,
   fulfillmentMode,
   paymentPlan,
@@ -654,7 +656,10 @@ export function calculateOrderMoney({
   const supplierSubtotal = finiteMinor(supplierSubtotalMinor, "supplierSubtotalMinor");
   const schedule = feeSchedule(settings);
   const serviceFeeRateBps = schedule.version === 1 ? schedule.rateBps : null;
-  const fee = organizationFeeMoney(supplierSubtotal, settings, organizationEligible);
+  const fee = organizationFeeMoney(supplierSubtotal, settings, organizationEligible && !memberPerkMinor);
+  // The member perk is GRIDGO's own money: it can only lower the service fee.
+  if (finiteMinor(memberPerkMinor, "memberPerkMinor") > fee.serviceFeeMinor) fail(400, "invalid_money", "A member perk cannot exceed the service fee.", { field: "memberPerkMinor" });
+  if (memberPerkMinor) Object.assign(fee, { memberPerkMinor, serviceFeeMinor: fee.serviceFeeMinor - memberPerkMinor });
   const { serviceFeeMinor } = fee;
   const allowedPlans = new Set(["delivery_online", "pickup_full_online", "pickup_downpayment_store"]);
   if (!allowedPlans.has(paymentPlan)) {
@@ -976,6 +981,7 @@ export function moneyReportingForOrder(order, store = null) {
       ...(order.voucher ? { voucherDiscountMinor: order.voucherDiscountMinor } : {}),
       grossServiceFeeMinor: order.grossServiceFeeMinor ?? order.serviceFeeMinor ?? 0,
       organizationDiscountMinor: order.organizationDiscountMinor ?? 0,
+      ...(order.memberPerkMinor ? { memberPerkMinor: order.memberPerkMinor } : {}),
       netServiceFeeMinor: (order.serviceFeeMinor ?? 0) - (order.voucherServiceFeeMinor || 0) + supplementTotals(store, order).feeMinor - shopMove.gridgoCoverMinor,
       ...(order.shopMoves?.length ? { shopMoveCoverMinor: shopMove.gridgoCoverMinor, shopMoveClientRefundMinor: shopMove.clientRefundMinor, shopMoveClientTopUpMinor: shopMove.clientTopUpMinor } : {}),
       billedMinor: order.commercialCommittedAt ? (order.serviceFeeMinor || 0) + supplementTotals(store, order).feeMinor + split.platformDeliveryShareMinor - (order.voucherDiscountMinor || 0) : 0,
@@ -1520,9 +1526,12 @@ export function publicOrderFor(order, user, store = null) {
       deliveryFeeMinor:leg.feeMinor,riderPayoutMinor:leg.riderPayoutMinor,riderCommissionBps:leg.riderCommissionBps};
   }
   if (!ops && !owningClient) {
-    for (const field of ['voucher', 'voucherDiscountMinor', 'voucherServiceFeeMinor', 'voucherDeliveryMinor', 'clientServiceFeeMinor', 'clientDeliveryFeeMinor', 'voucherSupplierMinor', 'clientSupplierSubtotalMinor', 'gridgoSupplierTopupMinor', 'gridgoRiderTopupMinor', 'coversOrderTotal']) delete publicRecord[field];
+    for (const field of ['voucher', 'voucherDiscountMinor', 'voucherServiceFeeMinor', 'voucherDeliveryMinor', 'clientServiceFeeMinor', 'clientDeliveryFeeMinor', 'voucherSupplierMinor', 'clientSupplierSubtotalMinor', 'gridgoSupplierTopupMinor', 'gridgoRiderTopupMinor', 'coversOrderTotal', 'memberPerk', 'memberPerkMinor']) delete publicRecord[field];
+    // A membership is the client's own business: no shop or rider learns of it from a quote either.
+    for (const record of [publicRecord.acceptedQuote, publicRecord.pendingQuote, ...(publicRecord.quoteHistory || [])]) if (record) { delete record.memberPerk; delete record.memberPerkMinor; }
   }
   if (!ops) {
+    if (publicRecord.memberPerk) publicRecord.memberPerk = clientPerk(publicRecord.memberPerk);
     for (const field of ['voucherSupplierMinor', 'clientSupplierSubtotalMinor', 'gridgoSupplierTopupMinor', 'gridgoRiderTopupMinor']) delete publicRecord[field];
     if (publicRecord.voucher) publicRecord.voucher = clientVoucher(publicRecord.voucher);
     // Supplier settlement shows the complete principal; client cash/funding details are staff-only.

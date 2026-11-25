@@ -1,6 +1,7 @@
 import { staffPageBody } from './staff-list-pages.js';
 import { markReviewPayment } from './review-data.js';
 import { confirmVoucher } from './vouchers.js';
+import { publicMemberPerk } from './member-perk-projection.js';
 import { groupSummary } from "./cart-groups.js";
 import { publicOrganizationDiscount } from "./organization-money.js";
 import { clientInvoice } from "./invoice-projection.js";
@@ -45,7 +46,7 @@ export function publicBasket(store, basket, user) {
     groups: orders.map((order, index) => ({
       orderId: order.id, label: order.groupLabel || shopLabel(index), deadline: order.deadline ?? order.basketDeadline ?? basket.deadline, state: order.state,
       ...(order.shopDeliveryCount > 1 ? { deliveryNumber: order.deliveryNumber, shopDeliveryCount: order.shopDeliveryCount } : {}),
-      ...publicOrganizationDiscount(order),
+      ...publicOrganizationDiscount(order), ...publicMemberPerk(order),
       clientItemSubtotalMinor: order.supplierSubtotalMinor + (order.grossServiceFeeMinor ?? order.serviceFeeMinor),
       ...(privileged ? { itemSubtotalMinor: order.supplierSubtotalMinor, serviceFeeMinor: order.serviceFeeMinor } : {}),
       deliveryFeeMinor: order.deliveryFeeMinor, totalMinor: order.totalMinor,

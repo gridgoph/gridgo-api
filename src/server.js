@@ -77,6 +77,10 @@ import { reconcilePromotionInvites } from './promotions.js';
 import { testerBootstrapNeedsWrite } from './client-bootstrap.js';
 import { routeVouchers } from './voucher-routes.js';
 import { confirmVoucher, sweepVouchers, cancelVoucherReservations, restoreVoucherForRefund } from './vouchers.js';
+import { routeOrganizationMembers, needsVerifiedAddresses, sweepMembers } from './organization-members.js';
+import { memberListWorkDue } from './member-list.js';
+import { createMemberInviteWorker } from './member-invite-email.js';
+import { reconcileMemberPerks, releaseMemberPerk, selectMemberPerk, perkSnapshot, reserveMemberPerk } from './member-perks.js';
 import { isEarlyAccessRoute, isStaffEarlyAccessRoute, routeEarlyAccess } from './early-access.js';
 import { createEarlyAccessEmailWorker } from './early-access-email.js';
 import { createVoucherEmailWorker } from './voucher-email.js';
@@ -417,6 +421,7 @@ const fileRetention = createFileRetention({ database, storage: objectStorage,
 const MAX_UNCLAIMED_DEVICES = unclaimedDeviceLimit(process.env);
 const organizationMailer = createOrganizationMailer(process.env);
 const drainVoucherEmail = createVoucherEmailWorker({ database, env: process.env });
+const drainMemberInvites = createMemberInviteWorker({ database, env: process.env, id });
 const enqueueMutation = (mutation) => database.transaction(mutation);
 // The anonymous device routes touch nothing but device_tokens, so they commit
 // under their own advisory lock and can never hold up the domain lock that
@@ -530,6 +535,7 @@ async function save(view, { notificationsOnly = false } = {}) {
   flushMaintenanceInvalidates();
   await reconcileCalls(database, store, { createId: id, at: now(), ...(scope ? { orderIds: maintenance.orders.map(row => row.id) } : {}) });
   cancelVoucherReservations(maintenance, { id, at: now() });
+  reconcileMemberPerks(maintenance, { id, at: now() });
   flushMaintenanceInvalidates();
   syncSurveys(maintenance, { id, at: now() });
   flushMaintenanceInvalidates();
@@ -1257,6 +1263,11 @@ async function verifyClerkBeforeMutation(req, pathname) {
     "/auth/clerk/enroll/rider",
     '/auth/clerk/supplier-signup',
   ].includes(pathname);
+  if (req.method === 'POST' && needsVerifiedAddresses(pathname) && verified?.claims?.sub) {
+    if (tooManyRequests(`member-match:${verified.claims.sub}`, 30, 10 * 60_000)) { req.gridgoClerkUser = { clerkUser: null, limited: true }; return verified; }
+    try { req.gridgoClerkUser = { clerkUser: await clerkBackend.users.getUser(verified.claims.sub) }; } catch { req.gridgoClerkUser = { clerkUser: null }; }
+    return verified;
+  }
   if (["POST","PATCH"].includes(req.method) && needsClerkProfile && verified?.claims?.sub) {
     try {
       req.gridgoClerkUser = { clerkUser: await clerkBackend.users.getUser(verified.claims.sub) };
@@ -3240,6 +3251,19 @@ async function handleAuditedRequest(req, res) {
         return res.end(voucherResponse.bytes);
       }
       return send(res, voucherResponse.status, voucherResponse.body);
+    }
+    const memberResponse = await routeOrganizationMembers({ req, url, store, user, readBody, database, now, id,
+      secret: process.env.CLERK_SECRET_KEY, clerk: req.gridgoClerkUser });
+    if (memberResponse) {
+      res.setHeader('Cache-Control', 'private, no-store');
+      if (memberResponse.mutated) await save(store);
+      if (memberResponse.bytes) {
+        res.writeHead(memberResponse.status, { 'Content-Type': memberResponse.contentType,
+          'Content-Disposition': `attachment; filename="${memberResponse.filename}"`, 'Cache-Control': 'private, no-store',
+          'X-Content-Type-Options': 'nosniff', ...(res.gridgoCorsHeaders || {}) });
+        return res.end(memberResponse.bytes);
+      }
+      return send(res, memberResponse.status, memberResponse.body);
     }
     const organizationResponse = await routeOrganization({ req, url, store, user, readBody, now, createId: id,
       mailer: organizationMailer, emailSecret: process.env.CLERK_SECRET_KEY });
@@ -7270,6 +7294,7 @@ async function handleAuditedRequest(req, res) {
             "supplierRemainderMinor", "initialOnlineMinor", "finalOnlineMinor", "onlineDueMinor",
             "directStoreDueMinor", "supplierPlatformPayoutMinor", "supplierEarningsMinor",
           ]) order[field] = null;
+          releaseMemberPerk(store, order, 'quote_superseded', { id, at: now(), actorId: user.id });
           order.quoteVersion = null;
           order.commercialCommittedAt = null;
           order.payments = {};
@@ -7388,9 +7413,11 @@ async function handleAuditedRequest(req, res) {
           return send(res, 409, { error: "pickup_not_available" });
         }
 
-        const money = calculateOrderMoney({
+        const committedAt = now();
+        const orderMoney = (memberPerkMinor = 0) => calculateOrderMoney({
           supplierSubtotalMinor: quote.supplierSubtotalMinor,
           organizationEligible: approvedOrganization(store, user.id),
+          memberPerkMinor,
           fulfillmentMode,
           paymentPlan,
           supplierDownpaymentRateBps,
@@ -7399,8 +7426,14 @@ async function handleAuditedRequest(req, res) {
           settings: feeSettings({ ...store.settings, organizationDiscountRateBps: quote.organizationDiscountRateBps ?? store.settings.organizationDiscountRateBps },
             quote.serviceFeeSchedule || { version: 1, rateBps: quote.serviceFeeRateBps ?? store.settings.serviceFeeRateBps }),
         });
+        let money = orderMoney();
+        const memberPerk = selectMemberPerk(store, order.clientId, [money], committedAt);
+        if (memberPerk && memberPerk.amountMinor > money.organizationDiscountMinor) {
+          const useId = id('mpu');
+          money = { ...orderMoney(memberPerk.amountMinor), memberPerk: perkSnapshot(store, memberPerk, useId, memberPerk.amountMinor) };
+          reserveMemberPerk(store, memberPerk, useId, [order], { id, at: committedAt });
+        }
         const schedule = createPaymentSchedule(money);
-        const committedAt = now();
         Object.assign(order, money, schedule, {
           operationalModelVersion: 2,
           moneyModelVersion: 2,
@@ -7420,6 +7453,7 @@ async function handleAuditedRequest(req, res) {
             grossServiceFeeMinor: money.grossServiceFeeMinor,
             organizationDiscountRateBps: money.organizationDiscountRateBps,
             organizationDiscountMinor: money.organizationDiscountMinor,
+            ...(money.memberPerk ? { memberPerkMinor: money.memberPerkMinor, memberPerk: structuredClone(money.memberPerk) } : {}),
             deliveryDistanceMeters: money.deliveryDistanceMeters,
             deliveryFeeMinor: money.deliveryFeeMinor,
             totalMinor: money.totalMinor,
@@ -8686,6 +8720,15 @@ async function runLifecycleWork() {
         });
       },
       drainColourAnalyses,
+      async () => {
+        // Term end, unanswered requests and unclaimed list contacts.
+        if (!await memberListWorkDue(database, now())) return;
+        await enqueueMutation(async () => {
+          const store = await load();
+          if (await sweepMembers(store, database, { at: now(), id })) await save(store);
+        });
+      },
+      drainMemberInvites,
       drainVoucherEmail,
       drainEarlyAccessEmail,
       sweepOrganizationOfficers,

@@ -11,6 +11,7 @@ import { adjustedDeliverySplit, deliveryPinPaymentPending } from './delivery-pin
 import { noCashVoucherRemedy, ADJUSTMENT_REFUND_KINDS } from './refund-policy.js';
 import { recordRecoveryRefundChoice, restoreRecoveryAfterWithdraw } from './shop-move-pricing.js';
 import { restoreVoucherForRefund } from './vouchers.js';
+import { restoreMemberPerkForRefund } from './member-perks.js';
 import crypto from 'node:crypto';
 import { refundFail as fail, refundMinor, sumMinor, productionStarted, deliveryCompleted, handoverCompleted, refundHold, refundSettlementFor,
   supplierRefundPayouts, calculateRefundSettlement, collectedRefundComponents, ACTIVE_REFUND_STATUSES } from './refund-policy.js';
@@ -360,6 +361,7 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
     eventKind = noCash ? 'no_cash_settled' : 'settled'; eventData = { settlementId: settlement.id, supersededStages, supersededPayoutIds, noCashSettlement: noCash };
     if (noCash) {
       restoreVoucherForRefund(store, order, { id, at, actorId: user.id, clientCaused: body.clientCaused, reason: eventReason });
+      restoreMemberPerkForRefund(store, order, { id, at, actorId: user.id, clientCaused: body.clientCaused, reason: eventReason });
       if (order.shopRecovery?.refundRequestId === request.id) order.shopRecovery.status = 'refunded';
     }
   } else if (action === 'reject' || action === 'withdraw') {
@@ -437,7 +439,10 @@ export async function routeRefunds({ req, url, store, user, readBody, now, id, a
     bind(receipt, request, 'transfer_evidence');
     store.refundPayments.push(payment); attempt.status = 'paid'; attempt.updatedAt = at; request.status = 'paid';
     const settlement = settlementFor(store, request);
-    if (!ADJUSTMENT_REFUND_KINDS.includes(request.kind)) restoreVoucherForRefund(store, order, { id, at, actorId: user.id, clientCaused: settlement.snapshot.clientCaused, reason: settlement.reason });
+    if (!ADJUSTMENT_REFUND_KINDS.includes(request.kind)) {
+      restoreVoucherForRefund(store, order, { id, at, actorId: user.id, clientCaused: settlement.snapshot.clientCaused, reason: settlement.reason });
+      restoreMemberPerkForRefund(store, order, { id, at, actorId: user.id, clientCaused: settlement.snapshot.clientCaused, reason: settlement.reason });
+    }
     order.revenueAdjustments ||= [];
     const returnedPlatform = sumMinor([settlement.feeMinor, settlement.platformDeliveryMinor]);
     if (returnedPlatform) order.revenueAdjustments.push({ id: id('rev'), kind: 'refund', amountMinor: -returnedPlatform,
