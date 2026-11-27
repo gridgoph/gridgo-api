@@ -85,7 +85,10 @@ exact `quote` and `paymentTiming`. Do not add display prices to estimate checkou
 Optional fields:
 
 - `sort`: `nearby` (default; `nearest` is an alias), `all_davao`, `fastest`,
-  `top_rated`, `lowest_price`, or the retained `fewest_jobs`.
+  `ready_soonest`, `top_rated`, `cheapest`, `lowest_price`, or the retained
+  `fewest_jobs`. `ready_soonest` orders by `readyAt` (the same order as
+  `fastest`). `cheapest` orders by the card's `price.totalMinor`, so delivery is
+  included on Deliver; it is available for every paper and product type.
 - `shopsOnly`, `verifiedOnly`: booleans, default false. Filtering precedes
   expansion. `lowest_price` compares the complete printing subtotal and is
   available for A3 and plans.
@@ -122,6 +125,69 @@ home-printer enrollment, persistence and operational rules are defined in
 [Home printers](HOME_PRINTERS_API.md). Its profile adapter supplies
 `supplierType:"home"` and `barangay`; public responses never expose its pin.
 
+#### Map pins, card facts and filters (1A336F51)
+
+Every POST card that has a current quote adds
+`price:{totalMinor,printedPages,perPageMinor,perPageMixed}`:
+
+- `totalMinor` is that card's `quote.totalMinor`: the checkout quote of a
+  preview draft built by the same draft and checkout code for this printer, so
+  it includes printing, the GRIDGO fee, delivery on Deliver and any automatic
+  discount. It always equals the draft quote and the placed order total for the
+  same inputs. Show it on the pin; never add display prices to make a total.
+- `printedPages` is selected pages × copies across files (printed units for plans).
+- `perPageMinor` is the printer's own page rate (per printed unit for plans) for this order.
+  When files carry different rates (for example B&W and colour), it is printing
+  ÷ printed pages rounded up to the centavo and `perPageMixed` is `true`.
+
+Closed or unquoted cards omit `price`. All cards (POST and GET) also carry:
+
+- `logo`: `{fileId,url}` for the shop's ready logo image, else `null`. The
+  response signs it like catalogue photos (`downloadUrl`,
+  `downloadUrlExpiresAt`). Home printers always return `null`; show initials.
+- `services`: any of `stapling | binding | lamination | rush`, from live
+  document finishing capabilities, public listings and rush-enabled services.
+- `paymentMethods`: `["qr_ph"]` or `["cash","qr_ph"]`. Cash is listed only when
+  checkout would accept it for this client and printer: cash switched on,
+  individual client, not a review account or barred client, Deliver, verified
+  shop and, on quoted cards, printing plus fee under the cash limit. Home
+  printers are QR only.
+- `topShop`: a public rating (five or more reviews) averaging at least 4.5.
+- Existing `rating` (`{average,count}` or `null`), `jobsAhead`, `readyAt`,
+  `verified`, `isOpenNow` and the home-printer privacy fields are unchanged.
+
+The response adds `filterData` for the Filters panel. It counts the printers in
+the same zones as the list but **before** `shopsOnly`/`verifiedOnly`, so the
+panel can show every choice and compute its live “Show N printers” count from
+the cards:
+
+```json
+{
+  "printers": 6, "verified": 4, "openNow": 5, "topShops": 1,
+  "printerType": { "shop": 5, "home": 1 },
+  "services": { "stapling": 2, "binding": 1, "lamination": 0, "rush": 1 },
+  "paymentMethods": { "cash": 0, "qr_ph": 6 },
+  "price": {
+    "total": { "minMinor": 2900, "maxMinor": 18300,
+      "buckets": [{ "fromMinor": 2900, "toMinor": 4440, "count": 3 },
+        { "fromMinor": 4441, "toMinor": 5981, "count": 0 }] },
+    "perPage": { "minMinor": 300, "maxMinor": 300,
+      "buckets": [{ "fromMinor": 300, "toMinor": 300, "count": 6 }] }
+  }
+}
+```
+
+`price` is `null` when no card is quoted. Each histogram has at most ten
+contiguous, inclusive integer buckets of equal width,
+`ceil((maxMinor - minMinor + 1) / 10)`, from `minMinor` to `maxMinor` (the example
+is truncated); bucket counts add up to the quoted cards.
+
+The order a sort produces is exported as `expressPrinterOrder(store, location,
+sort)` (`src/express-printers.js`) so automatic rerouting after a decline can
+follow the client's chosen sort. The retained GET has no files to quote, so it
+returns `400 express_shop_pricing_required` for `cheapest` and `filterData`
+without prices for its non-legacy sorts.
+
 The existing shared `settings.deliveryFeeBands` remains the only fare source.
 Zone A maps to `nearby`, B to `away`, C to `long_distance`; bounds are inclusive.
 Current repository defaults already match 5/10/15 km and PHP 89/149/229. Existing
@@ -151,7 +217,7 @@ checkout if a later settings change takes the printer above that permission.
 The retained `GET /express/shops?lat=...&lng=...&fulfillmentMode=...` preserves
 its default `nearest` and legacy `top_rated | fewest_jobs` open-only list with
 additive card metadata. Those legacy sorts keep their existing ranking behavior.
-Explicit new sorts (`nearby | all_davao | fastest`) opt into the new card policy;
+Explicit new sorts (`nearby | all_davao | fastest | ready_soonest`) opt into the new card policy;
 query booleans `shopsOnly=true|false`, `verifiedOnly=true|false` are supported.
 It cannot quote `lowest_price`. The new screen should use the POST read with its
 files to avoid counting printers that cannot accept that Preview.

@@ -43,6 +43,9 @@ for(const productType of ['a3','plans'])test(`${productType}: printer quotes per
  const orderId=placed.order.id,path=`/orders/${orderId}`;
  let loaded=await loadStore(db),order=loaded.orders.find(o=>o.id===orderId);
  assert.equal(order.supplierSubtotalMinor,26000);
+ // The card total read through the real server is the stored checkout total.
+ assert.equal(list.shops.find(shop=>shop.supplierId==='supplier').price.totalMinor,order.totalMinor);
+ assert.ok(list.filterData.price.total.buckets.length>=1);
  if(productType==='plans') {
   assert.equal(loaded.orderLineItems.find(line=>line.orderId===orderId).quantity,4);
   assert.equal(order.expressOrder.printSettings[0].copies,2);
