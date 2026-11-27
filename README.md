@@ -2,6 +2,8 @@
 
 Private rider document uploads, consent, Operations review and per-document re-upload: [Rider onboarding](docs/RIDER_ONBOARDING_API.md).
 
+Local shop rankings, monthly Top Shop awards and Operations sticker delivery: [Shop leaderboards](docs/SHOP_LEADERBOARDS_API.md).
+
 Structured review tags, private comments and client shop summaries: [Shop ratings](docs/SHOP_RATINGS_API.md).
 
 Ready-made product templates, full price tables, price checks, assisted setup and explicit legacy conversion: [Product templates](docs/PRODUCT_TEMPLATES_API.md).

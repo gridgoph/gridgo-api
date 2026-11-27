@@ -154,7 +154,12 @@ Closed or unquoted cards omit `price`. All cards (POST and GET) also carry:
   individual client, not a review account or barred client, Deliver, verified
   shop and, on quoted cards, printing plus fee under the cash limit. Home
   printers are QR only.
-- `topShop`: a public rating (five or more reviews) averaging at least 4.5.
+- `topShop`: whether this printer holds the current monthly Top Shop award.
+- `topShopBadge`: `{type:"top_shop",month:"YYYY-MM",validFrom,validUntil}` or
+  `null`. The month is the earned month; the badge is valid during the following
+  Manila calendar month. Only Nearest (including the `nearby` alias) receives
+  the placement boost. See [Shop leaderboards](SHOP_LEADERBOARDS_API.md).
+  No ranks, scores or score parts appear on client printer cards.
 - Existing `rating` (`{average,count}` or `null`), `jobsAhead`, `readyAt`,
   `verified`, `isOpenNow` and the home-printer privacy fields are unchanged.
 
