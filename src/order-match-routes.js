@@ -5,7 +5,10 @@ import { assertDocumentRequest } from './document-capabilities.js';
 import { pingPrinterDemand } from './printer-demand.js';
 import { isDeepStrictEqual } from 'node:util';
 import { wantsPickupPin } from './pickup-pin.js';
+import { expressCardPrice, expressPaymentMethods } from './express-shop-facts.js';
 import { expressRates, expressLinePrice, expressPoint, expressShopList, assertExpressNightJob, expressGuide, updateExpressGuide, createExpressSnapshot, publicExpress, expressClientProjection, expressCatalogOptions } from './express-orders.js';
+import { expressCheckoutFeeSchedule, homePrinterLimitMinor } from './express-checkout-rules.js';
+import { beginAcceptFirst, assertAcceptFirstPayable } from './express-accept-first.js';
 import { expressPrinterChoices, fastestPermittedPrinter } from './express-printers.js';
 import { isReviewData, markReviewPayment, reviewCatalogView, REVIEW_CATALOG_TABLES } from './review-data.js';
 import { approvalPolicy, recordApprovalProof } from './approval-proof.js';
@@ -15,7 +18,7 @@ import { colourQuoteFor, queueLineColour } from './colour-analysis.js';
 import { artworkAttachmentsFor, artworkFileIdsFor, artworkPreviewFileId, assertArtworkAttachmentLimit, validateArtworkAttachments, writeArtworkAttachments } from './artwork-attachments.js';
 import { specialInstructions } from './special-instructions.js';
 import { snapshotShopClock } from './shop-hours.js';
-import { feeSchedule, feeSettings } from './service-fee.js';
+import { feeSchedule, feeSettings, groupLevelFee, serviceFeeMoney } from './service-fee.js';
 import { voucherMoney, applyVoucherMoney, splitVoucherMinor } from './voucher-money.js';
 import { clientVoucher } from './voucher-projection.js';
 import { selectMemberPerk, withMemberPerk, publicPerkChoice, perkSnapshot, reserveMemberPerk } from './member-perks.js';
@@ -758,7 +761,9 @@ function groupFeeSettings(store, cart, lines, at) {
   const key = JSON.stringify([lines[0]?.supplierId, lineDeliveryKey(lines[0] || {})]);
   const saved = (lines.find(line => JSON.stringify(line.serviceFeeSnapshot?.groupKey) === key)
     ?? lines.find(line => legacyFeeKey(cart, line)))?.serviceFeeSnapshot;
-  return feeSettings(store.settings, saved?.schedule || feeSchedule(store.settings, at));
+  // Accept-first Express drafts use the Express fee rule; every other cart keeps the brackets.
+  return feeSettings(store.settings, saved?.schedule || (lines.some(line => line.expressPrint?.routing)
+    ? expressCheckoutFeeSchedule(store.settings) : feeSchedule(store.settings, at)));
 }
 function legacyFeeKey(cart, line) {
   const [supplierId, date] = line.serviceFeeSnapshot?.groupKey || [];
@@ -810,7 +815,7 @@ function clientCartLineAmounts(store,cart,lines,at) {
     const subtotals = group.lines.map(line => cartLineSubtotal(store,line));
     if (subtotals.some(amount => amount == null)) {for (const line of group.lines) amounts.set(line.id,null);continue;}
     const settings = groupFeeSettings(store,cart,group.lines,at);
-    if (settings.serviceFeeSchedule.version === 2) {
+    if (groupLevelFee(settings.serviceFeeSchedule)) {
       const principal = addMinor(subtotals,'colour.groupPrincipal');
       const shares = splitVoucherMinor(clientMoneyMinor({settings},principal)-principal,subtotals);
       group.lines.forEach((line,index) => amounts.set(line.id,subtotals[index]+shares[index]));
@@ -884,7 +889,7 @@ export function clientCartQuote(store, cart, lines, at) {
     voucherGroups: voucherPlan?.groups.map((group, index) => {
       const { voucherSupplierMinor: _supplierFunding, clientSupplierSubtotalMinor: _supplierCash, ...visible } = group;
       return { groupId: grouped[index].lines[0].id,
-      ...(voucherPlan.money[index].serviceFeeSchedule?.version === 2 ? {
+      ...(groupLevelFee(voucherPlan.money[index].serviceFeeSchedule) ? {
         organizationDiscountMinor: group.organizationDiscountMinor, voucherDiscountMinor: group.voucherDiscountMinor,
         ...(group.memberPerkMinor ? { memberPerkMinor: group.memberPerkMinor } : {}), totalMinor: group.totalMinor,
       } : visible) }; }) || [],
@@ -893,6 +898,18 @@ export function clientCartQuote(store, cart, lines, at) {
     upfrontReason: grouped.length > 1 ? "multiple_fulfillment_groups" : "platform_setting",
     downpaymentPercent, downpaymentMinor, balanceMinor: totalMinor == null ? null : totalMinor - downpaymentMinor,
   };
+  if (cart.orderType === "express" && lines.length && subtotals.every((amount) => amount != null)) {
+    const schedule = groupFeeSettings(store, cart, lines, at).serviceFeeSchedule;
+    if (schedule.version === 3) {
+      // Accept-first shows the shop's price and the GRIDGO fee separately.
+      const printingMinor = addMinor(subtotals, "quote.printing");
+      const fee = serviceFeeMoney(printingMinor, schedule);
+      Object.assign(projected, { printingMinor, gridgoFeeMinor: fee.grossServiceFeeMinor,
+        gridgoFeeRule: { minimumMinor: schedule.minimumMinor, rateBasisPoints: schedule.rateBps, applied: fee.serviceFeeWorking[0].applied, roundTotalUpToMinor: schedule.roundTotalUpToMinor },
+        printingLines: lines.map((line, index) => ({ lineId: line.id, pages: line.documentPages?.printed ?? null, copies: line.quantity,
+          unitPriceMinor: line.expressPrint?.rateMinor ?? null, amountMinor: subtotals[index] })) });
+    }
+  }
   return cart.orderType === "express" ? expressClientProjection(projected) : projected;
 }
 
@@ -982,7 +999,7 @@ function cartInternal(store, cart, at, { compactListings = false } = {}) {
     const itemSubtotalMinor = amounts.some((amount) => amount == null) ? null : addMinor(amounts, "group.itemSubtotalMinor");
     const fee = itemSubtotalMinor == null ? null : organizationFeeMoney(itemSubtotalMinor, groupFeeSettings(store, cart, groupLines, at), approvedOrganization(store, cart.clientId));
     const serviceFeeMinor = fee?.grossServiceFeeMinor ?? null;
-    if (fee?.serviceFeeSchedule.version === 2) {
+    if (groupLevelFee(fee?.serviceFeeSchedule)) {
       const shares = splitVoucherMinor(serviceFeeMinor, amounts);
       groupLines.forEach((line, index) => {
         publicLines.find(row => row.id === line.id).clientLineSubtotalMinor = amounts[index] + shares[index];
@@ -1168,7 +1185,7 @@ function matchedOrderInternal(store, order) {
     ...(order.shopDeliveryCount > 1 ? { deliveryNumber: order.deliveryNumber, shopDeliveryCount: order.shopDeliveryCount } : {}),
     state: order.state,
     ...publicOrganizationDiscount(order),
-    ...(order.orderType === "express" || order.basketId || order.organizationDiscountRateBps > 0 || order.serviceFeeSchedule?.version === 2 ? { clientItemSubtotalMinor: order.supplierSubtotalMinor + (order.grossServiceFeeMinor ?? order.serviceFeeMinor) } : {
+    ...(order.orderType === "express" || order.basketId || order.organizationDiscountRateBps > 0 || groupLevelFee(order.serviceFeeSchedule) ? { clientItemSubtotalMinor: order.supplierSubtotalMinor + (order.grossServiceFeeMinor ?? order.serviceFeeMinor) } : {
       itemSubtotalMinor: order.supplierSubtotalMinor,
       serviceFeeRateBps: order.serviceFeeRateBps,
       serviceFeeMinor: order.serviceFeeMinor,
@@ -1223,9 +1240,11 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   // never changes what this client owes.
   const group=(store.expressGroups||[]).find(g=>g.cartId===cart.id&&g.state==='checkout_open'&&g.hostId===user.id);
   const cash = body.payment?.method === 'cash';
-  const paymentAfterAcceptance=cart.orderType==='express'&&cartLines.some(line=>line.expressPrint?.paper==='a3'||line.expressPrint?.productType==='plans');
+  const acceptFirst=cart.orderType==='express'&&cartLines.some(line=>line.expressPrint?.routing);
+  const paymentAfterAcceptance=cart.orderType==='express'&&cartLines.some(line=>line.expressPrint?.paper==='a3'||line.expressPrint?.productType==='plans'||line.expressPrint?.routing);
   if(paymentAfterAcceptance&&!zeroCashBoundary&&body.payment!=null)fail(409,'express_payment_after_acceptance','Pay for this Express order after the shop accepts.');
-  const downpaymentPercent = cash || basketId ? 100 : downpaymentPercentSetting(store.settings);
+  // Accept-first is paid in one step after acceptance, at the counter or by QR.
+  const downpaymentPercent = cash || basketId || acceptFirst ? 100 : downpaymentPercentSetting(store.settings);
   const order = {
     id: orderId,
     ...(cart.orderType === "express" ? {orderType:"express", expressOrder:createExpressSnapshot(cart,cartLines,at,{pickupPin:wantsPickupPin(body,{fulfillmentMode:cart.fulfillmentMode,group})})} : {}),
@@ -1550,7 +1569,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
     order.expressOrder.paymentTiming='after_acceptance';
     order.payments.initial.status='not_submitted';
     order.state='needs_qa';
-    order.timeline=[{at,state:'needs_qa',by:user.id,note:'A3 Express placed; artwork review and shop acceptance precede client payment.'}];
+    order.timeline=[{at,state:'needs_qa',by:user.id,note:acceptFirst?'Express request placed; the shop accepts before the client pays.':'A3 Express placed; artwork review and shop acceptance precede client payment.'}];
   } else {
     const payment = record(body.payment, 'payment');
     if (payment.method !== 'qr_manual') fail(400, 'payment_method_not_allowed', 'Checkout accepts QR Ph manual payment only.', { allowed: ['qr_manual'] });
@@ -1634,7 +1653,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
     detail: { jobCount: jobs.length, itemSubtotalMinor, ...fee, deliveryFeeMinor: deliveryTotalMinor, totalMinor },
   });
   for (const { item } of [...grouped.values()].flat()) if (isQuoteListing(item)) markQuoteOrdered(store, item, order, { user, at, createId });
-  if (!zeroCashBoundary) notifyOpsJobNeedsQa(store, order, { createId, at });
+  if (!zeroCashBoundary && !acceptFirst) notifyOpsJobNeedsQa(store, order, { createId, at });
   if (!basketId) {
     if (!zeroCashBoundary && !cash && !paymentAfterAcceptance) notifyOpsPaymentSubmitted(store, order, { createId, at });
     notifyClientReceiptReady(store, order, { createId, at });
@@ -1818,12 +1837,19 @@ export function checkoutBasket(store, user, cart, body, createId, at, req) {
     if (voucher) reserveVoucher(store, voucher, cart, { id: createId, at, orderIds: [result.order.id], amountMinor: plan.voucherDiscountMinor });
     else releaseVoucherReservations(store, { id: createId, at }, r => r.cartId === cart.id);
     if (cash && voucher) confirmVoucher(store,[store.orders.find(o=>o.id===result.order.id)],{id:createId,at,actorId:user.id});
+    const placed = store.orders.find(o => o.id === result.order.id);
     if (zeroCashBoundary) {
-      const order = store.orders.find(o => o.id === result.order.id);
-      settleVoucherInitial(store, [order], { id: createId, at, actorId: user.id });
-      notifyOpsJobNeedsQa(store, order, { createId, at });
-      notifyOrderParties(store, order, { createId, at });
-      result.order = publicMatchedOrder(store, order);
+      settleVoucherInitial(store, [placed], { id: createId, at, actorId: user.id });
+      if (!placed.expressOrder?.acceptFlow) {
+        notifyOpsJobNeedsQa(store, placed, { createId, at });
+        notifyOrderParties(store, placed, { createId, at });
+      }
+      result.order = publicMatchedOrder(store, placed);
+    }
+    if (placed.expressOrder?.acceptFlow === 2) {
+      assertAcceptFirstPayable(store, placed, user, at);
+      beginAcceptFirst(store, placed, { at, createId });
+      result.order = publicMatchedOrder(store, placed);
     }
     return result;
   }
@@ -1988,6 +2014,19 @@ export async function prepareArtworkCheckout({ req, pathname, store, user, check
   }
 }
 
+/** Run checkout code against the catalogue a client may order from, outside a route. */
+export function withClientCatalog(store, user, fn) {
+  const view = reviewCatalogView(approvedCatalogView(store), user);
+  if (view === store) return fn();
+  const original = Object.fromEntries([...new Set([...CATALOG_REVIEW_TABLES, ...REVIEW_CATALOG_TABLES])].map(key => [key, store[key]]));
+  try {
+    for (const key of Object.keys(original)) store[key] = view[key];
+    return fn();
+  } finally {
+    Object.assign(store, original);
+  }
+}
+
 export async function routeOrderMatch(args) {
   if (!isOrderMatchRoute(args.req.method, args.url.pathname)) return null;
   const { store } = args;
@@ -2018,7 +2057,7 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     if (!invoice) fail(404, "invoice_not_found", "This order does not have an invoice.");
     const snapshot = clientInvoice(invoice.snapshot, { hideSupplierAmounts: Boolean(order.orderType === "express" || basketForOrder(store, orderId)
       || invoice.snapshot.basketId || invoice.snapshot.groups?.length > 1
-      || invoice.snapshot.organizationDiscountRateBps > 0 || invoice.snapshot.serviceFeeSchedule?.version === 2) && !privileged, exposeWorking: privileged });
+      || invoice.snapshot.organizationDiscountRateBps > 0 || groupLevelFee(invoice.snapshot.serviceFeeSchedule)) && !privileged, exposeWorking: privileged });
     // Invoices issued before the snapshot carried the split were all 75/25.
     if (snapshot.paymentPlan && snapshot.paymentPlan.downpaymentPercent == null) {
       snapshot.paymentPlan.downpaymentPercent = orderDownpaymentPercent(order);
@@ -2493,7 +2532,7 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     const cart = ownCart(store, user, decodeURIComponent(specialCartMatch[1]), { draft: true });
     if((store.cartLines||[]).some(line=>line.cartId===cart.id&&line.expressPrint?.groupMemberId))fail(409,'group_checkout_required');
     const result = checkoutBasket(store, user, cart, record(await readBody(req)), id, now(), req);
-    result.invoice = clientInvoice(result.invoice, { hideSupplierAmounts: Boolean(cart.orderType === "express" || result.basket || result.invoice.organizationDiscountRateBps > 0 || result.invoice.serviceFeeSchedule?.version === 2) });
+    result.invoice = clientInvoice(result.invoice, { hideSupplierAmounts: Boolean(cart.orderType === "express" || result.basket || result.invoice.organizationDiscountRateBps > 0 || groupLevelFee(result.invoice.serviceFeeSchedule)) });
     return { status: 201, body: cart.orderType === "express" ? expressClientProjection(result) : result, mutated: true };
   }
   if (specialCartMatch && specialCartMatch[2] === "fulfillment" && req.method === "PUT") {
@@ -2783,6 +2822,12 @@ export function createExpressDraft(store,user,body,id,at,selectionPolicy=null,gr
  if(homeProfile(store,body.supplierId)&&(productType!=='documents'||body.files?.some(f=>!['short','a4','long'].includes(f.paper))))fail(409,'home_documents_only');
  if(!['documents','plans'].includes(productType))fail(400,'invalid_express_product_type');
  if(body.selection!=null&&body.selection!=='just_print_it')fail(400,'invalid_express_selection');
+ if(body.acceptFirst!=null&&typeof body.acceptFirst!=='boolean')fail(400,'invalid_express_accept_first');
+ // Group orders keep their own flow; accept-first is for one client's request.
+ if(body.acceptFirst===true&&groupOwners)fail(409,'express_accept_first_unavailable');
+ // Accept-first is opt-in so released apps that pay at checkout keep their flow.
+ const acceptFirst=body.acceptFirst===true;
+ const routing=acceptFirst?expressRouting(body,productType):null;
  if(body.selection==='just_print_it') {
   if(body.supplierId!=null)fail(400,'invalid_express_selection');
   if(productType==='plans'||body.files?.some(file=>file.paper==='a3'))fail(409,'express_manual_selection_required');
@@ -2797,18 +2842,18 @@ export function createExpressDraft(store,user,body,id,at,selectionPolicy=null,gr
  const lines=body.files.map((input,index)=>{
    record(input,'file');
    const item=input.catalogItemId?store.catalogItems.find(i=>i.id===input.catalogItemId):shop.catalogItemIds.map(id=>store.catalogItems.find(i=>i.id===id)).find(i=>{
-     try{expressCatalogOptions(store,i,{...input,productType});return true;}catch(error){if(error.status)return false;throw error;}
+     try{expressCatalogOptions(store,i,{...input,productType},{ownPrice:acceptFirst});return true;}catch(error){if(error.status)return false;throw error;}
    });
    if(!item||!shop.catalogItemIds.includes(item.id))fail(409,'express_listing_unavailable','Choose an Express document listing.');
    fileFor(store,groupOwners?.get(input.fileId)||user,input.fileId,'artwork','fileId');
    if(!['bw','colour'].includes(input.colour)||!(productType==='plans'?['a4','a3','a2','a1','a0','30x40']:['a4','short','long','a3']).includes(input.paper)||!['one','two'].includes(input.sides)) fail(400,'invalid_express_print','Choose colour, paper and sides.');
    if(!Array.isArray(input.acceptedWarnings)||input.acceptedWarnings.length>20||input.acceptedWarnings.some(w=>!['paper_size_mismatch','rgb_colour'].includes(w))) fail(400,'invalid_express_warnings','Send accepted warning codes.');
    if(input.optionIds != null)fail(400,'express_options_managed','Express selects standard print options from the print settings.');
-   const standard=expressCatalogOptions(store,item,{...input,productType});
+   const standard=expressCatalogOptions(store,item,{...input,productType},{ownPrice:acceptFirst});
    const line={id:id('line'),cartId:cart.id,supplierId:shop.supplierId,catalogItemId:item.id,quantity:positiveInteger(input.copies,'copies'),
      optionIds:standard.optionIds,artworkFileId:input.fileId,printLayout:parseCartPrintLayout(item,input.layout,fail),sortOrder:index,createdAt:at,updatedAt:at,
      specialInstructions:specialInstructions(input.note),
-     expressPrint:{...(selectionPolicy?{selection:structuredClone(selectionPolicy)}:{}),...(productType==='plans'?{productType}:{}),colour:input.colour,paper:input.paper,paperStock:standard.paperStock,sides:input.sides,rateMinor:standard.rateMinor,acceptedWarnings:[...new Set(input.acceptedWarnings)]},
+     expressPrint:{...(selectionPolicy?{selection:structuredClone(selectionPolicy)}:{}),...(routing?{routing:structuredClone(routing)}:{}),...(productType==='plans'?{productType}:{}),colour:input.colour,paper:input.paper,paperStock:standard.paperStock,sides:input.sides,rateMinor:standard.rateMinor,acceptedWarnings:[...new Set(input.acceptedWarnings)]},
      structuredSpec:{size:input.paper,colourMode:input.colour,sides:input.sides}};
    line.documentPages=documentPagesFor(store,productType==='plans'?{...item,pricingUnit:'per_page'}:item,line,input.pageRange??null,{required:true});line.measurement={pages:line.documentPages.printed};
    expressLinePrice(line);assertListingArtwork(store,item,line);
@@ -2821,14 +2866,29 @@ export function createExpressDraft(store,user,body,id,at,selectionPolicy=null,gr
  let tester=(store.foundingTesters||=[]).find(t=>t.clientId===user.id);
  if(!tester){tester={clientId:user.id};store.foundingTesters.push(tester);}tester.addedAt ||= at;
  const quote=clientCartQuote(store,cart,lines,at);
+ // Home printers stay small while QR payments are confirmed by hand.
+ const homeLimit=homeProfile(store,shop.supplierId)?homePrinterLimitMinor(store.settings):null;
+ if(homeLimit!=null&&quote.totalMinor!=null&&quote.totalMinor>homeLimit) {
+  store.carts=store.carts.filter(row=>row!==cart);store.cartLines=store.cartLines.filter(row=>!lines.includes(row));
+  fail(409,'home_printer_order_limit','Home printers take orders up to the manual payment limit.');
+ }
  delete quote.voucherGroups; delete quote.downpaymentPercent;
  shop.readyAt=projectListingGroup(store,lines,{now:at}).projection.promiseBy;
- return {status:201,body:{cartId:cart.id,confirmation:expressConfirmation(cart,lines),paymentTiming:lines.some(l=>l.expressPrint.paper==='a3'||l.expressPrint.productType==='plans')?'after_acceptance':'checkout',quote,shop},mutated:true};
+ return {status:201,body:{cartId:cart.id,confirmation:expressConfirmation(cart,lines),paymentTiming:acceptFirst||lines.some(l=>l.expressPrint.paper==='a3'||l.expressPrint.productType==='plans')?'after_acceptance':'checkout',
+  ...(acceptFirst?{acceptFirst:true}:{}),quote,shop},mutated:true};
+}
+const ROUTING_SORTS=['nearest','nearby','all_davao','fastest','top_rated','lowest_price','fewest_jobs','cheapest','ready_soonest'];
+/** The client's list order and filters, kept so a refused request moves the same way. */
+function expressRouting(body,productType) {
+ const sort=body.sort??'nearest';
+ if(!ROUTING_SORTS.includes(sort))fail(400,'invalid_express_sort');
+ for(const key of ['shopsOnly','verifiedOnly'])if(body[key]!=null&&typeof body[key]!=='boolean')fail(400,'invalid_express_filter');
+ return {sort,shopsOnly:body.shopsOnly===true,verifiedOnly:body.verifiedOnly===true,productType,roundAsked:1,round:1};
 }
 
 /** Preview the same draft builder with isolated draft arrays. No carts, missions,
  * vouchers, notifications or IDs are persisted by the printer-list read. */
-function quotedExpressPrinters(store,user,body,at) {
+export function quotedExpressPrinters(store,user,body,at) {
  if(!Array.isArray(body.files)||!body.files.length||body.files.length>20)fail(400,'invalid_express_files');
  const location=expressPoint(body.fulfillmentMode==='delivery'?body.dropoff:body.location);
  const rows=expressShopList(store,user,{location,fulfillmentMode:body.fulfillmentMode,includeClosed:true,productType:body.productType},at);
@@ -2841,10 +2901,13 @@ function quotedExpressPrinters(store,user,body,at) {
    const result=createExpressDraft(preview,user,{...body,selection:undefined,supplierId:shop.supplierId},prefix=>`preview_${prefix}_${++sequence}`,at).body;
    if(result.quote.status!=='priced')continue;
    const privatePoint=store.supplierProfiles.find(profile=>profile.userId===shop.supplierId).shop;
+   // The card total is this checkout quote, never a sum of display prices.
    quoted.push({...shop,readyAt:result.shop.readyAt,quote:result.quote,paymentTiming:result.paymentTiming,
+    price:expressCardPrice(result.quote,preview.cartLines),
+    paymentMethods:expressPaymentMethods(store,user,{home:shop.printerType==='home',verified:shop.verified,fulfillmentMode:body.fulfillmentMode,printAndFeeMinor:result.quote.clientItemSubtotalMinor}),
     deliveryFareMinor:deliveryFeeForDistance(distanceMetersBetween(privatePoint,location),store.settings)});
   } catch(error) {
-   if(!['express_listing_unavailable','express_listing_configuration_required','document_capability_unavailable','express_night_capacity','express_shop_unavailable','print_layout_not_supported','artwork_file_format_not_accepted'].includes(error.code))throw error;
+   if(!['express_listing_unavailable','express_listing_configuration_required','document_capability_unavailable','express_night_capacity','express_shop_unavailable','print_layout_not_supported','artwork_file_format_not_accepted','home_printer_order_limit'].includes(error.code))throw error;
   }
  }
  return expressPrinterChoices(store,user,{...body,location},at,quoted);

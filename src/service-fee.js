@@ -7,8 +7,21 @@ export const DEFAULT_SERVICE_FEE_SCHEDULE = Object.freeze({ version: 2, rounding
 const fail = (code) => { throw Object.assign(new Error(code), { status: 400, code }); };
 const minor = n => { if (!Number.isSafeInteger(n) || n < 0) fail('invalid_money'); return n; };
 const bps = n => Number.isInteger(n) && n >= 0 && n <= 10000;
+/** Express accept-first only: the higher of a minimum and a rate of the printing,
+ * with printing + fee rounded UP to a fixed increment. The shop keeps its price. */
+export const EXPRESS_FEE_ROUNDING_MINOR = 50;
+export function expressFeeSchedule({ minimumMinor, rateBps }) {
+  return validateFeeSchedule({ version: 3, rule: 'express_minimum_or_rate', minimumMinor, rateBps, roundTotalUpToMinor: EXPRESS_FEE_ROUNDING_MINOR });
+}
+/** Brackets and the Express rule are both charged once per shop delivery group. */
+export const groupLevelFee = schedule => schedule?.version === 2 || schedule?.version === 3;
 export function validateFeeSchedule(schedule) {
   if (!schedule || typeof schedule !== 'object' || Array.isArray(schedule)) fail('invalid_service_fee_schedule');
+  if (schedule.version === 3) {
+    if (schedule.rule !== 'express_minimum_or_rate' || !bps(schedule.rateBps) || !Number.isSafeInteger(schedule.minimumMinor)
+      || schedule.minimumMinor < 0 || schedule.roundTotalUpToMinor !== EXPRESS_FEE_ROUNDING_MINOR) fail('invalid_service_fee_schedule');
+    return schedule;
+  }
   if (schedule.version === 1) {
     if (!bps(schedule.rateBps)) fail('invalid_service_fee_schedule');
     return schedule;
@@ -36,6 +49,7 @@ export function feeSettings(settings, schedule) {
 }
 export function serviceFeeMoney(principalMinor, schedule) {
   minor(principalMinor); validateFeeSchedule(schedule);
+  if (schedule.version === 3) return expressFeeMoney(principalMinor, schedule);
   const bands = schedule.version === 1 ? [{ upToMinor: null, rateBps: schedule.rateBps }] : schedule.brackets;
   let lower = 0, numerator = 0n, roundedSoFar = 0n;
   const working = bands.map(band => {
@@ -52,6 +66,19 @@ export function serviceFeeMoney(principalMinor, schedule) {
   const amountMinor = minor(Number(roundedSoFar));
   minor(principalMinor + amountMinor);
   return { grossServiceFeeMinor: amountMinor, serviceFeeSchedule: structuredClone(schedule), serviceFeeWorking: working };
+}
+// Exact rational arithmetic: total = ceil((principal + max(minimum, principal * rate)) / increment) * increment.
+function expressFeeMoney(principalMinor, schedule) {
+  const scale = 10000n, step = BigInt(schedule.roundTotalUpToMinor) * scale;
+  const rateExact = BigInt(principalMinor) * BigInt(schedule.rateBps), minimumExact = BigInt(schedule.minimumMinor) * scale;
+  const applied = rateExact >= minimumExact && principalMinor > 0 ? 'rate' : 'minimum';
+  const exactTotal = BigInt(principalMinor) * scale + (applied === 'rate' ? rateExact : minimumExact);
+  const total = (exactTotal + step - 1n) / step * BigInt(schedule.roundTotalUpToMinor);
+  const amountMinor = minor(Number(total) - principalMinor);
+  minor(principalMinor + amountMinor);
+  return { grossServiceFeeMinor: amountMinor, serviceFeeSchedule: structuredClone(schedule),
+    serviceFeeWorking: [{ rule: schedule.rule, applied, minimumMinor: schedule.minimumMinor, rateBps: schedule.rateBps,
+      roundTotalUpToMinor: schedule.roundTotalUpToMinor, amountMinor }] };
 }
 export function nextFeeSettings(settings, body, version, at) {
   if (!Object.hasOwn(body, 'serviceFeeBrackets')) {

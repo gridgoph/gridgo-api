@@ -2,6 +2,10 @@
 
 Live tracker for every order, Express or not (report 83C6494A). Pickup PIN and
 hand-over rules are in [EXPRESS_API.md](EXPRESS_API.md#on-my-way-and-pickup-pin).
+The PIN hand-over has one contract with accept-first Express: the shop sends the
+PIN as `code`, plus `cashReceived: true` when the client chose cash at pickup;
+payment confirmation and the shop's fee debt are recorded as in
+[accept-first pickup](EXPRESS_API.md#accept-first-express-send-accept-then-pay).
 
 ## Tracker
 
@@ -43,7 +47,8 @@ anyone else get no tracker. Orders with no shop yet omit it.
   (`readyBySource: "progress"`), never earlier than now.
 - `pickup` exists for Express pickup orders: which hand-over the order uses
   (`on_my_way_pin` or `counter_code`), whether this client may tap I'm on my way
-  now, and the walk estimate once tapped.
+  now, and the walk estimate once tapped. After pickup, `expressOrder.handedOver`
+  says when and whether cash was received at the counter (`cashReceived`).
 - `notifiesEveryStep` is always true. Each step already writes a party inbox
   row that pushes (accepted, printing, ready, picked up or delivered), so the app
   can say "You don't need to keep this open." Express pickup uses its own copy:

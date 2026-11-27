@@ -19,6 +19,14 @@ const paths = ['/admin/staff', '/admin/staff/invites', '/admin/staff/roles', '/a
   '/ops/vouchers?clientId=client&tab=all', '/ops/hub/escalations', '/ops/hub/unclaimed',
   '/users/supplier/production-lapses', '/supplier-services', '/ops/shops/hours', '/ops/shops/performance',
   '/ops/reschedule-requests', '/refund-requests', '/users', '/claims', '/escalations', '/admin/season-windows'];
+// Fields added after the pinned dev source, removed before the byte comparison.
+// Express accept rate (issue reports DCF1099B and 1A336F51) is additive on Performance.
+function withoutAdditions(path, body) {
+  if (path !== '/ops/shops/performance' || !body.includes('"expressAcceptance"')) return body;
+  const parsed = JSON.parse(body);
+  for (const shop of parsed.shops || []) delete shop.expressAcceptance;
+  return JSON.stringify(parsed);
+}
 const pagePath = (path, entries) => {
   const url = new URL(path, 'http://test');
   for (const [k, v] of Object.entries(entries)) url.searchParams.set(k, v);
@@ -81,7 +89,7 @@ test('unpaged staff lists retain actual-dev targeted HTTP bodies, order and head
     for (const path of [...paths, '/me/vouchers?tab=all', '/me/production-lapses', '/ops/vouchers?clientId=client&tab=available', '/ops/vouchers?clientId=client&tab=used', '/ops/vouchers?clientId=client&tab=expired',
       '/users?role=client&foundingTester=true', '/users?role=client&foundingTester=false', '/ops/reschedule-requests?status=accepted']) {
       const a = await old(who, 'GET', path, null, { raw: true }), b = await current(who, 'GET', path, null, { raw: true });
-      assert.equal(b.status, a.status, `${who} ${path}`); assert.equal(b.body, a.body, `${who} ${path}`);
+      assert.equal(b.status, a.status, `${who} ${path}`); assert.equal(withoutAdditions(path, b.body), a.body, `${who} ${path}`);
       for (const key of ['content-type', 'cache-control']) assert.equal(b.headers.get(key), a.headers.get(key));
       comparisons++;
     }

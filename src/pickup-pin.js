@@ -37,21 +37,30 @@ export function wantsPickupPin(body, { fulfillmentMode, group }) {
   return fulfillmentMode === 'pickup' && !group;
 }
 
-/** Counter cash the shop collects at hand-over, in minor units; 0 when nothing is owed there. */
+/**
+ * Cash the counter takes at hand-over, in minor units; 0 when nothing is owed
+ * there. Cash at pickup is the accept-first contract (src/express-accept-first.js):
+ * the shop confirms it with `cashReceived: true` on the same PIN hand-over.
+ */
 export function counterCashDueMinor(order) {
-  if (order?.paymentMethod !== 'counter_cash') return 0;
-  const settled = Object.values(order.payments || {}).filter(paymentSettled)
-    .reduce((sum, payment) => sum + (Number.isSafeInteger(payment.amountMinor) ? payment.amountMinor : 0), 0);
-  return Math.max(0, (order.totalMinor || 0) - settled);
+  const release = order?.expressOrder?.paymentRelease;
+  if (order?.expressOrder?.acceptFlow !== 2 || release?.method !== 'cash_at_pickup' || release.receiptRejected
+    || paymentSettled(order.payments?.initial)) return 0;
+  return order.payments?.initial?.amountMinor || 0;
 }
 
-/** Straight-line walk estimate; a home printer's point is rounded the same way as its shop card. */
+/**
+ * Straight-line walk estimate to where the client collects: a home printer's
+ * own pickup point when it has one, else the shop. Without a pickup point a
+ * home is rounded to 500 m like its shop card, so the estimate never pins it.
+ */
 export function walkEstimate(order, from) {
-  const to = order.pickup;
+  const point = order.homePrinter?.supplierId === order.supplierId ? order.homePrinter.pickupPoint : null;
+  const to = point || order.pickup;
   if (!from || !to) return { walkMinutes: null, walkEstimateSource: null };
   let meters = homeDistance(from, to);
   if (!Number.isFinite(meters)) return { walkMinutes: null, walkEstimateSource: null };
-  if (order.homePrinter) meters = Math.max(500, Math.ceil(meters / 500) * 500);
+  if (order.homePrinter && !point) meters = Math.max(500, Math.ceil(meters / 500) * 500);
   return { walkMinutes: Math.max(1, Math.ceil(meters / WALK_METERS_PER_MINUTE)), walkEstimateSource: 'straight_line_80m_per_minute' };
 }
 
@@ -143,19 +152,6 @@ export function checkPinAttempt(store, order, pin, value, { at, id, kind }) {
   return { status: 409, body: { error: 'express_pickup_code_mismatch', attemptsLeft: Math.max(0, PICKUP_PIN_LOCK_ATTEMPTS - pin.totalFailedAttempts) }, mutated: true };
 }
 
-/** The cash the shop states it took must equal what is owed at the counter. */
-export function parseCashCollected(order, body) {
-  const due = counterCashDueMinor(order);
-  const value = body?.cashCollectedMinor;
-  if (due === 0) {
-    if (value !== undefined && value !== 0) fail(400, 'cash_not_due');
-    return 0;
-  }
-  if (!Number.isSafeInteger(value)) fail(400, 'cash_collected_required', { amountDueMinor: due });
-  if (value !== due) fail(409, 'cash_collected_mismatch', { amountDueMinor: due });
-  return value;
-}
-
 /** Operations: unlock after repeated wrong tries. The old PIN stops working. */
 export function resetPickupPin(store, order, body, { at, id, audit, user }) {
   if (order.orderType !== 'express') fail(404, 'order_not_found');
@@ -199,8 +195,7 @@ export function publicPickupPin(order, user, { own, shop, staff }) {
     if ((shop || staff) && e.onMyWay && !e.pickedUpAt) out.counterCollection = { amountMinor: counterCashDueMinor(order) };
   } else if (order.fulfillmentMode === 'pickup') out.pickupHandover = 'counter_code';
   if (e.pickupHandover && (own || shop || staff)) {
-    out.handedOver = { at: e.pickupHandover.at, method: e.pickupHandover.method,
-      ...(shop || staff ? { cashCollectedMinor: e.pickupHandover.cashCollectedMinor } : {}) };
+    out.handedOver = { at: e.pickupHandover.at, method: e.pickupHandover.method, cashReceived: e.pickupHandover.cashReceived === true };
   }
   if (order.fulfillmentMode === 'delivery' && e.riderPin) {
     const rider = user?.role === 'rider' && user.id === order.riderId && e.riderPin.riderId === user.id;

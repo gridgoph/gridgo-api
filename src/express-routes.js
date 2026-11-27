@@ -2,7 +2,7 @@ import { homeProfile, homePrinterStatus, recordHomeOffer, recordHomeGiveBack } f
 import { supplierCanWork } from "./supplier-verification.js";
 import { notifyAdmins } from './domain-events.js';
 import { queueInvalidate, queueOrderInvalidate, approvedRole } from './notifications.js';
-import { clientOnMyWay, riderOnMyWay, resetPickupPin, checkPinAttempt, parseCashCollected, counterCashDueMinor, pickupPinOrder } from './pickup-pin.js';
+import { clientOnMyWay, riderOnMyWay, resetPickupPin, checkPinAttempt, pickupPinOrder } from './pickup-pin.js';
 import { actorUserId, isShopStaff } from './shop-team.js';
 import { createInviteCode, publicTesterInvites } from './tester-invites.js';
 import { timingSafeEqual } from 'node:crypto';
@@ -13,6 +13,9 @@ import { completeHandover } from './hub-handover.js';
 import { claimBlocksHandover } from './shop-handover.js';
 import { acknowledgeInstructions } from './special-instructions.js';
 import { isReviewData } from './review-data.js';
+import { routeAcceptFirst, acceptFirstAccepted, acceptFirstPickupPayment } from './express-accept-first.js';
+import { recordCounterCash } from './shop-money.js';
+import { confirmVoucher } from './vouchers.js';
 
 export async function routeExpressOrders({req,url,store,user,readBody,id,now,audit}) {
  if(url.pathname==='/me/express-settings' && ['GET','PATCH'].includes(req.method)) {
@@ -65,6 +68,8 @@ export async function routeExpressOrders({req,url,store,user,readBody,id,now,aud
    } else fail(403,'forbidden');
    return {status:200,body:{orderId:order.id,state:order.state,expressOrder:publicExpress(order,user)},mutated:true};
  }
+ const clientAction=await routeAcceptFirst({req,url,store,user,readBody,id,now});
+ if(clientAction)return clientAction;
  const match=/^\/orders\/([^/]+)\/express\/(accept|decline|pickup|give-back)$/.exec(url.pathname);
  if(!match||req.method!=='POST')return null;
  if(user?.role!=='supplier')fail(403,'forbidden');
@@ -107,35 +112,36 @@ export async function routeExpressOrders({req,url,store,user,readBody,id,now,aud
    if(order.fulfillmentMode!=='pickup')fail(409,'express_pickup_required');
    if(e.pickedUpAt)return response();
    if(order.state!=='ready_for_dispatch')fail(409,'express_not_ready');
-   const counterCash=pickupPinOrder(order)?counterCashDueMinor(order):0;
-   if(!counterCash&&(!paymentSettled(order.payments?.initial)||!paymentSettled(order.payments?.final_online)))fail(409,'payment_required');
+   // Accept-first: cash is confirmed by this PIN entry; a released QR receipt may still be in review.
+   // The cash confirmation is checked before the PIN, so a cash mistake is never a PIN guess.
+   const release=acceptFirstPickupPayment(order,body);
+   if(!release&&(!paymentSettled(order.payments?.initial)||!paymentSettled(order.payments?.final_online)))fail(409,'payment_required');
    if(claimBlocksHandover(store,order))fail(409,'payout_held');
    if(pickupPinOrder(order)) {
+     // Version 2: the PIN exists only after "I'm on my way"; wrong tries wait, then lock.
      if(!e.pickupPin)fail(409,'express_pickup_pin_not_issued');
-     const cashCollectedMinor=parseCashCollected(order,body);
      const refused=checkPinAttempt(store,order,e.pickupPin,body.code,{at,id,kind:'client'});
      if(refused)return refused;
-     e.pickedUpAt=at;
-     e.pickupHandover={at,method:'pickup_pin',byUserId:actorUserId(user),cashCollectedMinor};
-     completeHandover(store,order,{actor:{...user,id:actorUserId(user)},at,id,note:cashCollectedMinor?'Client collected Express order with the pickup PIN; the shop received the cash.':'Client collected Express order with the pickup PIN.'});
-     for(const job of store.orderJobs||[])if(job.orderId===order.id){job.state='delivered';job.updatedAt=at;}
-     if(cashCollectedMinor){
-       audit(store,{actor:user,action:'express.counter_cash_collected',entityType:'order',entityId:order.id,orderId:order.id,detail:{cashCollectedMinor}});
-       notifyAdmins(store,'ops_express_counter_cash_collected','Counter cash collected at hand-over',order,`counter-cash:${order.id}`,{createId:id,at});
+   } else {
+     if(Date.parse(e.retryAfter||'')>Date.parse(at))return {status:429,body:{error:'express_pickup_attempts_exceeded',retryAfter:e.retryAfter},mutated:false};
+     if(e.retryAfter){delete e.retryAfter;e.failedAttempts=0;}
+     const code=typeof body.code==='string'?body.code:'';
+     if(!/^\d{6}$/.test(code)||!timingSafeEqual(Buffer.from(code),Buffer.from(e.pickupCode))) {
+       e.failedAttempts=(e.failedAttempts||0)+1;
+       if(e.failedAttempts>=5)e.retryAfter=new Date(Date.parse(at)+15*60000).toISOString();
+       return {status:409,body:{error:'express_pickup_code_mismatch'},mutated:true};
      }
-     expressEvent(store,order,'picked_up',{at,id,actorId:actorUserId(user)});
-     return response();
-   }
-   if(Date.parse(e.retryAfter||'')>Date.parse(at))return {status:429,body:{error:'express_pickup_attempts_exceeded',retryAfter:e.retryAfter},mutated:false};
-   if(e.retryAfter){delete e.retryAfter;e.failedAttempts=0;}
-   const code=typeof body.code==='string'?body.code:'';
-   if(!/^\d{6}$/.test(code)||!timingSafeEqual(Buffer.from(code),Buffer.from(e.pickupCode))) {
-     e.failedAttempts=(e.failedAttempts||0)+1;
-     if(e.failedAttempts>=5)e.retryAfter=new Date(Date.parse(at)+15*60000).toISOString();
-     return {status:409,body:{error:'express_pickup_code_mismatch'},mutated:true};
    }
    e.pickedUpAt=at;
-   completeHandover(store,order,{actor:{...user,id:actorUserId(user)},at,id,note:'Client collected Express order using the counter code.'});
+   if(release==='cash') {
+     Object.assign(order.payments.initial,{status:'confirmed',confirmedAt:at,confirmedBy:actorUserId(user),confirmationSource:'counter_cash',amountReceivedMinor:order.payments.initial.amountMinor});
+     order.paymentStatus='paid';
+     confirmVoucher(store,[order],{id,at,actorId:actorUserId(user)});
+     recordCounterCash(store,order,{amountMinor:order.totalMinor,reason:'Cash collected at Express pickup.'},{at,id,actor:user});
+   }
+   const pin=pickupPinOrder(order);
+   if(pin)e.pickupHandover={at,method:'pickup_pin',byUserId:actorUserId(user),cashReceived:release==='cash'};
+   completeHandover(store,order,{actor:{...user,id:actorUserId(user)},at,id,note:pin?'Client collected Express order with the pickup PIN.':'Client collected Express order using the counter code.'});
    for(const job of store.orderJobs||[])if(job.orderId===order.id){job.state='delivered';job.updatedAt=at;}
    expressEvent(store,order,'picked_up',{at,id,actorId:actorUserId(user)});
    return response();
@@ -160,5 +166,6 @@ export async function routeExpressOrders({req,url,store,user,readBody,id,now,aud
  order.shopAcceptance.status='accepted';order.shopAcceptance.acceptedAt=at;order.shopAcceptance.acceptedBy=actorUserId(user);
  if(payAfterAcceptance&&!paymentSettled(order.payments?.initial))order.expressOrder.payBy=new Date(Date.parse(at)+5*60000).toISOString();
  order.state=payAfterAcceptance&&!paymentSettled(order.payments?.initial)?'awaiting_initial_payment':'payment_authorized';order.timeline.push({at,state:order.state,by:actorUserId(user),note:'Shop accepted Express order.'});
+ acceptFirstAccepted(store,order,at);
  expressEvent(store,order,'accepted',{at,id,actorId:actorUserId(user)});return response();
 }

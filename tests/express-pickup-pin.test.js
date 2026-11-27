@@ -169,7 +169,7 @@ test('hand-over needs the right PIN, waits after five wrong tries and locks afte
   assert.equal(done.status, 200);
   assert.equal(order.state, 'issue_window_open');
   assert.equal(order.expressOrder.pickedUpAt, later(83));
-  assert.deepEqual(order.expressOrder.pickupHandover, { at: later(83), method: 'pickup_pin', byUserId: 'staff_one', cashCollectedMinor: 0 });
+  assert.deepEqual(order.expressOrder.pickupHandover, { at: later(83), method: 'pickup_pin', byUserId: 'staff_one', cashReceived: false });
   assert.equal(publicExpress(order, client).pickupPin, undefined, 'the PIN disappears after pickup');
   assert.equal((await call('pickup', staff, { code: fresh }, later(84))).status, 200, 'repeat success is idempotent');
 
@@ -180,31 +180,32 @@ test('hand-over needs the right PIN, waits after five wrong tries and locks afte
   assert.equal(clientNotificationDraft(order).title, 'Picked up');
 });
 
-test('counter cash must match what is owed and is recorded at hand-over', async () => {
+test('cash at pickup uses the accept-first cashReceived confirmation on the same PIN hand-over', async () => {
   const { store, client, order, call } = setup();
   await call('accept', shop);
-  order.paymentMethod = 'counter_cash';
-  order.payments.initial = { status: 'not_submitted', amountMinor: 4350, method: 'counter_cash' };
+  // Accept-first cash at pickup (src/express-accept-first.js): the shop starts before payment.
+  order.expressOrder.acceptFlow = 2;
+  order.expressOrder.paymentRelease = { method: 'cash_at_pickup', kind: 'cash_at_pickup', at: AT };
+  order.payments.initial = { status: 'not_submitted', amountMinor: 4350, method: 'qr_manual' };
+  order.serviceFeeMinor = 750;
   move(order, 'ready_for_dispatch', 'shop_a', later(20));
   assert.equal(counterCashDueMinor(order), 4350);
+  assert.equal(publicExpress(order, shop).counterCollection, undefined, 'nothing to show before the client is on the way');
   const pin = (await call('on-my-way', client, {}, later(21))).body.expressOrder.pickupPin;
   assert.deepEqual(publicExpress(order, shop).counterCollection, { amountMinor: 4350 });
   assert.deepEqual(staffExpressProjection(publicExpress(order, staff)).counterCollection, { amountMinor: 4350 });
-  await assert.rejects(call('pickup', staff, { code: pin }, later(22)), e => e.code === 'cash_collected_required' && e.details.amountDueMinor === 4350);
-  await assert.rejects(call('pickup', staff, { code: pin, cashCollectedMinor: 4000 }, later(22)), e => e.code === 'cash_collected_mismatch');
-  assert.equal(order.expressOrder.pickupPin.totalFailedAttempts, 0, 'a cash mistake is not a PIN guess');
-  assert.equal((await call('pickup', staff, { code: pin, cashCollectedMinor: 4350 }, later(23))).status, 200);
-  assert.equal(order.expressOrder.pickupHandover.cashCollectedMinor, 4350);
-  assert.equal(publicExpress(order, shop).handedOver.cashCollectedMinor, 4350);
-  assert.equal(publicExpress(order, client).handedOver.cashCollectedMinor, undefined);
-  assert.ok(store.auditLog.some(row => row.action === 'express.counter_cash_collected'));
-  assert.ok(store.notifications.some(n => n.type === 'ops_express_counter_cash_collected'));
-
-  const paid = setup();
-  await paid.call('accept', shop);
-  move(paid.order, 'ready_for_dispatch', 'shop_a', later(20));
-  const paidPin = (await paid.call('on-my-way', paid.client, {}, later(21))).body.expressOrder.pickupPin;
-  await assert.rejects(paid.call('pickup', shop, { code: paidPin, cashCollectedMinor: 100 }, later(22)), e => e.code === 'cash_not_due');
+  assert.equal(publicExpress(order, client).counterCollection, undefined);
+  await assert.rejects(call('pickup', staff, { code: pin }, later(22)), e => e.code === 'express_cash_confirmation_required');
+  assert.equal(order.expressOrder.pickupPin.totalFailedAttempts, 0, 'a missing cash confirmation is not a PIN guess');
+  const wrong = pin === '000000' ? '111111' : '000000';
+  assert.equal((await call('pickup', staff, { code: wrong, cashReceived: true }, later(22))).status, 409);
+  assert.equal(order.payments.initial.status, 'not_submitted', 'a wrong PIN confirms no cash');
+  assert.equal((await call('pickup', staff, { code: pin, cashReceived: true }, later(23))).status, 200);
+  assert.deepEqual([order.payments.initial.status, order.payments.initial.confirmationSource], ['confirmed', 'counter_cash']);
+  assert.equal(order.expressOrder.pickupHandover.cashReceived, true);
+  assert.equal(publicExpress(order, shop).handedOver.cashReceived, true);
+  assert.ok(store.shopMoneyEvents.some(row => row.key === `counter:${order.id}`), "the shop's counter debt for GRIDGO's fee is recorded once");
+  assert.equal(counterCashDueMinor(order), 0);
 });
 
 test('orders placed with the old counter code keep working unchanged', async () => {

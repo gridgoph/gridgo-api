@@ -1,4 +1,4 @@
-import { homePrinterStatus, homeVerified, recordHomeOffer, snapshotHomePrinter } from './home-printers.js';
+import { homePrinterStatus, homeVerified, recordHomeOffer, snapshotHomePrinter, homeDistance } from './home-printers.js';
 import { groupExpressMoved, cancelGroupExpressOrder } from './group-express-recovery.js';
 import { supplierVerified, rankVerifiedWithinDistance } from "./supplier-verification.js";
 import { staffExpressProjection } from './shop-staff-order.js';
@@ -18,8 +18,14 @@ import { projectExpressNightFinish, projectShopFinish, projectListingGroup } fro
 import { testerProgress } from './founding-testers.js';
 import { privilegedAdminMemberships, queueOrderInvalidate } from './notifications.js';
 import { PICKUP_PIN_VERSION, publicPickupPin } from './pickup-pin.js';
+import { EXPRESS_ACCEPT_FIRST_MS, EXPRESS_SHOPS_PER_ROUND } from './express-checkout-rules.js';
+import { expressShopLogo, expressShopServices, expressPaymentMethods, TOP_SHOP_MIN_AVERAGE } from './express-shop-facts.js';
 
 export const EXPRESS_ACCEPT_MS = 5 * 60_000;
+/** Accept-first refusals are routed by express-accept-first.js, registered at load
+ * to keep this module free of an import cycle with checkout. */
+let acceptFirstRefusal = null;
+export function onAcceptFirstRefusal(handler) { acceptFirstRefusal = handler; }
 export function expressFail(status, code) { throw Object.assign(new Error(code), {status, code}); }
 export function expressRates(settings) { return settings?.expressRates ?? {bwMinor:300,colourMinor:500}; }
 export function validateExpressRates(rates) {
@@ -68,7 +74,8 @@ export function expressShopList(source,user,{location,sort='nearest',fulfillment
         :item.pricingUnit==='per_page' && item.subcategoryCode==='document_printing') && publicCatalogItem(listingStore,item,{at}));
     if(!listings.length) continue;
     if(productType==='plans'&&availability?.nightWindow)continue;
-    const jobsAhead=(store.orders||[]).filter(o=>o.supplierId===supplierId && ['supplier_assigned','payment_authorized','production','supplier_self_qc'].includes(o.state)).length;
+    const jobsAhead=(store.orders||[]).filter(o=>o.supplierId===supplierId && ['supplier_assigned','payment_authorized','production','supplier_self_qc'].includes(o.state)
+      && !(o.state==='supplier_assigned'&&o.expressOrder?.acceptFlow===2&&o.shopAcceptance?.status!=='pending')).length;
     const hours=Math.min(...listings.map(item=>publicCatalogItem(listingStore,item,{at}).turnaroundHours||1));
     let projection;
     try { projection=availability?(projectExpressNightFinish(store,supplierId,hours,at) || projectShopFinish(store,{supplierId,turnaroundHours:hours,units:1,now:at})).projection:{promiseBy:null}; }
@@ -86,15 +93,18 @@ export function expressShopList(source,user,{location,sort='nearest',fulfillment
       walkingTimeMinutes:fulfillmentMode==='pickup'?Math.ceil((home?Math.max(500,Math.ceil(distance/500)*500):distance)/80):null,walkingEstimateSource:fulfillmentMode==='pickup'?'straight_line_80m_per_minute':null,
       isOpenNow:!!shopAvailability,selectable:!!availability,openStatus:shopAvailability?(shopAvailability.nightWindow&&!shopAvailability.nightWindow.home?'night':'open'):'closed',
       rating:publicShopRating(store,supplierId),jobsAhead,
+      logo:expressShopLogo(store,supplierId,home),services:expressShopServices(store,supplierId,at),
+      paymentMethods:expressPaymentMethods(store,user,{home,verified,fulfillmentMode}),
       readyAt:availability?projection.promiseBy:null,deliveryAvailable:availability?.deliveryAvailable||false,nightWindow:availability?.nightWindow||null,busy:jobsAhead>=3,isNew:Number.isFinite(age)&&age>=0&&age<7*86400000});
   }
+  for(const row of rows)row.topShop=(row.rating?.average||0)>=TOP_SHOP_MIN_AVERAGE;
   rows.sort((a,b)=>(sort==='top_rated'?(b.rating?.average||0)-(a.rating?.average||0):sort==='fewest_jobs'?a.jobsAhead-b.jobsAhead:0)
     ||distanceMetersBetween(location,store.supplierProfiles.find(p=>p.userId===a.supplierId).shop)-distanceMetersBetween(location,store.supplierProfiles.find(p=>p.userId===b.supplierId).shop)||a.supplierId.localeCompare(b.supplierId));
   if(sort!=='nearest'&&rows.length>1) {const index=rows.findIndex(r=>r.isNew);if(index>=0){const [row]=rows.splice(index,1);rows.splice(1,0,row);}}
   return rows.some(row=>row.printerType==='home')?rows:rankVerifiedWithinDistance(rows);
 }
 export function expressStatus(order) {
-  if(order.state==='cancelled')return 'cancelled';
+  if(order.state==='cancelled')return order.expressOrder?.reroute?.status==='moved'?'moved':'cancelled';
   if(order.expressOrder?.pickedUpAt)return 'picked_up';
   if(['delivered','issue_window_open','completed','payout_released'].includes(order.state))return 'delivered';
   if(['ready_for_dispatch','rider_assigned','picked_up','out_for_delivery','awaiting_collection'].includes(order.state))return 'ready';
@@ -117,9 +127,43 @@ export function publicExpress(order,user) {
     if(order.groupOrder)result.printSettings=result.printSettings.filter(p=>p.groupMemberId===user.id);
     for(const print of result.printSettings||[])delete print.rateMinor;
   }
+  if(e.acceptFlow===2)Object.assign(result,acceptFirstProjection(order,{own,staff,shop}));
   return ['staff','manager'].includes(user?.shopRole) ? staffExpressProjection(result) : result;
 }
+const HELD_REROUTE=['price_check','exhausted','retrying'];
+/** Accept-first facts. The client sees its own price breakdown (shop price, GRIDGO
+ * fee, delivery, discounts) but never payout stages; shops see only their offer. */
+function acceptFirstProjection(order,{own,staff,shop}) {
+  const e=order.expressOrder,status=expressStatus(order),out={acceptFlow:2,acceptWindowSeconds:EXPRESS_ACCEPT_FIRST_MS/1000};
+  out.request={requestId:e.requestId||order.id,attempt:e.attempt||1,previousOrderId:e.previousOrderId||null,nextOrderId:e.reroute?.nextOrderId||null,
+    shopInRound:e.routing?.roundAsked||1,shopsPerRound:EXPRESS_SHOPS_PER_ROUND};
+  if(!own&&!staff)return shop?{request:{attempt:out.request.attempt},acceptFlow:2,acceptWindowSeconds:out.acceptWindowSeconds}:out;
+  const r=e.reroute;
+  out.reroute=r?{status:r.status,at:r.at,expiresAt:r.expiresAt||null,reason:r.reason||null,nextOrderId:r.nextOrderId||null,retryUntil:r.retryUntil||null,
+    candidate:r.candidate?structuredClone(r.candidate):null,searchAway:r.searchAway?structuredClone(r.searchAway):null,
+    options:HELD_REROUTE.includes(r.status)&&order.state==='supplier_assigned'?({price_check:['accept','pick','cancel'],exhausted:['search_away','keep_trying','pick','cancel'],retrying:['pick','cancel']})[r.status]:[]}:null;
+  const schedule=order.serviceFeeSchedule;
+  out.money={printingMinor:order.supplierSubtotalMinor,gridgoFeeMinor:order.grossServiceFeeMinor??order.serviceFeeMinor,
+    feeRule:schedule?.version===3?{minimumMinor:schedule.minimumMinor,rateBasisPoints:schedule.rateBps,applied:order.serviceFeeWorking?.[0]?.applied??null,roundTotalUpToMinor:schedule.roundTotalUpToMinor}:null,
+    deliveryFeeMinor:order.deliveryFeeMinor,discountMinor:(order.organizationDiscountMinor||0)+(order.voucherDiscountMinor||0)+(order.memberPerkMinor||0),totalMinor:order.totalMinor,
+    printedPages:(e.printSettings||[]).reduce((sum,p)=>sum+(p.pages?.printed||0)*(p.copies||1),0)};
+  out.payment={method:e.paymentRelease?.method||(order.payments?.initial?.status==='pending_confirmation'?'qr_ph':null),release:e.paymentRelease?structuredClone(e.paymentRelease):null,
+    review:e.paymentReview?structuredClone(e.paymentReview):null,status:order.payments?.initial?.status||null,
+    options:own&&status==='accepted'&&order.state==='awaiting_initial_payment'&&order.payments?.initial?.status==='not_submitted'?structuredClone(e.paymentOptions||null):null};
+  const point=order.homePrinter?.supplierId===order.supplierId?order.homePrinter.pickupPoint:null;
+  out.pickupPoint=null;
+  if(own&&point&&order.fulfillmentMode==='pickup'&&['accepted','printing','ready'].includes(status)&&order.shopAcceptance?.status==='accepted') {
+    const meters=Math.round(homeDistance(e.location,point));
+    out.pickupPoint={kind:point.kind,description:point.description,lat:point.lat,lng:point.lng,barangay:order.homePrinter.barangay,
+      distanceMeters:meters,walkingTimeMinutes:Math.max(1,Math.ceil(meters/80)),walkingEstimateSource:'straight_line_80m_per_minute',onlyVisibleToYou:true};
+  }
+  return out;
+}
 export function startExpressAcceptance(order,at) {
+  if(order.expressOrder?.acceptFlow===2) {
+    order.shopAcceptance={supplierId:order.supplierId,assignedAt:at,deadlineAt:new Date(Date.parse(at)+EXPRESS_ACCEPT_FIRST_MS).toISOString(),windowSeconds:EXPRESS_ACCEPT_FIRST_MS/1000,status:'pending'};
+    return;
+  }
   order.shopAcceptance={supplierId:order.supplierId,assignedAt:at,deadlineAt:new Date(Date.parse(order.groupOrder?.shopDecision?.status==='pending'?order.groupOrder.shopDecision.deadlineAt:at)+EXPRESS_ACCEPT_MS).toISOString(),workingMinutes:5,status:'pending'};
   order.expressOrder.events.push({state:'sending',supplierId:order.supplierId,at});
 }
@@ -140,7 +184,12 @@ export function declineExpress(store,order,{at,id,kind='declined',actorId=null,r
   recordHomeOffer(store,previous,kind,at);
   e.declines++;e.declinedSupplierIds=[...new Set([...(e.declinedSupplierIds||[]),previous])];
   order.shopAcceptance.status=kind;
-  e.events.push({state:kind,at,supplierId:previous,reason:kind==='timed_out'?'No response within five minutes.':reason});
+  e.events.push({state:kind,at,supplierId:previous,reason:kind==='timed_out'?(e.acceptFlow===2?'No response within one minute.':'No response within five minutes.'):reason});
+  // Accept-first: no warning to the shop; the outcome only counts in its accept rate.
+  if(e.acceptFlow===2&&['declined','timed_out'].includes(kind)) {
+    if(!acceptFirstRefusal)throw new Error('accept-first routing is not loaded');
+    return acceptFirstRefusal(store,order,{at,id,kind,actorId,reason});
+  }
   const client=store.users.find(u=>u.id===order.clientId);
   const manual=e.paymentTiming==='after_acceptance'||e.printSettings?.some(print=>print.paper==='a3'||print.productType==='plans');
   const originalPickup=order.pickup||store.supplierProfiles.find(p=>p.userId===e.originalSupplierId)?.shop;
@@ -172,16 +221,19 @@ export function declineExpress(store,order,{at,id,kind='declined',actorId=null,r
   }
 }
 export function createExpressSnapshot(cart,lines,at,{pickupPin=false}={}) {
+ const routing=lines[0].expressPrint?.routing;
  return {version:1,originalSupplierId:lines[0].supplierId,location:structuredClone(cart.expressLocation),declines:0,declinedSupplierIds:[],
+  ...(routing?{acceptFlow:2,routing:structuredClone(routing)}:{}),
   // Version 2 has no counter code until the client taps "I'm on my way" (src/pickup-pin.js).
   ...(pickupPin?{handoverVersion:PICKUP_PIN_VERSION}:{pickupCode:String(randomInt(1000000)).padStart(6,'0')}),events:[{state:'sending',at,supplierId:lines[0].supplierId}],
   printSettings:lines.map(line=>({...((line.expressPrint.groupMemberId)?{groupMemberId:line.expressPrint.groupMemberId,groupMemberName:line.expressPrint.groupMemberName}:{}),fileId:line.artworkFileId,pages:structuredClone(line.documentPages),copies:line.quantity,
     colour:line.expressPrint.colour,paper:line.expressPrint.paper,paperStock:line.expressPrint.paperStock,sides:line.expressPrint.sides,
     ...(line.expressPrint.productType?{productType:line.expressPrint.productType}:{}),
-    ...(line.expressPrint.paper==='a3'||line.expressPrint.productType==='plans'?{rateMinor:line.expressPrint.rateMinor}:{}),layout:line.printLayout,note:line.specialInstructions||'',acceptedWarnings:structuredClone(line.expressPrint.acceptedWarnings)}))};
+    ...(!routing&&(line.expressPrint.paper==='a3'||line.expressPrint.productType==='plans')?{rateMinor:line.expressPrint.rateMinor}:{}),layout:line.printLayout,note:line.specialInstructions||'',acceptedWarnings:structuredClone(line.expressPrint.acceptedWarnings)}))};
 }
 
 export function assertExpressPaymentSubmission(order,at) {
+ if(order.expressOrder?.acceptFlow===2)expressFail(409,'express_pay_route_required');
  if(order.expressOrder?.paymentTiming!=='after_acceptance')return;
  if(order.shopAcceptance?.status!=='accepted')expressFail(409,'express_acceptance_required');
  if(order.expressOrder.payBy&&Date.parse(at)>=Date.parse(order.expressOrder.payBy))expressFail(409,'express_payment_expired');
@@ -256,7 +308,7 @@ function expressReplacementSupports(source,shop,settings,fulfillmentMode,at) {
 }
 
 /** Express offers only its standard print controls, never custom paid add-ons. */
-export function expressCatalogOptions(store,item,print) {
+export function expressCatalogOptions(store,item,print,{ownPrice=false}={}) {
  assertDocumentRequest(store,item,{expressPrint:print});
  const normalize=value=>String(value||'').trim().toLowerCase().replace(/\s+/g,' ');
  const optionIds=[];let paperStock=null,hasA3=false;
@@ -283,7 +335,7 @@ export function expressCatalogOptions(store,item,print) {
  }
  if(print.paper==='a3'&&!hasA3)expressFail(409,'express_listing_configuration_required');
  const priced=selectedCatalogPrice(store,item,optionIds);
- const rateMinor=print.paper==='a3'||print.productType==='plans'?priced.effectiveUnitPriceMinor:expressRates(store.settings)[print.colour==='bw'?'bwMinor':'colourMinor'];
+ const rateMinor=ownPrice||print.paper==='a3'||print.productType==='plans'?priced.effectiveUnitPriceMinor:expressRates(store.settings)[print.colour==='bw'?'bwMinor':'colourMinor'];
  if(!Number.isSafeInteger(rateMinor)||rateMinor<=0)expressFail(409,'express_listing_configuration_required');
  return {optionIds,paperStock,rateMinor};
 }

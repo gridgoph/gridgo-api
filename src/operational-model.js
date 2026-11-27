@@ -26,7 +26,7 @@ import { changesFor, publicChange, supplementTotals, changePayoutsFor } from './
 import { instructionLines } from './special-instructions.js';
 import { publicDeliveryPin } from './delivery-pin.js';
 import { adjustedDeliverySplit, effectiveDeliveryFeeMinor, deliveryPinCollectedMinor } from './delivery-pin-policy.js';
-import { feeSchedule, validateFeeSchedule } from './service-fee.js';
+import { feeSchedule, validateFeeSchedule, groupLevelFee } from './service-fee.js';
 import { riderPackingFlow, FORCED_STEP_REASONS } from './shop-handover.js';
 import { publicArtworkPreview } from './artwork-preview.js';
 import { PACKAGING_STATES, productionTransitionReadiness, receiptScanFiles, supplierJobDetails } from './job-readiness.js';
@@ -1362,7 +1362,7 @@ export function publicOrderFor(order, user, store = null) {
     if (review) publicRecord.review = review;
   }
   if (!["ops_admin", "super_admin"].includes(user?.role) && !(user?.role === "client" && user.id === order.clientId)) delete publicRecord.organizationOfficer;
-  if (user?.role === "client" && (order.organizationDiscountRateBps > 0 || order.serviceFeeSchedule?.version === 2 || order.pendingQuote?.serviceFeeSchedule?.version === 2)) {
+  if (user?.role === "client" && (order.organizationDiscountRateBps > 0 || groupLevelFee(order.serviceFeeSchedule) || order.pendingQuote?.serviceFeeSchedule?.version === 2)) {
     for (const record of [publicRecord, publicRecord.acceptedQuote, publicRecord.pendingQuote, ...(publicRecord.quoteHistory || [])]) {
       if (!record) continue;
       if (record.supplierSubtotalMinor != null && record.serviceFeeMinor != null) record.clientItemSubtotalMinor = record.supplierSubtotalMinor + (record.grossServiceFeeMinor ?? record.serviceFeeMinor);

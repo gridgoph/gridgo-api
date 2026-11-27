@@ -16,6 +16,8 @@ is untouched. Mission rewards remain the existing vouchers.
 
 All money fields use integer PHP centavos. Express client responses contain
 peso amounts, with no service-fee rate, schedule, percentage or separate fee line.
+The exception is [accept-first Express](#accept-first-express-send-accept-then-pay),
+which shows the shop's printing price and the GRIDGO fee as separate lines.
 All routes require a Clerk session and the appropriate PostgreSQL membership.
 Mutations use the normal domain transaction, lock, audit/inbox and after-commit
 push boundary. No endpoint transfers money externally.
@@ -85,7 +87,10 @@ exact `quote` and `paymentTiming`. Do not add display prices to estimate checkou
 Optional fields:
 
 - `sort`: `nearby` (default; `nearest` is an alias), `all_davao`, `fastest`,
-  `top_rated`, `lowest_price`, or the retained `fewest_jobs`.
+  `ready_soonest`, `top_rated`, `cheapest`, `lowest_price`, or the retained
+  `fewest_jobs`. `ready_soonest` orders by `readyAt` (the same order as
+  `fastest`). `cheapest` orders by the card's `price.totalMinor`, so delivery is
+  included on Deliver; it is available for every paper and product type.
 - `shopsOnly`, `verifiedOnly`: booleans, default false. Filtering precedes
   expansion. `lowest_price` compares the complete printing subtotal and is
   available for A3 and plans.
@@ -122,6 +127,69 @@ home-printer enrollment, persistence and operational rules are defined in
 [Home printers](HOME_PRINTERS_API.md). Its profile adapter supplies
 `supplierType:"home"` and `barangay`; public responses never expose its pin.
 
+#### Map pins, card facts and filters (1A336F51)
+
+Every POST card that has a current quote adds
+`price:{totalMinor,printedPages,perPageMinor,perPageMixed}`:
+
+- `totalMinor` is that card's `quote.totalMinor`: the checkout quote of a
+  preview draft built by the same draft and checkout code for this printer, so
+  it includes printing, the GRIDGO fee, delivery on Deliver and any automatic
+  discount. It always equals the draft quote and the placed order total for the
+  same inputs. Show it on the pin; never add display prices to make a total.
+- `printedPages` is selected pages × copies across files (printed units for plans).
+- `perPageMinor` is the printer's own page rate (per printed unit for plans) for this order.
+  When files carry different rates (for example B&W and colour), it is printing
+  ÷ printed pages rounded up to the centavo and `perPageMixed` is `true`.
+
+Closed or unquoted cards omit `price`. All cards (POST and GET) also carry:
+
+- `logo`: `{fileId,url}` for the shop's ready logo image, else `null`. The
+  response signs it like catalogue photos (`downloadUrl`,
+  `downloadUrlExpiresAt`). Home printers always return `null`; show initials.
+- `services`: any of `stapling | binding | lamination | rush`, from live
+  document finishing capabilities, public listings and rush-enabled services.
+- `paymentMethods`: `["qr_ph"]` or `["cash","qr_ph"]`. Cash is listed only when
+  checkout would accept it for this client and printer: cash switched on,
+  individual client, not a review account or barred client, Deliver, verified
+  shop and, on quoted cards, printing plus fee under the cash limit. Home
+  printers are QR only.
+- `topShop`: a public rating (five or more reviews) averaging at least 4.5.
+- Existing `rating` (`{average,count}` or `null`), `jobsAhead`, `readyAt`,
+  `verified`, `isOpenNow` and the home-printer privacy fields are unchanged.
+
+The response adds `filterData` for the Filters panel. It counts the printers in
+the same zones as the list but **before** `shopsOnly`/`verifiedOnly`, so the
+panel can show every choice and compute its live “Show N printers” count from
+the cards:
+
+```json
+{
+  "printers": 6, "verified": 4, "openNow": 5, "topShops": 1,
+  "printerType": { "shop": 5, "home": 1 },
+  "services": { "stapling": 2, "binding": 1, "lamination": 0, "rush": 1 },
+  "paymentMethods": { "cash": 0, "qr_ph": 6 },
+  "price": {
+    "total": { "minMinor": 2900, "maxMinor": 18300,
+      "buckets": [{ "fromMinor": 2900, "toMinor": 4440, "count": 3 },
+        { "fromMinor": 4441, "toMinor": 5981, "count": 0 }] },
+    "perPage": { "minMinor": 300, "maxMinor": 300,
+      "buckets": [{ "fromMinor": 300, "toMinor": 300, "count": 6 }] }
+  }
+}
+```
+
+`price` is `null` when no card is quoted. Each histogram has at most ten
+contiguous, inclusive integer buckets of equal width,
+`ceil((maxMinor - minMinor + 1) / 10)`, from `minMinor` to `maxMinor` (the example
+is truncated); bucket counts add up to the quoted cards.
+
+The order a sort produces is exported as `expressPrinterOrder(store, location,
+sort)` (`src/express-printers.js`) so automatic rerouting after a decline can
+follow the client's chosen sort. The retained GET has no files to quote, so it
+returns `400 express_shop_pricing_required` for `cheapest` and `filterData`
+without prices for its non-legacy sorts.
+
 The existing shared `settings.deliveryFeeBands` remains the only fare source.
 Zone A maps to `nearby`, B to `away`, C to `long_distance`; bounds are inclusive.
 Current repository defaults already match 5/10/15 km and PHP 89/149/229. Existing
@@ -151,7 +219,7 @@ checkout if a later settings change takes the printer above that permission.
 The retained `GET /express/shops?lat=...&lng=...&fulfillmentMode=...` preserves
 its default `nearest` and legacy `top_rated | fewest_jobs` open-only list with
 additive card metadata. Those legacy sorts keep their existing ranking behavior.
-Explicit new sorts (`nearby | all_davao | fastest`) opt into the new card policy;
+Explicit new sorts (`nearby | all_davao | fastest | ready_soonest`) opt into the new card policy;
 query booleans `shopsOnly=true|false`, `verifiedOnly=true|false` are supported.
 It cannot quote `lowest_price`. The new screen should use the POST read with its
 files to avoid counting printers that cannot accept that Preview.
@@ -395,12 +463,15 @@ Repeating the call keeps the same PIN and only refreshes the walk estimate; the
 shop is told once. The shop, its Staff and Operations see `onMyWay`,
 `pickupPinIssued`, `pickupPinLocked` and (shop/Operations) `pickupPinRetryAfter`,
 never the PIN. While the client is on the way the shop and its counter Staff also
-see `counterCollection.amountMinor`, the cash to take at the counter (`0` when
-already paid). This is the client's price, not shop earnings.
+see `counterCollection.amountMinor`, the cash to take at the counter: the
+accept-first cash-at-pickup amount (`0` when the client paid by QR or the payment
+is already confirmed). This is the client's price, not shop earnings.
 
 **Hand-over.** The shop (owner or Staff) calls the existing
-`POST /orders/:id/express/pickup` with `{ "code": "482917" }`, plus
-`"cashCollectedMinor"` when cash is owed at the counter:
+`POST /orders/:id/express/pickup` with `{ "code": "482917" }`, plus the
+accept-first `"cashReceived": true` when the client chose cash at pickup
+([Accept-first Express](#accept-first-express-send-accept-then-pay)). There is
+one hand-over contract; the PIN only replaces the counter code:
 
 | Case | Response |
 | --- | --- |
@@ -408,13 +479,13 @@ already paid). This is the client's price, not shop earnings.
 | Wrong PIN | `409 express_pickup_code_mismatch` with `attemptsLeft`; nothing is handed over |
 | 5 wrong in a row | `429 express_pickup_attempts_exceeded` with `retryAfter` (15 minutes) |
 | 10 wrong in total | `423 express_pickup_pin_locked`; even the right PIN waits for Operations |
-| Cash owed, amount missing | `400 cash_collected_required` with `amountDueMinor` |
-| Cash amount differs | `409 cash_collected_mismatch` with `amountDueMinor` |
-| Cash given but none owed | `400 cash_not_due` |
+| Cash at pickup without `cashReceived: true` | `409 express_cash_confirmation_required` |
+| Payment not settled (and not released by accept-first) | `409 payment_required` |
 | Right PIN | `200`; repeat success is idempotent |
 
-Wrong tries are committed even though they are refusals. A cash mistake is
-checked before the PIN and is not counted as a PIN guess. On lock, Operations and
+Wrong tries are committed even though they are refusals. Payment and cash
+confirmation are checked before the PIN, so they are never counted as PIN
+guesses, and a wrong PIN confirms no cash. On lock, Operations and
 Super Admin get `ops_express_pickup_pin_locked` and the client gets
 `order_pickup_pin_locked` ("Too many wrong PINs were tried at the counter…"); the
 client's PIN is hidden until reset. Operations or Super Admin unlocks with
@@ -423,20 +494,17 @@ client's PIN is hidden until reset. Operations or Super Admin unlocks with
 and tells the client (`order_pickup_pin_reset`). The old PIN stops working.
 
 Success records `expressOrder.pickedUpAt` and `expressOrder.pickupHandover`
-`{at, method:"pickup_pin", byUserId, cashCollectedMinor}`, then uses the same
+`{at, method:"pickup_pin", byUserId, cashReceived}`, then uses the same
 handover completion as version 1 (issue window, job delivered, payouts and their
 Operations gates unchanged). The PIN disappears from the client view.
-`handedOver` `{at, method}` is projected to the client, and with
-`cashCollectedMinor` to the shop and Operations.
+`handedOver` `{at, method, cashReceived}` is projected to the client, the shop
+and Operations.
 
-Cash at the counter applies to orders whose checkout snapshotted
-`paymentMethod: "counter_cash"`. The amount owed is the order total less any
-settled installments. Hand-over records what the shop took, audits
-`express.counter_cash_collected` and notifies Operations
-(`ops_express_counter_cash_collected`); it does not confirm installments or move
-shop money — the existing counter-cash ledger route in
-[SHOP_MONEY_API.md](SHOP_MONEY_API.md) stays the money record. Orders without
-counter cash still need settled installments (`409 payment_required`).
+With `cashReceived: true` the hand-over does exactly what the accept-first
+counter-code hand-over does: the payment is confirmed
+(`confirmationSource: "counter_cash"`), a reserved voucher is used, and the
+shop's counter debt for GRIDGO's fee is recorded once in
+[Shop money](SHOP_MONEY_API.md). No second cash field or record exists.
 
 **Home printers** use the same flow at their pickup point; nothing extra is
 exposed. **Delivery** gives the PIN step to the rider (below).
@@ -788,3 +856,247 @@ Guided document shops may offer A3 at their own snapshotted page prices. A3
 Express uses artwork review, then shop acceptance, then client QR payment before
 work starts. Standard Express retains checkout payment. See the exact calls in
 [Supplier sign-up](SUPPLIER_SIGNUP_API.md#capability-aware-matching-and-a3-express).
+
+## Accept-first Express: send, accept, then pay
+
+Accept-first is the Express flow for issue reports DCF1099B and 1A336F51. The
+client sends the request, the shop has **60 seconds** to accept, and the client
+pays only after the shop accepts. Nobody reviews Express files by hand: uploads
+pass the automatic checks at upload and checkout, and the order is released to
+the shop at once.
+
+### Opting in and compatibility
+
+The flow is opt-in per request so released apps keep working. Send
+`"acceptFirst": true` to `POST /express/shops` and `POST /express/drafts`.
+Without it, the existing pay-at-checkout flow (and the A3/plans
+pay-after-acceptance flow below) is unchanged. The draft also records the
+client's list order and filters, so a refused request moves the same way:
+
+```json
+{ "acceptFirst": true, "supplierId": "shop_1", "location": { "lat": 7.06, "lng": 125.60 },
+  "fulfillmentMode": "pickup", "sort": "nearest", "shopsOnly": false, "verifiedOnly": false,
+  "files": [{ "fileId": "file_1", "copies": 1, "colour": "bw", "paper": "a4", "sides": "one",
+    "layout": "fit_to_paper", "acceptedWarnings": [] }] }
+```
+
+`sort` is one of `nearest` (default), `nearby`, `all_davao`, `fastest`,
+`ready_soonest`, `top_rated`, `fewest_jobs`, `lowest_price` or `cheapest`.
+Unknown values return `400 invalid_express_sort`. Group orders keep their own
+flow; `acceptFirst` with a group returns `409 express_accept_first_unavailable`.
+
+The draft returns `paymentTiming: "after_acceptance"` and `acceptFirst: true`.
+Checkout (`POST /me/carts/:id/checkout` with `looksRight` and
+`expressConfirmation`) takes **no payment**. A body with `payment` returns
+`409 express_payment_after_acceptance`. The order goes straight to
+`supplier_assigned` with `fileCheck.status = "passed"` and `fileCheck.automatic = true`,
+and the shop receives its offer. Checkout returns `409 express_payment_unavailable`
+when no payment method could be offered after acceptance (for example, a total
+over the instant QR limit outside review hours while cash is switched off).
+
+### Price: shop price plus the GRIDGO fee
+
+Accept-first prices each page at the shop's own listing price, for documents as
+well as A3 and plans. The GRIDGO fee is the **higher of a minimum and a rate of
+the printing**, and printing plus fee is **rounded up to the next PHP 0.50**. The
+shop keeps its full price: `supplierPlatformPayoutMinor` equals the printing
+subtotal. Defaults are PHP 5 (`500`) and 20% (`2000` basis points):
+
+| Printing | GRIDGO fee | Total |
+|---|---|---|
+| 12 pages x PHP 3 = PHP 36 | PHP 7.50 (20%) | PHP 43.50 |
+| 1 page x PHP 1 = PHP 1 | PHP 5 (minimum) | PHP 6 |
+| PHP 48 | PHP 10 | PHP 58 |
+| PHP 25.01 | PHP 5.49 | PHP 30.50 |
+
+The rule is snapshotted on the order as service fee schedule version 3
+(`{version:3, rule:"express_minimum_or_rate", minimumMinor, rateBps,
+roundTotalUpToMinor:50}`), computed with exact integer arithmetic. The database
+function `gridgo_service_fee` and the committed-order guard use the same rule.
+Delivery is added after rounding, so a delivery total may end anywhere; pickup has
+no minimum order. Non-Express orders keep the progressive brackets in
+[Service fees](SERVICE_FEE_API.md); the Express rule never applies to them.
+
+The draft quote and the client's `expressOrder.money` show the breakdown:
+`printingMinor`, `gridgoFeeMinor`, `gridgoFeeRule` (`minimumMinor`,
+`rateBasisPoints`, `applied: "rate" | "minimum"`, `roundTotalUpToMinor`),
+`printingLines[]` (`pages`, `copies`, `unitPriceMinor`, `amountMinor`),
+`deliveryFeeMinor`, `discountMinor` and `totalMinor`. Payout stages and shop
+money stay hidden from the client.
+
+How the rule meets other money:
+
+- **Vouchers, the organization discount and member perks** reduce only the
+  GRIDGO fee, after rounding, exactly as they reduce the bracket fee today. A
+  voucher that covers the whole order still also covers printing and delivery. A
+  discounted total may therefore not end on PHP 0.50. Discounts never reduce the
+  shop's price.
+- **Refunds** use the existing refund workflow and the order's own snapshot. A
+  refused or unanswered request is cancelled before any payment, so there is
+  nothing to refund. A voucher-covered attempt that already settled keeps the
+  existing outcome (cancel, `refundRequired`, choose again).
+- **Group orders** are unchanged and keep the bracket fee.
+- **A3 and plans** sent with `acceptFirst` use this flow and this fee. Without
+  it they keep the existing A3 extension below.
+
+### Waiting for the shop (60 seconds)
+
+`expressOrder` adds, for the owning client and staff:
+
+- `acceptFlow: 2`
+- `acceptWindowSeconds: 60`
+- `request`: `{ requestId, attempt, previousOrderId, nextOrderId, shopInRound, shopsPerRound: 3 }`
+- `reroute`, `money`, `payment` and `pickupPoint`
+
+`order.shopAcceptance.deadlineAt` is the send time plus 60 seconds. The server
+checks deadlines every second.
+
+The shop answers with the existing `POST /orders/:id/express/accept` and
+`/decline` routes. A decline or a missed window gives the shop **no warning**. It
+only lowers the shop's accept rate. Accept-first refusals never create
+production-penalty or performance warning events.
+
+The client may cancel at any time before paying with
+`POST /orders/:id/express/cancel` (`{}`). Nothing is charged, a reserved voucher
+returns without forfeit, and a member perk returns on save.
+
+### Reroute in the client's sort order
+
+Each shop attempt is its own order, because committed order lines and prices are
+immutable. Attempts share `expressOrder.requestId`. A refused attempt is
+cancelled without charge, with `reroute: { status: "moved", nextOrderId, consent }`.
+Clients follow `request.nextOrderId` to the live attempt; a moved attempt's
+`expressOrder.status` is `moved`. A refusing shop loses the job and its files at
+once.
+
+After a refusal the server finds the next shop that can print this exact request
+now, in the client's sort order, within the original printer's zone or closer:
+
+- **Same or lower printing plus fee, and no higher delivery fee**: sent
+  automatically (`consent: "automatic"`). The new attempt shows
+  `request.shopInRound` ("Shop 2 of 3").
+- **Anything higher**: the request waits with `reroute.status = "price_check"`
+  and `reroute.candidate`, which holds `supplierId`, `name`, `printerType`,
+  `distanceMeters`, `readyAt`, `printingMinor`, `gridgoFeeMinor`,
+  `deliveryFeeMinor`, `totalMinor` and `previousTotalMinor`. When signed approval
+  proof is required, every move waits here so the client can sign.
+- **Three shops asked in the round**: `reroute.status = "exhausted"` with
+  `searchAway: { available, deliveryFeeMinor }`. The response says nothing was
+  charged.
+
+`reroute.options` lists what the client can send to
+`POST /orders/:id/express/reroute`:
+
+| `action` | When | Body | Effect |
+|---|---|---|---|
+| `accept` | `price_check` | `expectedTotalMinor`, optional `approval` | Sends to the candidate. A different total returns `409 express_price_changed` and changes nothing. |
+| `pick` | any wait | `supplierId`, `expectedTotalMinor`, optional `approval` | Sends to a shop from `POST /express/shops` and starts a new round. A shop that already refused returns `409 express_shop_already_asked`. |
+| `search_away` | `exhausted` | — | Starts a new round beyond the nearby zone. The away delivery fee shown on the button is accepted by this tap. |
+| `keep_trying` | `exhausted` | — | `status: "retrying"` for 5 minutes (`retryUntil`), checking nearby shops every 30 seconds. Then `exhausted` again, and the client is notified. |
+| `cancel` | any wait | — | Same as `/express/cancel`. |
+
+Unanswered `price_check` and `exhausted` waits close after **10 minutes**
+(`reroute.expiresAt`) with `reroute.status = "expired"`. Nothing is charged.
+Errors: `409 express_reroute_not_waiting`, `400 invalid_express_reroute`,
+`400 express_expected_total_required`, `409 express_shop_unavailable`.
+
+### Paying after acceptance (5 minutes)
+
+On acceptance the order moves to `awaiting_initial_payment` with
+`expressOrder.payBy` five minutes later. `expressOrder.payment.options` holds
+the choices, computed at acceptance:
+
+```json
+{ "amountMinor": 4350, "payBy": "…", "defaultMethod": "cash_at_pickup",
+  "methods": [
+    { "method": "cash_at_pickup", "available": true, "reason": null },
+    { "method": "qr_ph", "available": true, "reason": null, "confirmation": "manual",
+      "shopStartsOnReceipt": true, "reviewMinutes": null, "instantMaxMinor": 30000,
+      "reviewHours": { "opens": "08:00", "closes": "17:00", "timeZone": "Asia/Manila" } } ] }
+```
+
+The client pays with `POST /orders/:id/express/pay`:
+
+- `{ "method": "cash_at_pickup" }`. Offered, and then the default, only where
+  cash payments are switched on: the platform `cash.enabled` switch **and** the
+  shop's counter-cash policy. It also needs pickup, an individual client, a total
+  under the cash limit, and a shop that is not a home printer. Otherwise the reason
+  is one of `cash_disabled`, `shop_cash_disabled`, `cash_pickup_only`,
+  `cash_individual_only`, `cash_limit_exceeded` or `home_printer_qr_only`, and QR
+  is the only choice. Choosing cash lets the shop start at once
+  (`paymentRelease.kind = "cash_at_pickup"`, state `payment_authorized`) and
+  uses a reserved voucher.
+- `{ "method": "qr_ph", "reference": "…", "proofFileId": "…" }`. The GRIDGO QR
+  receipt, uploaded as a `payment_proof` file. With confirmation `manual`:
+  - A total **at or under PHP 300** releases the shop when the receipt is sent
+    (`paymentRelease.kind = "receipt_under_limit"`). Operations still confirms or
+    rejects it later.
+  - **Over PHP 300**, the order waits in `initial_payment_review` with
+    `paymentReview.dueAt`, 3 minutes later. Operations confirms with the existing
+    payment route. A missed due time sends Operations an overdue notice and keeps
+    the shop's slot. Outside 08:00–17:00 Manila, QR over the limit is not offered
+    (`reason: "manual_review_closed"`).
+
+The legacy installment submit route returns `409 express_pay_route_required` for
+accept-first orders. Errors: `409 express_payment_not_due`,
+`409 express_payment_expired`, `409 express_cash_unavailable`,
+`409 express_qr_unavailable`, `400 payment_reference_required`,
+`400 invalid_express_payment_method`. If no payment is chosen by `payBy`, the
+attempt is cancelled and nothing is charged.
+
+A receipt proves one payment: a proof file attached to another order returns
+`409 payment_proof_already_used`, and a QR reference already used on another
+order returns `409 payment_reference_already_used`.
+
+If Operations rejects a receipt that already released the shop, work continues,
+`paymentRelease.receiptRejected` is set, and handover waits. The client sends a
+new receipt to `/express/pay`. Handover still waits until Operations confirms that
+new receipt, which clears `receiptRejected`.
+
+An accept-first **delivery** moves to `ready_for_dispatch` or any rider state
+only once the payment is confirmed (`409 payment_required`). A receipt under the
+limit lets the shop print; it does not send a rider.
+
+**Pickup.** The shop's existing PIN step (`POST /orders/:id/express/pickup`
+with `code`) completes the handover. For cash at pickup it also needs
+`"cashReceived": true` (else `409 express_cash_confirmation_required`). The cash
+is then confirmed (`confirmationSource: "counter_cash"`), and the shop's counter
+debt for GRIDGO's share (the fee) is recorded once, as in
+[Shop money](SHOP_MONEY_API.md). A receipt released under the limit may be handed
+over at the counter while Operations still reviews it. GRIDGO accepts that risk
+up to the limit, as the reports ask; a rejected receipt blocks handover.
+
+### Super Admin settings
+
+`PATCH /settings` takes `expressCheckout` (Super Admin only; partial patches keep
+omitted values). Operations and Super Admin read the effective values from
+`GET /settings`; other roles never receive them.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `feeMinimumMinor` | `500` | GRIDGO fee minimum |
+| `feeRateBps` | `2000` | GRIDGO fee rate of printing (0–10000) |
+| `paymentConfirmation` | `manual` | `manual` or `gateway`. `gateway` returns `409 payment_gateway_not_configured` until a payment gateway is connected. |
+| `manualQrInstantMaxMinor` | `30000` | QR at or under this releases the shop on the receipt; also the home-printer order cap |
+| `manualQrReviewMinutes` | `3` | Review time for larger QR payments (1–60) |
+| `manualQrReviewOpens` / `manualQrReviewCloses` | `08:00` / `17:00` | Manila review hours; QR over the limit is hidden outside them |
+
+Invalid values return `400 invalid_express_checkout_settings`. New sends snapshot
+the fee on their order; a sent order never changes when the settings change.
+
+### Home printers
+
+Home printers take QR only (`home_printer_qr_only`) and, while QR is confirmed
+by hand, orders whose total is at most `manualQrInstantMaxMinor`. A larger draft
+returns `409 home_printer_order_limit`, and `POST /express/shops` leaves that
+home printer out. The private pickup point is in
+[Home printers](HOME_PRINTERS_API.md#pickup-point).
+
+### Accept rate
+
+Supplier Performance adds `expressAcceptance`:
+`{ windowDays: 30, offered, accepted, declined, timedOut, rate }`. It covers
+accept-first offers whose window started in the last 30 days. Declines and missed
+windows count against it. Offers the client withdrew, and offers still open, are
+left out. There is no warning.
+
