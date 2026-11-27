@@ -51,7 +51,7 @@ async function threadProjection(database, store, order, user, at) {
   const attempts = row?.own_attempts ?? 0;
   const threshold = chatContactThreshold(store.settings);
   return { ...clientShopChatProjection(order, user, store, at), unread: row?.unread ?? 0,
-    ...(order.orderType === 'express' ? { typing: clientShopChatProjection(order, user, store, at)?.status === 'open' ? await chatTyping(database, order, user, at) : [] } : {}),
+    ...(order.orderType === 'express' ? { typing: clientShopChatProjection(order, user, store, at)?.status === 'open' ? await chatTyping(database, order, user, at, store.settings) : [] } : {}),
     contactAttempts: isChatStaff(user) ? row?.total_attempts ?? 0 : attempts,
     ...(attempts >= threshold && row?.flagged_at ? { warning: CHAT_WARNING } : {}),
     ...(isChatStaff(user) ? { flaggedAt: iso(row?.flagged_at) ?? null, reportCount: row?.report_count ?? 0, contactThreshold: threshold } : {}),

@@ -109,6 +109,22 @@ test('Super Admin alone changes pickup chat lifetime; expiry blocks messages and
   assert.equal((await api('supplier', 'POST', `${path}/typing`, { typing: true })).status, 409);
 });
 
+test('typing remains visible throughout an extended pickup chat window', { skip }, async t => {
+  const { db, api } = await setup(t);
+  await db.transaction(async () => {
+    const store = await loadStore(db);
+    store.settings.orderChatCloseAfterPickupHours = 48;
+    const order = store.orders[0];
+    order.state = 'completed';
+    order.expressOrder.pickedUpAt = new Date(Date.parse(AT) - 25 * 3600000).toISOString();
+    await saveStore(db, store);
+  });
+  assert.equal((await api('other', 'POST', `${path}/typing`, { typing: true }, shop)).status, 200);
+  const response = await api('client', 'GET', path);
+  assert.equal(response.body.chat.status, 'open');
+  assert.equal(response.body.chat.typing[0]?.firstName, 'Mira');
+});
+
 test('Express messages hide contact text and media without exposing attachment download references', { skip }, async t => {
   const { db, api } = await setup(t);
   const file = (fileId, chatSafety) => ({ fileId, ownerId: 'client', purpose: 'client_shop_chat_attachment', state: 'ready',

@@ -16,8 +16,8 @@ export function chatSender(store, user) {
     workerKey: chatWorkerKey(user), photoFileId: pin?.photoFileId || preferences?.photoFileId || null };
 }
 
-export async function chatTyping(database, order, user, at) {
-  if (clientShopChatWindow(order, at).status !== 'open') return [];
+export async function chatTyping(database, order, user, at, settings) {
+  if (clientShopChatWindow(order, at, settings).status !== 'open') return [];
   const result = await database.query(`SELECT first_name,sender_role,expires_at FROM client_shop_chat_typing
     WHERE order_id=$1 AND supplier_id=$2 AND worker_key<>$3 AND expires_at>$4 ORDER BY worker_key`,
   [order.id, order.supplierId, chatWorkerKey(user), at]);
