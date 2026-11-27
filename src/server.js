@@ -7160,6 +7160,8 @@ async function handleAuditedRequest(req, res) {
       }
       if (order.state === 'supplier_assigned' && ['supplier_accepted', 'payment_authorized'].includes(next)
           && user.role === 'supplier' && user.id === order.supplierId) {
+        if(supplierMatchBlockersFor(store)(user.id,store.supplierProfiles.find(p=>p.userId===user.id))
+          .some(code=>['shop_payment_overdue','shop_missed_jobs'].includes(code)))return send(res,409,{error:'shop_new_jobs_paused'});
         acknowledgeInstructions(store, order, user, body, now(), audit);
       }
       if (order.handover && ['delivered', 'issue_window_open', 'completed', 'payout_released'].includes(next)
@@ -7202,7 +7204,9 @@ async function handleAuditedRequest(req, res) {
             message: "That supplier account no longer exists. Refresh eligible suppliers and choose another.",
           });
         }
-        if (!supplierCanWork(store,supplier.id) || (!handingToMatchedShop && supplierMatchBlockersFor(store)(supplier.id,store.supplierProfiles.find(p=>p.userId===supplier.id)).length)) {
+        const blockers=supplierMatchBlockersFor(store)(supplier.id,store.supplierProfiles.find(p=>p.userId===supplier.id));
+        if(blockers.some(code=>['shop_payment_overdue','shop_missed_jobs'].includes(code)))return send(res,409,{error:'shop_new_jobs_paused'});
+        if (!supplierCanWork(store,supplier.id) || (!handingToMatchedShop && blockers.length)) {
           const approval = (store.approvalCases || []).find((c) => c.userId === supplier.id && c.kind === "supplier");
           return send(res, 409, {
             error: "supplier_not_approved",

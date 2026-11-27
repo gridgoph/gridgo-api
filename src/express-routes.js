@@ -16,6 +16,7 @@ import { isReviewData } from './review-data.js';
 import { routeAcceptFirst, acceptFirstAccepted, acceptFirstPickupPayment } from './express-accept-first.js';
 import { recordCounterCash } from './shop-money.js';
 import { confirmVoucher } from './vouchers.js';
+import {supplierMatchBlockersFor} from './supplier-eligibility.js';
 
 export async function routeExpressOrders({req,url,store,user,readBody,id,now,audit}) {
  if(url.pathname==='/me/express-settings' && ['GET','PATCH'].includes(req.method)) {
@@ -147,6 +148,8 @@ export async function routeExpressOrders({req,url,store,user,readBody,id,now,aud
    return response();
  }
  if(action==='accept'&&order.shopAcceptance?.status==='accepted')return response();
+ if(action==='accept'&&supplierMatchBlockersFor(store,at)(user.id,store.supplierProfiles.find(p=>p.userId===user.id))
+   .some(code=>['shop_payment_overdue','shop_missed_jobs'].includes(code)))fail(409,'shop_new_jobs_paused');
  if(order.state!=='supplier_assigned')fail(409,'express_acceptance_not_pending');
  if(!order.shopAcceptance)startExpressAcceptance(order,at,store.settings);
  if(Date.parse(at)>=Date.parse(order.shopAcceptance.deadlineAt)) {

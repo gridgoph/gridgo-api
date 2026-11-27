@@ -42,3 +42,19 @@ test('weekly net, private receipt, owner control and confirmation persist atomic
  await assert.rejects(db.transaction(async()=>{const s=await loadStore(db);runShopSettlement(s,{at:'2026-11-30T08:00:00.000Z',id});await saveStore(db,s);throw new Error('abort');}),/abort/);
  assert.equal((await db.query('SELECT count(*)::int AS n FROM shop_money_events')).rows[0].n,before);
 });
+
+test('overdue and missed-job gates cover ordinary acceptance and pre-matched handoff',{skip:!process.env.DATABASE_URL},async t=>{
+ const db=createDatabase(process.env);t.after(()=>db.close());
+ await setupVerification(db,s=>{
+  s.approvalCases.find(c=>c.userId==='supplier').status='approved';
+  const o=s.orders[0];o.state='supplier_assigned';
+  o.shopAcceptance={supplierId:'supplier',assignedAt:new Date().toISOString(),deadlineAt:new Date(Date.now()+3600000).toISOString(),status:'pending'};
+  s.supplierProfiles.find(p=>p.userId==='supplier').availability={missedJobPause:{active:true}};
+ });
+ const api=await apiForTest(t);
+ const accepted=await api('supplier','POST','/orders/order/transition',{state:'supplier_accepted',supplierSubtotalMinor:10000});
+ assert.equal(accepted.body.error,'shop_new_jobs_paused',JSON.stringify(accepted.body));
+ await db.transaction(async()=>{const s=await loadStore(db);s.orders[0].state='approved_for_matching';await saveStore(db,s);});
+ const assigned=await api('ops','POST','/orders/order/transition',{state:'supplier_assigned'});
+ assert.equal(assigned.body.error,'shop_new_jobs_paused',JSON.stringify(assigned.body));
+});
