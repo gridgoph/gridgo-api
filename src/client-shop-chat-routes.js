@@ -2,6 +2,7 @@ import { actorUserId } from './shop-team.js';
 import { parseDeliveryMessage, parseDeliveryPhotoIds } from './delivery-chat.js';
 import { activeOrderSql } from './order-removal.js';
 import { maskChatContacts } from './chat-contact-masking.js';
+import { quickMessageText } from './quick-messages.js';
 import { tooManyRequests } from './support-rate-limit.js';
 import { notifyAdmins } from './domain-events.js';
 import { queueInvalidate } from './notifications.js';
@@ -164,8 +165,13 @@ export async function routeClientShopChat({ req, res, pathname, user, store, dat
     send(res, 200, { ok: true }); return true;
   }
   if (chat.status !== 'open') { send(res, 409, { error: chat.status === 'unavailable' ? 'client_shop_chat_not_available' : 'client_shop_chat_read_only', chat }); return true; }
-  const attachments = parseDeliveryPhotoIds(payload?.attachmentFileIds);
-  const parsed = parseDeliveryMessage(payload?.body, { allowEmpty: attachments.ok && attachments.fileIds.length > 0 });
+  // A quick message is fixed text chosen by code (src/quick-messages.js); it
+  // carries no typed body or attachments.
+  if (payload?.quickMessage !== undefined && (payload.body !== undefined || payload.attachmentFileIds !== undefined)) throw invalid('invalid_quick_message');
+  const quick = payload?.quickMessage !== undefined && party !== 'gridgo' ? quickMessageText(order, party, payload.quickMessage) : null;
+  if (payload?.quickMessage !== undefined && !quick) throw invalid('invalid_quick_message');
+  const attachments = parseDeliveryPhotoIds(quick ? undefined : payload?.attachmentFileIds);
+  const parsed = parseDeliveryMessage(quick ?? payload?.body, { allowEmpty: attachments.ok && attachments.fileIds.length > 0 });
   if (!attachments.ok || !parsed.ok) throw invalid('invalid_request');
   checkFiles(store, user, attachments.fileIds);
   const masked = maskChatContacts(parsed.body);

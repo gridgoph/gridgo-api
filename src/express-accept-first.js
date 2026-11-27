@@ -1,4 +1,5 @@
 import { expressFail as fail, startExpressAcceptance, onAcceptFirstRefusal, publicExpress, declineExpress } from './express-orders.js';
+import { PICKUP_PIN_VERSION } from './pickup-pin.js';
 import { createExpressDraft, checkoutBasket, quotedExpressPrinters, withClientCatalog } from './order-match-routes.js';
 import { notifyOrderParties, notifyOpsPaymentSubmitted } from './client-order-notifications.js';
 import { privilegedAdminMemberships, queueOrderInvalidate } from './notifications.js';
@@ -158,7 +159,9 @@ function performMove(store, order, supplierId, ctx, { consent, newRound, approva
     const cart = store.carts.find(row => row.id === draft.cartId);
     const choice = oldCart && (store.voucherCartChoices || []).find(row => row.id === oldCart.id);
     if (choice) store.voucherCartChoices.push({ ...structuredClone(choice), id: cart.id });
-    const result = checkoutBasket(store, client, cart, { looksRight: true, expressConfirmation: draft.confirmation, ...(approval ? { approval } : {}) }, id, at, { method: 'POST', headers: {} });
+    // Keep the client's hand-over choice: an "I'm on my way" PIN order stays one (src/pickup-pin.js).
+    const pin = e.handoverVersion === PICKUP_PIN_VERSION ? { expressPickupPin: 'on_my_way' } : {};
+    const result = checkoutBasket(store, client, cart, { looksRight: true, expressConfirmation: draft.confirmation, ...pin, ...(approval ? { approval } : {}) }, id, at, { method: 'POST', headers: {} });
     return store.orders.find(row => row.id === result.order.id);
   });
   if (expectedTotalMinor != null && next.totalMinor !== expectedTotalMinor) {

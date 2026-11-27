@@ -135,3 +135,28 @@ for (const kind of ['declined', 'timed_out']) {
   assert.equal(moved.shopAcceptance.deadlineAt,'2026-10-05T00:11:00.000Z');
  });
 }
+
+test('a pickup PIN order is stored without a counter code, keeps its handover version and accepts only 6-digit PINs', {skip:!process.env.DATABASE_URL},async t=>{
+ const db=createDatabase({DATABASE_URL:process.env.DATABASE_URL});t.after(()=>db.close());
+ await resetDatabase(db,'TRUNCATE voucher_campaigns, users, platform_settings, taxonomy_categories, accepted_file_formats RESTART IDENTITY CASCADE');
+ const store=fixture();store.orders=[];store.orderJobs=[];store.orderLineItems=[];store.orderLineItemOptions=[];store.orderInvoices=[];
+ store.taxonomy=defaultTaxonomy();
+ for(const service of store.supplierServices)service.categoryCode='document_publication';
+ for(const item of store.catalogItems)Object.assign(item,{subcategoryCode:'document_printing',express:true,pricingUnit:'per_page',printLayouts:['fit_to_paper']});
+ store.files.push({fileId:'express_art',ownerId:'client',purpose:'artwork',state:'ready',objectKey:'client/express.pdf',declaredContentType:'application/pdf',detectedContentType:'application/pdf',originalFilename:'express.pdf',size:100,createdAt:AT,detected:{pageCount:4},artworkCheck:{status:'passed'},references:[]},
+ {fileId:'express_qr',ownerId:'client',purpose:'payment_proof',state:'ready',objectKey:'client/qr.jpg',declaredContentType:'image/jpeg',detectedContentType:'image/jpeg',originalFilename:'qr.jpg',size:100,createdAt:AT,references:[]});
+ const call=(path,body)=>routeOrderMatch({req:{method:'POST'},url:new URL(`http://test${path}`),store,user:actors.client,readBody:async()=>body,id,now:()=>AT});
+ const draft=await call('/express/drafts',{supplierId:'supplier',location:{lat:7.06,lng:125.6},fulfillmentMode:'pickup',files:[{fileId:'express_art',copies:1,colour:'bw',paper:'a4',sides:'one',layout:'fit_to_paper',acceptedWarnings:[]}]});
+ const placed=await call(`/me/carts/${draft.body.cartId}/checkout`,{looksRight:true,expressConfirmation:draft.body.confirmation,expressPickupPin:'on_my_way',payment:{method:'qr_manual',reference:'EXPRESS-PIN',proofFileId:'express_qr'}});
+ await db.transaction(()=>saveStore(db,store));
+ const loaded=await db.transaction(()=>loadStore(db));const order=loaded.orders.find(o=>o.id===placed.body.order.id);
+ assert.equal(order.expressOrder.handoverVersion,2);assert.equal(order.expressOrder.pickupCode,undefined);
+ order.expressOrder.onMyWay={at:AT,walkMinutes:6};order.expressOrder.pickupPin={code:'004821',issuedAt:AT,failedAttempts:0,totalFailedAttempts:0};
+ await db.transaction(()=>saveStore(db,loaded));
+ assert.equal((await db.transaction(()=>loadStore(db))).orders.find(o=>o.id===order.id).expressOrder.pickupPin.code,'004821');
+ await assert.rejects(db.query(`UPDATE orders SET data=jsonb_set(data,'{expressOrder,pickupCode}','"999999"') WHERE id=$1`,[order.id]),/Express checkout snapshot is immutable/);
+ await assert.rejects(db.query(`UPDATE orders SET data=data #- '{expressOrder,handoverVersion}' WHERE id=$1`,[order.id]),/Express checkout snapshot is immutable/);
+ await assert.rejects(db.query(`UPDATE orders SET data=jsonb_set(data,'{expressOrder,pickupPin,code}','"12345"') WHERE id=$1`,[order.id]),/Invalid Express checkout snapshot/);
+ await assert.rejects(db.query(`UPDATE orders SET data=jsonb_set(data,'{expressOrder,riderPin}','{"code":"abc"}') WHERE id=$1`,[order.id]),/Invalid Express checkout snapshot/);
+ await db.query(`UPDATE orders SET data=jsonb_set(data,'{expressOrder,pickupPin,code}','"771204"') WHERE id=$1`,[order.id]);
+});
