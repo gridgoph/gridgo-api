@@ -16,6 +16,7 @@ import { loadStore, saveStore } from "../src/postgres-store.js";
 import { checklistDigest, createPayoutMilestones } from "../src/operational-model.js";
 import { seedReferenceData } from "../src/seed.js";
 import { listingSnapshot } from "../src/catalog-review-state.js";
+import { appendAudit } from "../src/audit.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const ISSUER = "https://casual-crab-9.clerk.accounts.dev";
@@ -275,9 +276,20 @@ test('cart group listings filter unavailable revisions and deadlines and return 
   const added = await call(`/me/carts/${cart.id}/lines`, { method: 'POST', body: { catalogItemId: 'item_supplier_a', quantity: 1, optionIds: [] } });
   const groupId = added.body.cart.groups[0].id;
   const read = () => call(`/me/carts/${cart.id}/groups/${groupId}/listings`);
+  await database.transaction(async () => {
+    const store = await loadStore(database);
+    appendAudit(store, { actor: { role: 'system' }, action: 'cart.fixture_ready', entityType: 'cart', entityId: cart.id },
+      { at: AT, id: () => 'audit_cart_group_fixture' });
+    await saveStore(database, store);
+  });
   const baseline = await loadStore(database);
   const change = async edit => database.transaction(async () => {
-    const store = structuredClone(baseline);
+    // Keep the writer's attached baseline and any append-only lifecycle evidence.
+    // Reset only the fixture collections whose availability each case changes.
+    const store = await loadStore(database);
+    for (const key of ['catalogItems', 'files', 'supplierProfiles', 'users', 'supplierServices', 'approvalCases', 'carts']) {
+      store[key] = structuredClone(baseline[key]);
+    }
     edit(store, store.catalogItems.find(row => row.id === 'item_supplier_a_brochures'));
     await saveStore(database, store);
   });
@@ -320,6 +332,7 @@ test('cart group listings filter unavailable revisions and deadlines and return 
   assert.equal(tooLate.status, 200);
   assert.deepEqual(tooLate.body.listings, []);
   assert.equal(tooLate.body.emptyReason, 'deadline_not_met');
+  assert.equal((await database.query("SELECT 1 FROM audit_log WHERE id='audit_cart_group_fixture'")).rowCount, 1);
 });
 
 /**
