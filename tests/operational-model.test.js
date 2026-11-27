@@ -1080,3 +1080,11 @@ test("client rider location is confined to delivery after pickup, independent of
     assert.equal(clientRiderLocationPing(order, point && { ...ping, ...point }), null);
   }
 });
+
+test('join QR refresh defaults to one minute and accepts only bounded integer seconds', () => {
+  assert.equal(defaultOperationalSettings().shopTeamJoinQrRefreshSeconds,60);
+  for(const value of [null,'60',0,14,301,60.5]) {
+    expectDomainError(()=>validateOperationalSettings({...defaultOperationalSettings(),shopTeamJoinQrRefreshSeconds:value}),400,'invalid_shop_join_qr_refresh');
+  }
+  for(const value of [15,60,300]) assert.doesNotThrow(()=>validateOperationalSettings({...defaultOperationalSettings(),shopTeamJoinQrRefreshSeconds:value}));
+});

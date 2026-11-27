@@ -116,3 +116,13 @@ test('new link and QR accounts require provider-verified mobile and a bounded na
     assert.equal(claimShopInvite(args).member.name,'New worker');
   }
 });
+
+test('new PIN records and promotions are Staff only, while legacy PIN managers retain access', async () => {
+  const store=fixture();
+  await assert.rejects(request(store,'/pin-staff',{name:'Worker',pin:'1234',role:'manager'}),{code:'invalid_shop_member_update'});
+  const created=await request(store,'/pin-staff',{name:'Worker',pin:'1234'});
+  await assert.rejects(request(store,`/pin-staff/${created.body.member.id}`,{role:'manager'},{method:'PATCH'}),{code:'invalid_shop_member_update'});
+  store.shopPinStaff[0].role='manager';
+  const selected=await request(store,'/working/select',{pinStaffId:created.body.member.id,pin:'1234'});
+  assert.equal(selected.body.worker.role,'manager');
+});
