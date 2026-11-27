@@ -7,8 +7,8 @@ import { pathToFileURL } from 'node:url';
 import { createDatabase } from '../src/database.js';
 import { loadStore, saveStore } from '../src/postgres-store.js';
 import { resetDatabase } from './fixtures/reset-database.js';
-import { fixture } from './fixtures/reschedule.js';
-import { apiForTest } from './fixtures/reschedule-http.js';
+import { fixture, AT } from './fixtures/reschedule.js';
+import { apiForTest, domainClockEnv } from './fixtures/reschedule-http.js';
 import { defaultShopSchedule } from '../src/availability.js';
 import { snapshotShopClock } from '../src/shop-hours.js';
 import { up } from '../migrations/1794146000000_shop_weekday_hours.js';
@@ -140,23 +140,20 @@ for (const allIncompatible of [false, true]) test(`HTTP isolates ${allIncompatib
     priceMinor: 1500, surchargeMinor: null, sortOrder: 0, createdAt: initial.orders[0].createdAt,
     updatedAt: initial.orders[0].createdAt }));
   await db.transaction(() => saveStore(db, initial));
-  // Both endpoints derive an earliest instant from domain new Date(). Keep
-  // that instant identical while JWT expiry and network timers remain real.
-  const domainNow = Date.now();
-  const clock = `const OriginalDate=Date;globalThis.Date=class extends OriginalDate {
-    constructor(...args){super(...(args.length?args:[${domainNow}]));}
-  };`;
+  // Keep both endpoints on the same Monday morning. A live-clock +30-day
+  // deadline can fall on a closed Sunday, independently of shop compatibility.
+  const domainNow = Date.parse(AT);
   const api = await apiForTest(t, process.env.GRIDGO_WEEKDAY_E2E_MINIO ? {
-    NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --import=data:text/javascript,${encodeURIComponent(clock)}`,
+    ...domainClockEnv(AT),
     MINIO_ENDPOINT: process.env.GRIDGO_WEEKDAY_E2E_MINIO, MINIO_PUBLIC_URL: process.env.GRIDGO_WEEKDAY_E2E_MINIO,
     MINIO_ACCESS_KEY: 'weekday-test', MINIO_SECRET_KEY: 'weekday-test-secret', MINIO_BUCKET: 'weekday-test',
-  } : { NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --import=data:text/javascript,${encodeURIComponent(clock)}` });
+  } : domainClockEnv(AT));
   for (const supplierId of allIncompatible ? ['supplier', 'replacement'] : ['supplier']) {
     const saved = await api(supplierId, 'PATCH', '/me/shop-hours', { expectedVersion: 1, schedule: incompatibleSchedule() });
     assert.equal(saved.status, 200, JSON.stringify(saved.body));
   }
   const matched = await api('client', 'POST', '/me/matches', { subcategoryCode: 'flyers', fulfillmentMode: 'pickup',
-    deadline: new Date(Date.now() + 30 * 86400000).toISOString() });
+    deadline: new Date(domainNow + 30 * 86400000).toISOString() });
   if (allIncompatible) {
     assert.equal(matched.status, 404, JSON.stringify(matched.body));
     assert.equal(matched.body.error, 'match_not_found');

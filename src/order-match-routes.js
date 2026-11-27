@@ -4,6 +4,7 @@ import { shopPaused } from './shop-availability.js';
 import { assertDocumentRequest } from './document-capabilities.js';
 import { pingPrinterDemand } from './printer-demand.js';
 import { isDeepStrictEqual } from 'node:util';
+import { expressCardPrice, expressPaymentMethods } from './express-shop-facts.js';
 import { expressRates, expressLinePrice, expressPoint, expressShopList, assertExpressNightJob, expressGuide, updateExpressGuide, createExpressSnapshot, publicExpress, expressClientProjection, expressCatalogOptions } from './express-orders.js';
 import { expressCheckoutFeeSchedule, homePrinterLimitMinor } from './express-checkout-rules.js';
 import { beginAcceptFirst, assertAcceptFirstPayable } from './express-accept-first.js';
@@ -2899,7 +2900,10 @@ export function quotedExpressPrinters(store,user,body,at) {
    const result=createExpressDraft(preview,user,{...body,selection:undefined,supplierId:shop.supplierId},prefix=>`preview_${prefix}_${++sequence}`,at).body;
    if(result.quote.status!=='priced')continue;
    const privatePoint=store.supplierProfiles.find(profile=>profile.userId===shop.supplierId).shop;
+   // The card total is this checkout quote, never a sum of display prices.
    quoted.push({...shop,readyAt:result.shop.readyAt,quote:result.quote,paymentTiming:result.paymentTiming,
+    price:expressCardPrice(result.quote,preview.cartLines),
+    paymentMethods:expressPaymentMethods(store,user,{home:shop.printerType==='home',verified:shop.verified,fulfillmentMode:body.fulfillmentMode,printAndFeeMinor:result.quote.clientItemSubtotalMinor}),
     deliveryFareMinor:deliveryFeeForDistance(distanceMetersBetween(privatePoint,location),store.settings)});
   } catch(error) {
    if(!['express_listing_unavailable','express_listing_configuration_required','document_capability_unavailable','express_night_capacity','express_shop_unavailable','print_layout_not_supported','artwork_file_format_not_accepted','home_printer_order_limit'].includes(error.code))throw error;

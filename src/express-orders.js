@@ -18,6 +18,7 @@ import { projectExpressNightFinish, projectShopFinish, projectListingGroup } fro
 import { testerProgress } from './founding-testers.js';
 import { privilegedAdminMemberships, queueOrderInvalidate } from './notifications.js';
 import { EXPRESS_ACCEPT_FIRST_MS, EXPRESS_SHOPS_PER_ROUND } from './express-checkout-rules.js';
+import { expressShopLogo, expressShopServices, expressPaymentMethods, TOP_SHOP_MIN_AVERAGE } from './express-shop-facts.js';
 
 export const EXPRESS_ACCEPT_MS = 5 * 60_000;
 /** Accept-first refusals are routed by express-accept-first.js, registered at load
@@ -91,8 +92,11 @@ export function expressShopList(source,user,{location,sort='nearest',fulfillment
       walkingTimeMinutes:fulfillmentMode==='pickup'?Math.ceil((home?Math.max(500,Math.ceil(distance/500)*500):distance)/80):null,walkingEstimateSource:fulfillmentMode==='pickup'?'straight_line_80m_per_minute':null,
       isOpenNow:!!shopAvailability,selectable:!!availability,openStatus:shopAvailability?(shopAvailability.nightWindow&&!shopAvailability.nightWindow.home?'night':'open'):'closed',
       rating:publicShopRating(store,supplierId),jobsAhead,
+      logo:expressShopLogo(store,supplierId,home),services:expressShopServices(store,supplierId,at),
+      paymentMethods:expressPaymentMethods(store,user,{home,verified,fulfillmentMode}),
       readyAt:availability?projection.promiseBy:null,deliveryAvailable:availability?.deliveryAvailable||false,nightWindow:availability?.nightWindow||null,busy:jobsAhead>=3,isNew:Number.isFinite(age)&&age>=0&&age<7*86400000});
   }
+  for(const row of rows)row.topShop=(row.rating?.average||0)>=TOP_SHOP_MIN_AVERAGE;
   rows.sort((a,b)=>(sort==='top_rated'?(b.rating?.average||0)-(a.rating?.average||0):sort==='fewest_jobs'?a.jobsAhead-b.jobsAhead:0)
     ||distanceMetersBetween(location,store.supplierProfiles.find(p=>p.userId===a.supplierId).shop)-distanceMetersBetween(location,store.supplierProfiles.find(p=>p.userId===b.supplierId).shop)||a.supplierId.localeCompare(b.supplierId));
   if(sort!=='nearest'&&rows.length>1) {const index=rows.findIndex(r=>r.isNew);if(index>=0){const [row]=rows.splice(index,1);rows.splice(1,0,row);}}

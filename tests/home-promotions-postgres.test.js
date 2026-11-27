@@ -15,7 +15,7 @@ const values = { name: 'DavaoGo', logo: { fileId: 'promo_logo' }, description: '
   tag: 'partner', linkText: 'Visit DavaoGo', linkUrl: 'https://davaogo.app/', style: 'yellow',
   startsAt: '2026-01-01T00:00:00Z', enabled: true, displayOrder: 1 };
 
-async function setup(t) {
+async function setup(t, { startApi = true } = {}) {
   const db = createDatabase({ DATABASE_URL: DB }); t.after(() => db.close());
   await resetDatabase(db, 'TRUNCATE users, platform_settings RESTART IDENTITY CASCADE');
   const store = emptyStore(); store.settings = defaultOperationalSettings();
@@ -31,7 +31,7 @@ async function setup(t) {
     declaredContentType: 'image/png', detectedContentType: 'image/png', createdAt: at, readyAt: at, references: [],
   });
   await db.transaction(() => saveStore(db, store));
-  return { db, api: await apiForTest(t) };
+  return { db, api: startApi ? await apiForTest(t) : null };
 }
 
 test('HTTP promotions persist staff CRUD, enforce roles and private media, expose only live feed, keep removed stats', { skip: !DB }, async t => {
@@ -141,7 +141,8 @@ test('Manila days, concurrent deduplication and rollback are durable; developmen
 
 
 test('promotion writes, media references, audits and staff inbox rows roll back together', { skip: !DB }, async t => {
-  const { db } = await setup(t);
+  // This direct transaction test needs no HTTP child or concurrent lifecycle work.
+  const { db } = await setup(t, { startApi: false });
   const before = await loadStore(db);
   await assert.rejects(db.transaction(async () => {
     const store = await loadStore(db);
