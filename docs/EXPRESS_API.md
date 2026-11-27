@@ -401,6 +401,11 @@ processes cannot apply the earlier A3 reassignment/payment-window behavior.
 
 ## Shop counter code
 
+This section is the **version 1** hand-over, used by every order placed without
+`expressPickupPin` (all orders placed before this change, every released client
+build, and Express groups). New client builds use
+[On my way and pickup PIN](#on-my-way-and-pickup-pin) instead.
+
 When ready, only the owning client's `expressOrder` includes `pickupCode`, a
 six-character digit string (retain leading zeroes). Ordinary supplier, rider,
 staff and unrelated-client projections do not reveal it.
@@ -423,6 +428,115 @@ inspection-bound rider packing photo, and the shop signature attached by that
 rider through `/dispatch/:id/pickup-confirm`. A shop-only tap cannot supply or
 confirm those rider-owned facts. Express skips the shop production evidence
 only; replacing rider evidence/authority needs a separate handover contract.
+
+## On my way and pickup PIN
+
+Version 2 hand-over (report 83C6494A). The live tracker every order now carries
+is in [ORDER_TRACKING_API.md](ORDER_TRACKING_API.md).
+
+**Opt in at checkout.** A client build that shows the new screens sends
+`"expressPickupPin": "on_my_way"` in `POST /me/carts/:cartId/checkout`. For a
+single-client pickup order this snapshots `expressOrder.handoverVersion: 2` and
+creates **no** `pickupCode`. Any other value is `400 invalid_express_pickup_pin`.
+Delivery orders and Express groups ignore the opt-in and stay on their existing
+flows. The handover version is immutable (database trigger), so an order never
+switches flows part way. `expressOrder.pickupHandover` tells the app which flow
+an order uses: `on_my_way_pin` or `counter_code`.
+
+**I'm on my way.** `POST /orders/:id/express/on-my-way` (owning client) with an
+optional `{ "location": { "lat": 7.06, "lng": 125.61 } }` (the client's current
+point; the checkout location is used without it). Allowed only while the order is
+ready (`ready_for_dispatch`), otherwise `409 express_not_ready`; version 1 orders
+get `409 express_on_my_way_unavailable`. The first call:
+
+- creates the 6-digit pickup PIN (leading zeroes kept) and returns it as
+  `expressOrder.pickupPin` — the only place it is ever shown, and only to the
+  owning client;
+- records `expressOrder.onMyWay` `{at, updatedAt, walkMinutes, walkEstimateSource,
+  clientLabel}`. The walk time is straight line at 80 m a minute; a home printer's
+  point is rounded to 500 m like its shop card, so the estimate never pins a home
+  address. `clientLabel` is the first name and last initial ("Mara L.");
+- sends the shop a `shop_client_on_the_way` push: "Mara L. is on the way",
+  "About 7 min away. Ask for the 6-digit pickup PIN before you hand over."
+
+Repeating the call keeps the same PIN and only refreshes the walk estimate; the
+shop is told once. The shop, its Staff and Operations see `onMyWay`,
+`pickupPinIssued`, `pickupPinLocked` and (shop/Operations) `pickupPinRetryAfter`,
+never the PIN. While the client is on the way the shop and its counter Staff also
+see `counterCollection.amountMinor`, the cash to take at the counter: the
+accept-first cash-at-pickup amount (`0` when the client paid by QR or the payment
+is already confirmed). This is the client's price, not shop earnings.
+
+**Hand-over.** The shop (owner or Staff) calls the existing
+`POST /orders/:id/express/pickup` with `{ "code": "482917" }`, plus the
+accept-first `"cashReceived": true` when the client chose cash at pickup
+([Accept-first Express](#accept-first-express-send-accept-then-pay)). There is
+one hand-over contract; the PIN only replaces the counter code:
+
+| Case | Response |
+| --- | --- |
+| Client has not tapped I'm on my way | `409 express_pickup_pin_not_issued` |
+| Wrong PIN | `409 express_pickup_code_mismatch` with `attemptsLeft`; nothing is handed over |
+| 5 wrong in a row | `429 express_pickup_attempts_exceeded` with `retryAfter` (15 minutes) |
+| 10 wrong in total | `423 express_pickup_pin_locked`; even the right PIN waits for Operations |
+| Cash at pickup without `cashReceived: true` | `409 express_cash_confirmation_required` |
+| Payment not settled (and not released by accept-first) | `409 payment_required` |
+| Right PIN | `200`; repeat success is idempotent |
+
+Wrong tries are committed even though they are refusals. Payment and cash
+confirmation are checked before the PIN, so they are never counted as PIN
+guesses, and a wrong PIN confirms no cash. On lock, Operations and
+Super Admin get `ops_express_pickup_pin_locked` and the client gets
+`order_pickup_pin_locked` ("Too many wrong PINs were tried at the counter…"); the
+client's PIN is hidden until reset. Operations or Super Admin unlocks with
+`POST /orders/:id/express/pickup-pin/reset` and `{ "reason": "…" }` (optionally
+`"pin": "rider"`): it issues a new PIN, clears the counters, audits the reason
+and tells the client (`order_pickup_pin_reset`). The old PIN stops working.
+
+Success records `expressOrder.pickedUpAt` and `expressOrder.pickupHandover`
+`{at, method:"pickup_pin", byUserId, cashReceived}`, then uses the same
+handover completion as version 1 (issue window, job delivered, payouts and their
+Operations gates unchanged). The PIN disappears from the client view.
+`handedOver` `{at, method, cashReceived}` is projected to the client, the shop
+and Operations.
+
+With `cashReceived: true` the hand-over does exactly what the accept-first
+counter-code hand-over does: the payment is confirmed
+(`confirmationSource: "counter_cash"`), a reserved voucher is used, and the
+shop's counter debt for GRIDGO's fee is recorded once in
+[Shop money](SHOP_MONEY_API.md). No second cash field or record exists.
+
+**Home printers** use the same flow at their pickup point; nothing extra is
+exposed. **Delivery** gives the PIN step to the rider (below).
+
+### Delivery: the rider PIN step
+
+For an Express delivery, the assigned rider calls
+`POST /orders/:id/express/on-my-way` while the order is `rider_assigned`. It
+returns `expressOrder.riderPin.code` to that rider only and sends the shop
+`shop_rider_on_the_way`. The shop enters the rider's PIN through the same
+`POST /orders/:id/express/pickup` with `{code}`, with the same retry and lock
+rules. Success sets `riderPin.verifiedAt` and moves nothing: the rider's six
+checks, counts, packing photo and signature still hand the package over. A
+reassigned rider needs a new PIN.
+
+When Super Admin sets `expressRiderPinRequired: true` (default `false`),
+`POST /dispatch/:id/pickup-checklist` and `/pickup-confirm` refuse with
+`409 express_rider_pin_required` until the current rider's PIN is confirmed.
+Leave it off until rider and supplier builds with the PIN step reach coverage,
+so released rider apps keep working.
+
+### Old and new app versions
+
+| Client build | Order flow | What it sees |
+| --- | --- | --- |
+| Released (no opt-in) | version 1 counter code | Unchanged: `pickupCode` when ready |
+| New (opt-in) | version 2 PIN | Tracker, I'm on my way, PIN after the tap |
+
+Orders already in progress keep their `pickupCode` and the old hand-over. A
+released supplier app keeps working for both: it already sends the client's
+six digits to `/express/pickup`. On a version 2 order it gets
+`express_pickup_pin_not_issued` until the client taps I'm on my way.
 
 ## Supplier offer push
 
@@ -859,7 +973,11 @@ New Plans requests use `productType:"plans"`, `planType:"whiteprint"|"blue_ink"|
 "blue_paper"`, and exact paper `20x30 | 24x36 | 30x40 | a2 | a1 | a0`.
 Orientation must be Auto and sides must be One. Whiteprint accepts
 `colour:"bw"|"colour"`; Blue ink and Blue paper require `colour:"blue"` and convert
-all marks to blue ink. Blue paper also renders a blue background. They use the
+all marks to blue ink. Blue paper uses a blue viewer backdrop; unmarked areas in
+the production PDF remain transparent so the printer adds no background ink.
+Signed PNG previews already simulate the paper colour. A PDF viewer should use
+the returned `paperColour` as its canvas backdrop, without adding that backdrop
+to the production document. They use the
 shop's explicit price for that exact type, dimensions and ink; A2/A1 are never
 aliases for 20×30/24×36. Unconfigured types/sizes are unavailable rather than
 receiving an invented price. Plan prices are fixed per printed page, not the
@@ -868,9 +986,10 @@ three document tiers. Home printers continue to offer documents only.
 ### Bounds, fallback and production privacy
 
 Preparation accepts PDF, PNG, JPEG and WebP, up to 64 MiB and 200 PDF pages.
-Production rasterization uses 300 dpi, with a 10000-pixel long-side cap and
+PDF rasterization preserves at least 300 dpi at the final placement (rather
+than stretching a small source raster), with a 10000-pixel long-side cap and
 100 MiB decoded-page limit; oversized pages fail explicitly rather than silently
-lowering resolution. The complete private PDF is capped at 64 MiB. Jobs use the
+lowering resolution. The complete private PDF is capped at 64 MiB. Jobs run in a bounded worker thread, off the HTTP event loop, with the
 existing single renderer lock, restricted subprocess environment, per-command
 25-second timeout, roughly 90-second overall budget and temporary-file cleanup.
 At most 32 immutable analysis/render variants are retained per upload.
@@ -896,7 +1015,9 @@ apply. Per-page shop prices remain private from clients.
 
 The accepted render identity, file choice, page prices and fallback are immutable.
 Later worker completion, threshold edits or shop price changes cannot silently
-switch an accepted fallback to another file or change its total. A fresh draft
+switch an accepted fallback to another file or change its total. Automatic
+reroutes also retain the accepted whole-file fallback mode, even when a render
+has since succeeded, while using the next shop’s own whole-file rate. A fresh draft
 and preview confirmation are required to adopt a later successful render.
 
 Legacy automatic reassignment cannot transfer a version-2 shop-priced mix to a

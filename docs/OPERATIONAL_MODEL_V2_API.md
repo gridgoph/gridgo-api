@@ -782,6 +782,8 @@ Default `GET /settings` response:
 
 `shopReceiptScanRequired` (Finance, default `false`, Super Admin editable through the same handshake) makes the shop attach its invoice/receipt scan before Ready for rider pickup; see [SHOP_RECEIPT_SCAN_API.md](SHOP_RECEIPT_SCAN_API.md).
 
+`expressRiderPinRequired` (default `false`, Super Admin editable through the same handshake) makes an Express delivery rider's pickup checks wait until the shop has entered that rider's 6-digit PIN; see [Express rider PIN](EXPRESS_API.md#delivery-the-rider-pin-step). Turn it on only after rider and supplier builds that show the PIN step reach coverage.
+
 `shopEarlyAccessEnabled` (default `false`, including older rows that omit it) is
 Super Admin only through the same version/reason handshake. False refuses new
 shop early-access signups/grants with `409 shop_early_access_disabled`; customer

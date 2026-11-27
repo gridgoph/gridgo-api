@@ -7,7 +7,7 @@ import path from 'node:path';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { DOMAIN_MUTATION_LOCK } from './database.js';
-import { renderExpressPrint } from './express-print-renderer.js';
+import { renderExpressPrintInWorker } from './express-print-worker.js';
 import { renderColourAnalysis, COLOUR_MAX_SOURCE } from './colour-renderer.js';
 import { colourPriceChecks } from './colour-analysis.js';
 import { privilegedAdminMemberships, queueInvalidate } from './notifications.js';
@@ -15,7 +15,7 @@ import { privilegedAdminMemberships, queueInvalidate } from './notifications.js'
 // One bounded job at a time across replicas; renderer lock is independent of
 // the domain lock, so uploads, orders and payments proceed during conversion.
 // Pending records survive crashes and are picked up at startup/lifecycle tick.
-export function createColourWorker({database,load,loadSource,loadForSave,save,storage,render=renderColourAnalysis,renderExpress=renderExpressPrint,now=()=>new Date().toISOString(),id=()=>crypto.randomUUID()}) {
+export function createColourWorker({database,load,loadSource,loadForSave,save,storage,render=renderColourAnalysis,renderExpress=renderExpressPrintInWorker,now=()=>new Date().toISOString(),id=()=>crypto.randomUUID()}) {
   let busy = false;
   return async function drain() {
     if (busy) return;

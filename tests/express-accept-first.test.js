@@ -27,7 +27,8 @@ function setup({ prices = {}, pages = 12 } = {}) {
   const id = prefix => `${prefix}_t${++n}`;
   const shop = supplierId => ({ id: supplierId, role: 'supplier' });
   const express = (action, user, orderId, body = {}, at = AT) => routeExpressOrders({ req: { method: 'POST' },
-    url: new URL(`http://test/orders/${orderId}/express/${action}`), store, user, readBody: async () => body, id, now: () => at });
+    url: new URL(`http://test/orders/${orderId}/express/${action}`), store, user, readBody: async () => body, id, now: () => at,
+    audit: (s, event) => (s.auditLog ||= []).push({ id: id('aud'), at, ...event }) });
   return { store, client, call: caller(store, client, AT), express, shop, id };
 }
 async function send(ctx, body = {}) {
@@ -350,4 +351,32 @@ test('accept rate counts declines and missed windows, ignores client withdrawals
     offer('declined', 'shop_b'), offer('accepted', 'shop_a', '2026-08-01T00:00:00.000Z'), { ...offer('declined'), expressOrder: { version: 1 } }] };
   assert.deepEqual(expressAcceptRate(store, 'shop_a', later(60)), { windowDays: 30, offered: 4, accepted: 2, declined: 1, timedOut: 1, rate: 0.5 });
   assert.equal(expressAcceptRate(store, 'shop_z', AT).rate, null);
+});
+
+test('an "I\'m on my way" PIN order keeps its PIN across a move and takes cash at pickup on the same PIN hand-over', async () => {
+  const ctx = setup({ prices: { shop_c: 250 } });
+  ctx.store.settings.cash = { ...ctx.store.settings.cash, enabled: true };
+  ctx.store.shopMoneyEvents = [{ id: 'policy_c', kind: 'policy', supplierId: 'shop_c', at: AT, data: { counterCashEnabled: true, version: 1 } }];
+  const draft = await ctx.call('POST', '/express/drafts', { acceptFirst: true, location, fulfillmentMode: 'pickup', files, supplierId: 'shop_a' });
+  const placed = await ctx.call('POST', `/me/carts/${draft.body.cartId}/checkout`, { looksRight: true, expressConfirmation: draft.body.confirmation, expressPickupPin: 'on_my_way' });
+  assert.equal(placed.status, 201);
+  const first = ctx.store.orders.find(o => o.id === placed.body.order.id);
+  assert.equal(first.expressOrder.handoverVersion, 2);
+  await ctx.express('decline', ctx.shop('shop_a'), first.id, { reason: 'Printer jammed' });
+  const order = current(ctx.store, first);
+  assert.equal(order.supplierId, 'shop_c');
+  assert.equal(order.expressOrder.handoverVersion, 2, 'the move keeps the client\'s hand-over choice');
+  assert.equal(Object.hasOwn(order.expressOrder, 'pickupCode'), false);
+  await ctx.express('accept', ctx.shop('shop_c'), order.id, {}, later(30));
+  await ctx.express('pay', ctx.client, order.id, { method: 'cash_at_pickup' }, later(40));
+  order.state = 'ready_for_dispatch';
+  await assert.rejects(ctx.express('pickup', ctx.shop('shop_c'), order.id, { code: '123456', cashReceived: true }, later(500)), e => e.code === 'express_pickup_pin_not_issued');
+  const pin = (await ctx.express('on-my-way', ctx.client, order.id, {}, later(510))).body.expressOrder.pickupPin;
+  assert.match(pin, /^\d{6}$/);
+  assert.equal(publicExpress(order, ctx.shop('shop_c')).counterCollection.amountMinor, order.payments.initial.amountMinor);
+  await assert.rejects(ctx.express('pickup', ctx.shop('shop_c'), order.id, { code: pin }, later(600)), e => e.code === 'express_cash_confirmation_required');
+  await ctx.express('pickup', ctx.shop('shop_c'), order.id, { code: pin, cashReceived: true }, later(600));
+  assert.deepEqual([order.payments.initial.status, order.payments.initial.confirmationSource], ['confirmed', 'counter_cash']);
+  assert.equal(ctx.store.shopMoneyEvents.filter(e => e.key === `counter:${order.id}`).length, 1, 'one counter debt, one cash record');
+  assert.deepEqual(publicExpress(order, ctx.shop('shop_c')).handedOver, { at: later(600), method: 'pickup_pin', cashReceived: true });
 });

@@ -91,6 +91,21 @@ async function fixture(db) {
   };
   await db.transaction(() => saveStore(db, store));
 }
+// `order.tracker` (docs/ORDER_TRACKING_API.md) is an additive field newer than
+// this baseline. Drop only that key; every other byte stays strict.
+// Orders are embedded in several lists (basket groups too), so drop it wherever an order carries it.
+const dropTracker = (value) => {
+  if (Array.isArray(value)) value.forEach(dropTracker);
+  else if (value && typeof value === 'object') {
+    if (Object.hasOwn(value, 'tracker') && Object.hasOwn(value, 'timeline')) delete value.tracker;
+    Object.values(value).forEach(dropTracker);
+  }
+  return value;
+};
+const withoutTracker = (response) => {
+  if (response.status !== 200 || !response.body.includes('"tracker"')) return response;
+  return { ...response, body: JSON.stringify(dropTracker(JSON.parse(response.body))) };
+};
 test(
   'finish lists retain actual-dev unpaged HTTP bytes except exclusive rider-offer visibility',
   { skip },
@@ -123,7 +138,7 @@ test(
         '/credits/balance?clientId=client',
       ]) {
         const a = await old(who, 'GET', path, null, { raw: true }),
-          b = await current(who, 'GET', path, null, { raw: true });
+          b = withoutTracker(await current(who, 'GET', path, null, { raw: true }));
         assert.equal(b.status, a.status, `${who} ${path}`);
         if (who === 'rider' && new URL(path, 'http://test').pathname === '/orders' && a.status === 200) {
           // This historical source predates exclusive reservations. With timers

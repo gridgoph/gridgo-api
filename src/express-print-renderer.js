@@ -11,7 +11,7 @@ const fail=code=>{throw Object.assign(new Error(code),{code,status:422});};
 const pt=milli=>Number((milli*72/25400).toFixed(5));
 
 /** Fixed PDF objects only: uploaded bytes are decoded to RGB, never copied as PDF code.
- * Production pixels remain at 300 dpi (10k long-side cap); PDF placement uses the
+ * PDF rasterization preserves at least 300 dpi at final placement (10k cap); placement uses the
  * same physical geometry as measurement. No interpolated thumbnail is printed. */
 export async function renderExpressPrint(source,file,request) {
  const directory=await fs.mkdtemp(path.join(os.tmpdir(),'gridgo-express-print-')),started=Date.now();
@@ -34,9 +34,12 @@ export async function renderExpressPrint(source,file,request) {
    if(pdf){const box=new RegExp(`^Page\\s+${page}\\s+CropBox:\\s+([-\\d.]+)\\s+([-\\d.]+)\\s+([-\\d.]+)\\s+([-\\d.]+)`,'m').exec(info);if(!box)fail('colour_page_size_unknown');
     widthMilli=Math.round((Number(box[3])-Number(box[1]))*25400/72);heightMilli=Math.round((Number(box[4])-Number(box[2]))*25400/72);
     if(Math.abs(Number(new RegExp(`^Page\\s+${page}\\s+rot:\\s+(-?\\d+)`,'m').exec(info)?.[1]||0))%180===90)[widthMilli,heightMilli]=[heightMilli,widthMilli];
-    // Refuse rather than silently lower print resolution on unusually large originals.
-    if(Math.max(widthMilli,heightMilli)*300/25400>10000||widthMilli*heightMilli*(300/25400)**2*3>MAX_RASTER)fail('colour_print_resolution_limit');
-    await run('pdftoppm',['-f',String(page),'-l',String(page),'-singlefile','-cropbox','-r','300',input,path.join(directory,'page')],directory,{maxOutput:MAX_RASTER});
+    if(!(widthMilli>0&&heightMilli>0))fail('colour_page_size_unknown');
+    const placement=printedPlacement({widthMilli,heightMilli},request.paper,request.layout,request.orientation);
+    const dpi=300*Math.max(1,placement.scale);
+    // Refuse rather than silently lower final print resolution at the size cap.
+    if(Math.max(widthMilli,heightMilli)*dpi/25400>10000||widthMilli*heightMilli*(dpi/25400)**2*3>MAX_RASTER)fail('colour_print_resolution_limit');
+    await run('pdftoppm',['-f',String(page),'-l',String(page),'-singlefile','-cropbox','-r',String(dpi),input,path.join(directory,'page')],directory,{maxOutput:MAX_RASTER});
    }else{const coder={'image/png':'png','image/jpeg':'jpeg','image/webp':'webp'}[file.detectedContentType];if(!coder)fail('colour_file_unsupported');
     await run('convert',['-limit','memory','128MiB','-limit','map','128MiB','-limit','disk','0','-limit','thread','1',`${coder}:${input}[0]`,'-auto-orient','-background','white','-alpha','remove','-alpha','off','-depth','8',`ppm:${output}`],directory,{maxOutput:MAX_RASTER});
     widthMilli=file.detected?.widthMilli;heightMilli=file.detected?.heightMilli;}
@@ -48,15 +51,20 @@ export async function renderExpressPrint(source,file,request) {
    const tier=expressDocumentTier(measured.strongColourBps,request.express.lightMaxBps);
    const printColour=request.express.productType==='plans'?request.express.ink:
     request.express.colourMode==='all_bw'||request.express.colourMode==='choose'&&!colourPages.has(page)||tier==='bw'?'bw':'colour';
-   const blue=printColour==='blue',gray=printColour==='bw',pixels=gray?Buffer.alloc(raster.width*raster.height):Buffer.from(raster.pixels);
-   if(gray||blue)for(let i=0;i<raster.width*raster.height;i++){
+   const blue=printColour==='blue',gray=printColour==='bw',count=raster.width*raster.height;
+   const pixels=gray||blue?Buffer.alloc(count):Buffer.from(raster.pixels),alpha=blue?Buffer.alloc(count):null;
+   if(gray||blue)for(let i=0;i<count;i++){
     const value=Math.round((299*raster.pixels[i*3]+587*raster.pixels[i*3+1]+114*raster.pixels[i*3+2])/1000);
-    if(gray)pixels[i]=value;
-    else {const paper=request.express.paperColour==='blue'?[130,181,230]:[255,255,255],ink=[20,65,135];for(let c=0;c<3;c++)pixels[i*3+c]=Math.round(ink[c]+(paper[c]-ink[c])*value/255);}
+    if(gray)pixels[i]=value;else alpha[i]=255-value;
    }
-   const compressed=deflateSync(pixels),imageId=add(Buffer.concat([Buffer.from(`<< /Type /XObject /Subtype /Image /Width ${raster.width} /Height ${raster.height} /ColorSpace /${gray?'DeviceGray':'DeviceRGB'} /BitsPerComponent 8 /Filter /FlateDecode /Length ${compressed.length} >>\nstream\n`),compressed,Buffer.from('\nendstream')]));
+   let maskId=null;
+   if(blue){const mask=deflateSync(alpha);maskId=add(Buffer.concat([Buffer.from(`<< /Type /XObject /Subtype /Image /Width ${raster.width} /Height ${raster.height} /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode /Length ${mask.length} >>\nstream\n`),mask,Buffer.from('\nendstream')]));}
+   const compressed=deflateSync(pixels),space=blue?'[/Indexed /DeviceRGB 0 <144187>]':`/${gray?'DeviceGray':'DeviceRGB'}`;
+   const imageId=add(Buffer.concat([Buffer.from(`<< /Type /XObject /Subtype /Image /Width ${raster.width} /Height ${raster.height} /ColorSpace ${space} /BitsPerComponent 8 ${maskId?`/SMask ${maskId} 0 R `:''}/Filter /FlateDecode /Length ${compressed.length} >>\nstream\n`),compressed,Buffer.from('\nendstream')]));
    const {sourceW,sourceH,targetW,targetH,scale,offsetX,offsetY}=geometry;
-   const commands=`q\n${request.express.paperColour==='blue'?'0.51 0.71 0.90 rg':'1 1 1 rg'} 0 0 ${pt(targetW)} ${pt(targetH)} re f\n0 0 ${pt(targetW)} ${pt(targetH)} re W n\n${pt(sourceW*scale)} 0 0 ${pt(sourceH*scale)} ${pt(offsetX)} ${pt(targetH-offsetY-sourceH*scale)} cm\n/Im Do\nQ\n`;
+   // Physical blue paper is simulated by the viewer, never painted as background ink.
+   const background=request.express.paperColour==='blue'?'':`1 1 1 rg 0 0 ${pt(targetW)} ${pt(targetH)} re f\n`;
+   const commands=`q\n${background}0 0 ${pt(targetW)} ${pt(targetH)} re W n\n${pt(sourceW*scale)} 0 0 ${pt(sourceH*scale)} ${pt(offsetX)} ${pt(targetH-offsetY-sourceH*scale)} cm\n/Im Do\nQ\n`;
    const contentId=add(`<< /Length ${Buffer.byteLength(commands)} >>\nstream\n${commands}endstream`);
    pageIds.push(add(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pt(targetW)} ${pt(targetH)}] /Resources << /XObject << /Im ${imageId} 0 R >> >> /Contents ${contentId} 0 R >>`));
    pages.push({page,widthMilli:widthMilli||null,heightMilli:heightMilli||null,...measured,printColour,outputPage:pages.length+1});

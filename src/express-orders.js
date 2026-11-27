@@ -18,6 +18,7 @@ import { operatingHours } from './operating-hours.js';
 import { projectExpressNightFinish, projectShopFinish, projectListingGroup } from './order-match.js';
 import { testerProgress } from './founding-testers.js';
 import { privilegedAdminMemberships, queueOrderInvalidate } from './notifications.js';
+import { PICKUP_PIN_VERSION, publicPickupPin } from './pickup-pin.js';
 import { EXPRESS_ACCEPT_FIRST_MS, EXPRESS_SHOPS_PER_ROUND } from './express-checkout-rules.js';
 import { expressShopLogo, expressShopServices, expressPaymentMethods, TOP_SHOP_MIN_AVERAGE } from './express-shop-facts.js';
 
@@ -128,7 +129,9 @@ export function publicExpress(order,user) {
   const result = {status:expressStatus(order),paymentTiming:e.paymentTiming||'checkout',originalSupplierId:e.originalSupplierId,currentSupplierId:order.supplierId,declineCount:e.declines,
     acceptBy:order.shopAcceptance?.status==='pending'?order.shopAcceptance.deadlineAt:null,
     events:structuredClone(e.events||[]),refundRequired:e.refundRequired===true,repickRequired:e.repickRequired===true,payBy:e.payBy||null,
-    ...(own&&order.fulfillmentMode==='pickup'&&['ready','picked_up'].includes(expressStatus(order))?{pickupCode:e.pickupCode}:{}),
+    ...(own&&order.fulfillmentMode==='pickup'&&e.pickupCode&&['ready','picked_up'].includes(expressStatus(order))?{pickupCode:e.pickupCode}:{}),
+    ...(e.pickedUpAt&&(own||staff||shop)?{pickedUpAt:e.pickedUpAt}:{}),
+    ...publicPickupPin(order,user,{own,shop,staff}),
     ...(own||staff||shop?{printSettings:structuredClone(e.printSettings||[])}:{})};
   if(own&&!staff&&!shop) {
     if(order.groupOrder)result.printSettings=result.printSettings.filter(p=>p.groupMemberId===user.id);
@@ -227,11 +230,12 @@ export function declineExpress(store,order,{at,id,kind='declined',actorId=null,r
     expressEvent(store,order,'cancelled',{at,id,actorId,reason:kind==='timed_out'?'No response within five minutes.':reason});
   }
 }
-export function createExpressSnapshot(cart,lines,at) {
+export function createExpressSnapshot(cart,lines,at,{pickupPin=false}={}) {
  const routing=lines[0].expressPrint?.routing;
  return {version:1,originalSupplierId:lines[0].supplierId,location:structuredClone(cart.expressLocation),declines:0,declinedSupplierIds:[],
   ...(routing?{acceptFlow:2,routing:structuredClone(routing)}:{}),
-  pickupCode:String(randomInt(1000000)).padStart(6,'0'),events:[{state:'sending',at,supplierId:lines[0].supplierId}],
+  // Version 2 has no counter code until the client taps "I'm on my way" (src/pickup-pin.js).
+  ...(pickupPin?{handoverVersion:PICKUP_PIN_VERSION}:{pickupCode:String(randomInt(1000000)).padStart(6,'0')}),events:[{state:'sending',at,supplierId:lines[0].supplierId}],
   printSettings:lines.map(line=>({...((line.expressPrint.groupMemberId)?{groupMemberId:line.expressPrint.groupMemberId,groupMemberName:line.expressPrint.groupMemberName}:{}),...(line.expressPrint.printVersion===2?structuredClone(line.expressPrint):{}),fileId:line.expressPrint.outputFileId||line.artworkFileId,...(line.expressPrint.outputFileId?{sourceFileId:line.artworkFileId,outputAlreadyApplied:true,productionPrint:{layout:'actual_size_centered',orientation:'auto',colour:'as_prepared',pageRange:null}}:{}),pages:structuredClone(line.documentPages),copies:line.quantity,
     colour:line.expressPrint.colour,paper:line.expressPrint.paper,paperStock:line.expressPrint.paperStock,sides:line.expressPrint.sides,
     ...(line.expressPrint.productType?{productType:line.expressPrint.productType}:{}),

@@ -4,6 +4,7 @@ import { verificationSettings, validateVerificationSettings, prepareVerification
 import {shopMoneySettings,validateShopMoneySettings} from './shop-money-settings.js';
 import { publicShopFileAccesses } from './shop-file-access.js';
 import { expressRates, validateExpressRates, publicExpress, expressClientProjection } from './express-orders.js';
+import { orderTracker } from './order-tracker.js';
 import { validateCashSettings, cashAmounts } from './cash-policy.js';
 import { staffOrderProjection } from './shop-staff-order.js';
 import { orderRemovalBlock } from './order-removal.js';
@@ -320,6 +321,12 @@ export function defaultOperationalSettings() {
      * Off until Super Admin turns it on. Never an official GRIDGO receipt.
      */
     shopReceiptScanRequired: false,
+    /**
+     * Express delivery: whether the rider's pickup checks wait until the shop
+     * has entered the rider's 6-digit PIN. Off until the rider and supplier
+     * releases that show the PIN step reach coverage.
+     */
+    expressRiderPinRequired: false,
     /** Enable only after every API/mail consumer supports per-app early access. */
     shopEarlyAccessEnabled: false,
     /** Days a published quote's options stay acceptable (docs/QUOTE_REQUESTS_API.md). */
@@ -427,6 +434,9 @@ export function validateOperationalSettings(settings) {
   }
   if (settings?.coverSpineRequired !== undefined && typeof settings.coverSpineRequired !== "boolean") {
     fail(400, "invalid_cover_spine_required", "coverSpineRequired must be a JSON boolean.", { field: "coverSpineRequired" });
+  }
+  if (settings?.expressRiderPinRequired !== undefined && typeof settings.expressRiderPinRequired !== "boolean") {
+    fail(400, "invalid_express_rider_pin_required", "expressRiderPinRequired must be a JSON boolean.", { field: "expressRiderPinRequired" });
   }
   if (settings?.shopReceiptScanRequired !== undefined && typeof settings.shopReceiptScanRequired !== "boolean") {
     fail(400, "invalid_shop_receipt_scan_required", "shopReceiptScanRequired must be a JSON boolean.", { field: "shopReceiptScanRequired" });
@@ -1419,6 +1429,11 @@ export function publicOrderFor(order, user, store = null) {
   publicRecord.rated = Boolean(
     store && (store.shopReviews || []).some((review) => review.orderId === order.id),
   );
+  // Live tracker (docs/ORDER_TRACKING_API.md). The raw progress count stays
+  // behind it, so riders and other readers never see who printed what.
+  delete publicRecord.productionCount;
+  const tracker = orderTracker(store, order, user);
+  if (tracker) publicRecord.tracker = tracker;
   // Every client order screen reads this as an array. Seeded queue jobs and
   // older rows never stored one; omitting it crashes the order page.
   if (!Array.isArray(publicRecord.timeline)) publicRecord.timeline = [];

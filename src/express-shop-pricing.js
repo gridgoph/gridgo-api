@@ -2,8 +2,15 @@ import {expressCatalogOptions,expressFail} from './express-orders.js';
 import {selectedCatalogPrice,publicCatalogItem} from './supplier-catalog.js';
 import {priceExpressPages,resolveExpressPrintRequest,validateExpressPageSelection} from './express-print.js';
 
+// Internal capability: JSON requests cannot force a successful preparation to fall back.
+export const EXPRESS_ACCEPTED_ORIGINAL = Symbol('expressAcceptedOriginal');
 export const isExpressPrintV2=input=>input.printVersion===2||input.colourMode!=null||input.orientation!=null||input.planType!=null||input.colour==null;
 export function expressPreviewState(store,file,input,productType) {
+ if(input[EXPRESS_ACCEPTED_ORIGINAL]===true) {
+  const {request,key}=resolveExpressPrintRequest(store.settings,file,{...input,previewKey:undefined},productType);
+  validateExpressPageSelection(file,request.express);
+  return {request,key,analysis:{status:'failed',error:'accepted_original_fallback'},output:null,ready:false};
+ }
  const {request,key}=resolveExpressPrintRequest(store.settings,file,input,productType);
  validateExpressPageSelection(file,request.express);
  const analysis=file.colourAnalyses?.find(row=>row.key===key) || (file.colourAnalyses?.length>=32?{status:'failed',error:'colour_analysis_limit'}:null);
@@ -54,7 +61,7 @@ export function expressV2Selection(store,item,input,productType,file,at) {
   renderStatus:ready?'ready':'fallback',outputFileId:ready?output.fileId:null,
   ...(pagePricing?{pagePricing}:{}),
   ...(ready?{}:{fallback:{reason:analysis.error||'colour_render_failed',colour:fallbackColour,originalFile:true,
-   message:'Print preparation failed. The original file uses one colour mode; review it before sending.'}})}};
+   message:analysis.error==='accepted_original_fallback'?'This request keeps the accepted original-file colour mode.':'Print preparation failed. The original file uses one colour mode; review it before sending.'}})}};
 }
 export function publicExpressPrint(print,role='client') {
  if(!print)return null;

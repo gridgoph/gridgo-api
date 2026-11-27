@@ -188,3 +188,22 @@ test('a preview key freezes measurement thresholds while binding all requested p
  await assert.rejects(call('POST','/express/drafts',{supplierId:'shop_a',location,fulfillmentMode:'pickup',files:[input]}),e=>e.code==='express_preview_pending');
  await assert.rejects(call('POST','/express/drafts',{supplierId:'shop_a',location,fulfillmentMode:'pickup',files:[{...input,previewKey:analysis.key,orientation:'landscape'}]}),e=>e.code==='express_preview_required');
 });
+
+test('automatic reroute preserves an accepted whole-file fallback even after preparation succeeds',async()=>{
+ const {store,file,call}=setup();const variant=ensureExpressPreview(store,file,input,'documents',AT);Object.assign(variant.analysis,{status:'failed',error:'colour_render_failed'});
+ store.catalogItems.find(item=>item.supplierId==='shop_b').expressPricing.a4={bw:100,light:300,full:500};
+ const draft=await call('POST','/express/drafts',{acceptFirst:true,supplierId:'shop_a',location,fulfillmentMode:'pickup',files:[input]});
+ const placed=await call('POST',`/me/carts/${draft.body.cartId}/checkout`,{looksRight:true,expressConfirmation:draft.body.confirmation});
+ const order=store.orders.find(o=>o.id===placed.body.order.id);assert.equal(order.supplierSubtotalMinor,3600);
+ complete(store,file);
+ const {routeExpressOrders}=await import('../src/express-routes.js');let n=0;
+ await routeExpressOrders({req:{method:'POST'},url:new URL(`http://test/orders/${order.id}/express/decline`),store,user:{id:'shop_a',role:'supplier'},readBody:async()=>({reason:'Capacity unavailable'}),now:()=>AT,id:prefix=>`${prefix}_fallback_move_${++n}`});
+ const next=store.orders.find(o=>o.id===order.expressOrder.reroute.nextOrderId);assert.equal(next.supplierSubtotalMinor,3000);
+ const print=next.expressOrder.printSettings[0];assert.equal(print.renderStatus,'fallback');assert.equal(print.fileId,'file_art');assert.equal(print.outputFileId,null);assert.equal(print.pagePricing,undefined);assert.equal(print.fallback.colour,'colour');
+});
+
+test('JSON input cannot force the internal original-fallback policy on a ready print',async()=>{
+ const {store,file,call}=setup();complete(store,file);
+ const draft=await call('POST','/express/drafts',{supplierId:'shop_a',location,fulfillmentMode:'pickup',files:[{...input,expressAcceptedOriginal:true,originalFallback:true}]});
+ const line=store.cartLines.find(l=>l.cartId===draft.body.cartId);assert.equal(line.expressPrint.renderStatus,'ready');assert.equal(line.expressPrint.outputFileId,'printed');
+});

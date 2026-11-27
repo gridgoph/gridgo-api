@@ -25,6 +25,8 @@ import { expressRates, expressEvent, expressStatus, assertExpressPaymentSubmissi
 import { expressCheckoutSettings, nextExpressCheckoutSettings } from './express-checkout-rules.js';
 import { acceptFirstWorkDue, sweepAcceptFirst } from './express-accept-first.js';
 import { routeExpressOrders } from './express-routes.js';
+import { routeOrderTracking, ratingAllowed } from './order-tracker.js';
+import { riderPinBlocksPickup } from './pickup-pin.js';
 import { reconcileDispatchOffers, declineDispatchOffer, requireDispatchOffer, offerTimeoutSeconds } from './dispatch-offers.js';
 import { routeCash, collectCash, cashRequest, settleCashRedelivery } from './cash-routes.js';
 import { hydrateCashWallets, reserveCash } from './cash-ledger.js';
@@ -1021,6 +1023,7 @@ function publicOperationalSettings(settings, store = null, user = null) {
     physicalInvoiceRequestsEnabled: rest.physicalInvoiceRequestsEnabled === true,
     coverSpineRequired: rest.coverSpineRequired === true,
     shopReceiptScanRequired: rest.shopReceiptScanRequired === true,
+    expressRiderPinRequired: rest.expressRiderPinRequired === true,
     quoteValidityDays: quoteValidityDays(rest),
     approvalProofRequired: rest.approvalProofRequired === true,
     productionNudge: rest.productionNudge ?? defaultProductionNudge(),
@@ -3709,6 +3712,11 @@ async function handleAuditedRequest(req, res) {
       }
       return send(res,groupResponse.status,groupResponse.body);
     }
+    const trackingResponse=await routeOrderTracking({req,url,store,user,readBody,now,audit});
+    if(trackingResponse) {
+      if(trackingResponse.mutated) await save(store);
+      return send(res,trackingResponse.status,trackingResponse.body);
+    }
     const expressResponse=await routeExpressOrders({req,url,store,user,readBody,id,now,audit});
     if(expressResponse) {
       if(expressResponse.mutated) await save(store);
@@ -4674,6 +4682,8 @@ async function handleAuditedRequest(req, res) {
         shopEarlyAccessEnabled: Object.hasOwn(body, "shopEarlyAccessEnabled") ? body.shopEarlyAccessEnabled : store.settings.shopEarlyAccessEnabled === true,
         // Applies at the next Ready-for-rider-pickup transition only; orders already ready are unaffected.
         shopReceiptScanRequired: Object.hasOwn(body, "shopReceiptScanRequired") ? body.shopReceiptScanRequired : store.settings.shopReceiptScanRequired === true,
+        // Gates the next rider pickup check only; a PIN already confirmed stays confirmed.
+        expressRiderPinRequired: Object.hasOwn(body, "expressRiderPinRequired") ? body.expressRiderPinRequired : store.settings.expressRiderPinRequired === true,
         // New publications only: a published quote keeps the validity it was given.
         quoteValidityDays: Object.hasOwn(body, "quoteValidityDays") ? body.quoteValidityDays : quoteValidityDays(store.settings),
         issueWindowHours: body.issueWindowHours ?? store.settings.issueWindowHours,
@@ -5949,7 +5959,9 @@ async function handleAuditedRequest(req, res) {
      * would count the same thing twice.
      *
      * Asked once the order is finished and the issue window has closed, so a
-     * rating is never a bargaining chip in an open dispute.
+     * rating is never a bargaining chip in an open dispute. Express is the
+     * exception: its rating pops up right after pickup or delivery
+     * (docs/ORDER_TRACKING_API.md#rating-after-pickup).
      */
     if (req.method === "POST" && /^\/orders\/[^/]+\/review$/.test(pathname)) {
       const orderId = pathname.split("/")[2];
@@ -5961,7 +5973,7 @@ async function handleAuditedRequest(req, res) {
           message: "Only the client who placed this order can rate it.",
         });
       }
-      if (order.state !== "completed" && order.state !== "payout_released") {
+      if (!ratingAllowed(order)) {
         return send(res, 409, {
           error: "order_not_complete",
           message: "You can rate this once the order is finished and the issue window has closed.",
@@ -7783,6 +7795,10 @@ async function handleAuditedRequest(req, res) {
       const openEscalation = (store.escalations || []).find(
         (item) => item.orderId === order.id && item.status === "open",
       );
+      if (riderPinBlocksPickup(store, order)) {
+        return send(res, 409, { error: "express_rider_pin_required",
+          message: "Tap I'm on my way, then give the shop your 6-digit PIN before the pickup checks." });
+      }
       if (openEscalation) {
         return send(res, 409, {
           error: "pickup_escalation_open",

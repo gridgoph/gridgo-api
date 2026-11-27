@@ -156,6 +156,47 @@ const COLLECT_COPY = {
   },
 };
 
+/**
+ * Express pickup is collected at the shop's own counter, not GRIDGO Office.
+ * Version 2 orders show their PIN only after "I'm on my way".
+ */
+const EXPRESS_PICKUP_COPY = {
+  production: {
+    type: "order_in_production",
+    title: "Printing has started",
+    body: "The shop is printing your order now. We'll tell you when it's ready. You don't need to keep the app open.",
+  },
+  supplier_self_qc: {
+    type: "order_shop_qc",
+    title: "Almost ready",
+    body: "Printing is done. The shop is checking your order.",
+  },
+  ready_for_dispatch: {
+    type: "order_ready_for_pickup",
+    title: "Your print is ready!",
+    body(order) {
+      return order.expressOrder?.handoverVersion === 2
+        ? "Tap I'm on my way when you leave. Your 6-digit pickup PIN shows then."
+        : "Show your pickup code at the shop counter.";
+    },
+  },
+  delivered: {
+    type: "order_delivered",
+    title: "Picked up",
+    body: "You picked up your print. Rate the shop in the app.",
+  },
+  issue_window_open: {
+    type: "order_delivered",
+    title: "Picked up",
+    body: "You picked up your print. Rate the shop in the app. Something wrong? Report it in the app today.",
+  },
+  completed: {
+    type: "order_completed",
+    title: "Order complete",
+    body: "Thanks for printing with GRIDGO Express.",
+  },
+};
+
 function collectionPending(order) {
   return (order?.payments?.final_online ?? order?.payments?.balance)?.status === "pending_confirmation";
 }
@@ -191,8 +232,9 @@ export function clientNotificationDraft(order) {
   if (order?.groupOrder) return null;
   if (!order?.clientId || !order.id || !order.state) return null;
   const collecting = order.fulfillmentMode === "pickup";
+  const expressPickup = collecting && order.orderType === "express";
   const copy = resolveCopy(
-    (collecting && COLLECT_COPY[order.state]) || COPY[order.state],
+    (expressPickup && EXPRESS_PICKUP_COPY[order.state]) || (collecting && COLLECT_COPY[order.state]) || COPY[order.state],
     order,
   );
   if (!copy) return null;
@@ -200,11 +242,11 @@ export function clientNotificationDraft(order) {
     copy.title = 'Your order is on hold';
     copy.body = `Operations paused your order for a prohibited item. ${order.fileCheck.reason} Contact GRIDGO support if you need help.`;
   }
-  if (riderPackingFlow(order) && order.state === 'ready_for_dispatch') {
+  if (!expressPickup && riderPackingFlow(order) && order.state === 'ready_for_dispatch') {
     copy.title = 'Ready for rider pickup';
     copy.body = 'The rider will check the unpacked products. The shop will then pack them in front of the rider.';
   }
-  if (riderPackingFlow(order) && order.state === 'supplier_self_qc') {
+  if (!expressPickup && riderPackingFlow(order) && order.state === 'supplier_self_qc') {
     copy.title = 'GRIDGO is reviewing the finished products';
     copy.body = 'Printing is finished. GRIDGO is checking the product photos before rider pickup.';
   }
@@ -411,7 +453,9 @@ function orderIsRated(store, order) {
  */
 export function rateReminderDraft(store, order) {
   if (!order?.clientId || !order.id) return null;
-  if (order.state !== "completed" && order.state !== "payout_released") return null;
+  // Express asks right after pickup or delivery (docs/ORDER_TRACKING_API.md).
+  const expressDone = order.orderType === "express" && order.state === "issue_window_open";
+  if (order.state !== "completed" && order.state !== "payout_released" && !expressDone) return null;
   if (orderIsRated(store, order)) return null;
   return {
     userId: order.clientId,

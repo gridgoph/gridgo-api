@@ -5,12 +5,17 @@ const FIELDS = new Set(['id', 'title', 'orderType', 'groupOrder', 'expressOrder'
   'artworkFileIds', 'mockupFileIds', 'artworkLinks', 'artworkAttachments', 'productionProgress', 'packingProgress',
   'shopAcceptance', 'shopHandover', 'pickupChecklist', 'pickupChat', 'clientShopChat', 'fileCheck', 'specialInstructions',
   'specialInstructionsAcknowledgement', 'specialInstructionLines', 'artworkPreviews', 'scheduling', 'refundHold', 'shopRecovery', 'workHeld', 'holdReasons',
-  'transitionReadiness', 'handoverFlow', 'pickupReminder', 'forcedByGridgo', 'material', 'size', 'finish', 'artworkName', 'quantity', 'spec', 'specs', 'categoryCode', 'subcategoryCode', 'productName', 'productionFinishedAt']);
+  'transitionReadiness', 'handoverFlow', 'pickupReminder', 'forcedByGridgo', 'material', 'size', 'finish', 'artworkName', 'quantity', 'spec', 'specs', 'categoryCode', 'subcategoryCode', 'productName', 'productionFinishedAt', 'tracker']);
 const pick = (record, fields) => Object.fromEntries(fields.filter(field => Object.hasOwn(record || {}, field)).map(field => [field, record[field]]));
 export function staffExpressProjection(express) {
   if (!express || typeof express !== 'object') return null;
   return {
-    ...pick(express, ['status', 'originalSupplierId', 'currentSupplierId', 'declineCount', 'acceptBy']),
+    ...pick(express, ['status', 'originalSupplierId', 'currentSupplierId', 'declineCount', 'acceptBy', 'pickedUpAt', 'pickupHandover', 'onMyWay',
+      'pickupPinIssued', 'pickupPinLocked', 'pickupPinRetryAfter', 'riderPin']),
+    // Counter staff take the client's cash at hand-over, so they see that one
+    // amount (never shop earnings) and what was recorded.
+    ...(express.counterCollection ? { counterCollection: { amountMinor: express.counterCollection.amountMinor } } : {}),
+    ...(express.handedOver ? { handedOver: { ...express.handedOver } } : {}),
     printSettings: (express.printSettings || []).map(print => ({
       ...pick(print, ['fileId', 'groupMemberId', 'groupMemberName', 'copies', 'colour', 'paper', 'paperStock', 'sides', 'layout', 'note', 'acceptedWarnings', 'orientation', 'colourMode', 'colourPages', 'planType', 'ink', 'paperColour', 'renderStatus', 'outputAlreadyApplied', 'productionPrint']),
       ...(print.fallback?{fallback:pick(print.fallback,['reason','colour','originalFile','message'])}:{}),

@@ -7,11 +7,11 @@ import { fixture, AT } from './fixtures/reschedule.js';
 import { apiForTest } from './fixtures/reschedule-http.js';
 import { startExpressAcceptance } from '../src/express-orders.js';
 const DATABASE_URL=process.env.DATABASE_URL;
-async function setup(t,mode='pickup') {
+async function setup(t,mode='pickup',{pin=false}={}) {
  const db=createDatabase({DATABASE_URL});t.after(()=>db.close());
  await resetDatabase(db,'TRUNCATE users, platform_settings, taxonomy_categories, accepted_file_formats RESTART IDENTITY CASCADE');
  const store=fixture(),order=store.orders[0];
- Object.assign(order,{orderType:'express',expressOrder:{version:1,originalSupplierId:'supplier',location:order.dropoff,declines:0,pickupCode:'012345',events:[],printSettings:[{fileId:'art',pages:{printed:4},copies:2}]},
+ Object.assign(order,{orderType:'express',expressOrder:{version:1,originalSupplierId:'supplier',location:order.dropoff,declines:0,...(pin?{handoverVersion:2}:{pickupCode:'012345'}),events:[],printSettings:[{fileId:'art',pages:{printed:4},copies:2}]},
   shopHandoverVersion:2,fileCheck:{status:'passed'},state:'supplier_assigned',fulfillmentMode:mode});
  if(mode==='pickup') {
   order.deliveryFeeMinor=0;order.totalMinor=order.onlineDueMinor=11000;order.payments.initial.amountMinor=11000;
@@ -225,4 +225,40 @@ test('reopened Express production projects photo-free readiness to Owners and St
   assert.equal(order.transitionReadiness.ready_for_dispatch.receiptScan.required,false);
   assert.equal(order.shopHandover.finished,undefined);
  }
+});
+
+test('on my way, quick messages, progress and the PIN hand-over run through the HTTP API and commit',{skip:!DATABASE_URL},async t=>{
+ const {db,api}=await setup(t,'pickup',{pin:true});
+ assert.equal((await api('other','POST','/orders/order/express/accept',{}, {headers})).status,200);
+ assert.equal((await api('other','POST','/orders/order/transition',{state:'production'},{headers})).status,200);
+ const progressed=await api('other','POST','/orders/order/production-progress',{done:2,total:8},{headers});
+ assert.equal(progressed.status,200,JSON.stringify(progressed.body));
+ let mine=(await api('client','GET','/orders/order')).body.order;
+ assert.deepEqual([mine.tracker.status,mine.tracker.steps[2].progress.done,mine.tracker.steps[2].progress.total],['printing',2,8]);
+ assert.deepEqual([mine.tracker.steps[1].byFirstName,mine.tracker.steps[2].byFirstName],['other','other']);
+ assert.equal(mine.productionCount,undefined);
+ assert.equal((await api('other','POST','/orders/order/transition',{state:'ready_for_dispatch'},{headers})).status,200);
+ mine=(await api('client','GET','/orders/order')).body.order;
+ assert.deepEqual([mine.tracker.status,mine.tracker.pickup.onMyWayAvailable,mine.expressOrder.pickupPinIssued,mine.expressOrder.pickupPin],['ready',true,false,undefined]);
+ assert.equal((await api('other','POST','/orders/order/express/pickup',{code:'123456'},{headers})).body.error,'express_pickup_pin_not_issued');
+ const going=await api('client','POST','/orders/order/express/on-my-way',{});
+ assert.equal(going.status,200,JSON.stringify(going.body));
+ const pin=going.body.expressOrder.pickupPin;assert.match(pin,/^\d{6}$/);
+ const job=(await api('other','GET','/orders/order',undefined,{headers})).body.order;
+ assert.equal(job.expressOrder.onMyWay.walkMinutes>0,true);assert.equal(JSON.stringify(job).includes(pin),false);
+ const quick=await api('client','POST','/orders/order/client-shop-chat/messages',{quickMessage:{code:'im_here'}});
+ assert.equal(quick.status,201,JSON.stringify(quick.body));assert.equal(quick.body.message.body,"I'm here · Ania na ko");
+ assert.equal((await api('client','POST','/orders/order/client-shop-chat/messages',{quickMessage:{code:'there_in_10'}})).status,409);
+ const wrong=pin==='000000'?'111111':'000000';
+ const refused=await api('other','POST','/orders/order/express/pickup',{code:wrong},{headers});
+ assert.equal(refused.status,409);
+ assert.equal((await loadStore(db)).orders[0].expressOrder.pickupPin.totalFailedAttempts,1,'a wrong try is committed');
+ const handed=await api('other','POST','/orders/order/express/pickup',{code:pin},{headers});
+ assert.equal(handed.status,200,JSON.stringify(handed.body));
+ const after=(await loadStore(db)).orders[0];
+ assert.equal(after.state,'issue_window_open');assert.equal(after.expressOrder.pickupHandover.method,'pickup_pin');
+ mine=(await api('client','GET','/orders/order')).body.order;
+ assert.deepEqual([mine.tracker.status,mine.tracker.ratingDue,mine.expressOrder.pickupPin],['picked_up',true,undefined]);
+ const rated=await api('client','POST','/orders/order/review',{qualityStars:5,speedStars:5,valueStars:4});
+ assert.ok([200,201].includes(rated.status),JSON.stringify(rated.body));
 });
