@@ -710,6 +710,10 @@ unchanged for installed older apps.
 
 ## Reviews read back
 
+[Shop ratings](SHOP_RATINGS_API.md) defines structured tags on the existing review
+write, filtered comment display and the authenticated client
+`GET /shops/:supplierId/ratings` summary.
+
 `POST /orders/:id/review` is written up under checkout. Two readers turn those rows into something a person can use (`src/shop-reviews.js`).
 
 ### `GET /me/reviews` (supplier)
