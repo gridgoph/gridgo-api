@@ -179,15 +179,9 @@ not infer semantic consent from natural language. Stale edits return
 `409 express_extras_stale`; missing evidence returns
 `409 express_extra_agreement_required`; late or accepted edits return
 `409 express_extras_not_pending`. Home-printer total caps remain enforced.
-If total rounding would leave a locked promotion larger than the remaining fee,
-`409 express_extra_discount_requote_required` requires a fresh quote instead of
-changing the promotion funding. If
-rounding would make an already reserved fee-funded discount exceed the new fee,
-`409 express_extra_discount_requote_required` preserves its funding and requires
-a fresh client quote. If
-rounding would leave a locked promotion without its original funding,
-`409 express_extra_discount_requote_required` asks for a fresh request instead of
-creating negative payment allocations.
+If rounding would make an already reserved fee-funded discount exceed the new
+fee, `409 express_extra_discount_requote_required` preserves its funding and
+requires a fresh client quote instead of creating negative payment allocations.
 
 The edit returns `shopExtras` with the proposed printing/extras/total, version
 and `{label,quantity,unitPriceMinor,amountMinor,addedBy:"shop",marker:"added by shop"}`
