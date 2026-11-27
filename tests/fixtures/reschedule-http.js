@@ -23,6 +23,13 @@ async function freePort() {
   await new Promise((resolve) => server.close(resolve));
   return port;
 }
+// Freeze domain dates in the child without changing JWT expiry or network timers.
+export function domainClockEnv(at) {
+  const clock = `const NativeDate = Date; globalThis.Date = class extends NativeDate {
+    constructor(...args) { super(...(args.length ? args : [${Date.parse(at)}])); }
+  };`;
+  return { NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --import=data:text/javascript,${encodeURIComponent(clock)}` };
+}
 export async function apiForTest(t, env = {}, { storageHandler, onOutput } = {}) {
   const storage = http.createServer(storageHandler || ((req, res) => {
     if (req.method === 'HEAD') { res.writeHead(200, { 'Content-Length': '100', 'Content-Type': 'image/png', ETag: 'test' }); res.end(); }
