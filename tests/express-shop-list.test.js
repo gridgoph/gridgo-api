@@ -121,7 +121,7 @@ test('cards carry logo, services, rating, top shop and payment methods; home pri
   assert.equal(card('shop_c').logo,null);
   assert.deepEqual(card('shop_b').services,['stapling','binding','rush']);
   assert.deepEqual(card('shop_c').services,['lamination']);
-  assert.deepEqual(card('shop_b').rating,{average:4.8,count:5});assert.equal(card('shop_b').topShop,true);
+  assert.deepEqual(card('shop_b').rating,{average:4.8,count:5});assert.equal(card('shop_b').topShop,false);assert.equal(card('shop_b').topShopBadge,null);
   assert.equal(card('shop_c').topShop,false);
   assert.equal(typeof card('shop_b').jobsAhead,'number');assert.ok(card('shop_b').readyAt);
   assert.equal(card('shop_b').isOpenNow,true);assert.equal(card('shop_b').verified,true);
@@ -177,4 +177,19 @@ test('histogram buckets are inclusive, contiguous and at most ten', ()=>{
   for(let i=1;i<price.total.buckets.length;i++)assert.equal(price.total.buckets[i].fromMinor,price.total.buckets[i-1].toMinor+1);
   assert.deepEqual(price.total.buckets.map(b=>b.count),[3,1,0,0,0,0,0,0,0,1]);
   assert.equal(expressFilterData([{selectable:false,price:null}]).price,null);
+});
+
+test('client cards show only the dated monthly badge and boost it only in Nearest',async()=>{
+  const {store,call}=setup();
+  store.shopLeaderboardMonths=[{month:'2026-08',validFrom:'2026-08-31T16:00:00.000Z',validUntil:'2026-09-30T16:00:00.000Z',
+    winners:[{supplierId:'shop_b',score:97,rank:1,parts:{stars:{value:5}}}]}];
+  const nearest=await call('POST','/express/shops',{...pickup,sort:'nearest'});
+  assert.equal(nearest.body.shops[0].supplierId,'shop_b');
+  const row=nearest.body.shops[0];assert.equal(row.topShop,true);
+  assert.deepEqual(row.topShopBadge,{type:'top_shop',month:'2026-08',validFrom:'2026-08-31T16:00:00.000Z',validUntil:'2026-09-30T16:00:00.000Z'});
+  for(const key of ['score','rank','parts','acceptance','declines','gap'])assert.equal(Object.hasOwn(row,key),false,key);
+  const price=await call('POST','/express/shops',{...pickup,sort:'cheapest'});
+  assert.equal(price.body.shops[0].supplierId,'shop_a');
+  const all=await call('POST','/express/shops',{...pickup,sort:'all_davao'});
+  assert.equal(all.body.shops[0].supplierId,'shop_a');
 });

@@ -1,4 +1,5 @@
 import { publicShopExtras } from './express-chat-extras.js';
+import { topShopBadge, nearestTopShopOrder } from './shop-leaderboard-months.js';
 import { publicExpressPrint } from './express-shop-pricing.js';
 import { homePrinterStatus, recordHomeOffer, snapshotHomePrinter, homeDistance } from './home-printers.js';
 import { groupExpressMoved, cancelGroupExpressOrder } from './group-express-recovery.js';
@@ -21,7 +22,7 @@ import { testerProgress } from './founding-testers.js';
 import { privilegedAdminMemberships, queueOrderInvalidate } from './notifications.js';
 import { PICKUP_PIN_VERSION, publicPickupPin } from './pickup-pin.js';
 import { EXPRESS_ACCEPT_FIRST_MS, EXPRESS_SHOPS_PER_ROUND } from './express-checkout-rules.js';
-import { expressShopLogo, expressShopServices, expressPaymentMethods, TOP_SHOP_MIN_AVERAGE } from './express-shop-facts.js';
+import { expressShopLogo, expressShopServices, expressPaymentMethods } from './express-shop-facts.js';
 
 export const EXPRESS_ACCEPT_MS = 5 * 60_000;
 /** Accept-first refusals are routed by express-accept-first.js, registered at load
@@ -107,11 +108,13 @@ export function expressShopList(source,user,{location,sort='nearest',fulfillment
       paymentMethods:expressPaymentMethods(store,user,{home,verified,fulfillmentMode}),
       readyAt:availability?projection.promiseBy:null,deliveryAvailable:availability?.deliveryAvailable||false,nightWindow:availability?.nightWindow||null,busy:jobsAhead>=3,isNew:Number.isFinite(age)&&age>=0&&age<7*86400000});
   }
-  for(const row of rows)row.topShop=(row.rating?.average||0)>=TOP_SHOP_MIN_AVERAGE;
+  for(const row of rows){row.topShopBadge=topShopBadge(store,row.supplierId,at);row.topShop=Boolean(row.topShopBadge);}
   rows.sort((a,b)=>(sort==='top_rated'?(b.rating?.average||0)-(a.rating?.average||0):sort==='fewest_jobs'?a.jobsAhead-b.jobsAhead:0)
     ||distanceMetersBetween(location,store.supplierProfiles.find(p=>p.userId===a.supplierId).shop)-distanceMetersBetween(location,store.supplierProfiles.find(p=>p.userId===b.supplierId).shop)||a.supplierId.localeCompare(b.supplierId));
   if(sort!=='nearest'&&rows.length>1) {const index=rows.findIndex(r=>r.isNew);if(index>=0){const [row]=rows.splice(index,1);rows.splice(1,0,row);}}
-  return rows.some(row=>row.printerType==='home')?rows:rankVerifiedWithinDistance(rows);
+  const ranked=rows.some(row=>row.printerType==='home')?rows:rankVerifiedWithinDistance(rows);
+  if(sort==='nearest')ranked.sort((a,b)=>Number(b.selectable)-Number(a.selectable)||nearestTopShopOrder(sort,a,b));
+  return ranked;
 }
 export function expressStatus(order) {
   if(order.state==='cancelled')return order.expressOrder?.reroute?.status==='moved'?'moved':'cancelled';
