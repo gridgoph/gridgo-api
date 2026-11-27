@@ -8,6 +8,9 @@ const READY = 'ready_for_dispatch';
 const fail = code => { throw Object.assign(new Error(code), { status: 400, code }); };
 
 const CLIENT = {
+  staple: { text: 'Can you staple it?' },
+  colour_cover: { text: 'Colour cover only' },
+  is_ready: { text: 'Is it ready?' },
   there_in_10: { text: "I'll be there in 10 mins" },
   keep_until: { text: 'Please keep it until {time}', time: true },
   im_here: { text: "I'm here · Ania na ko" },
@@ -15,6 +18,9 @@ const CLIENT = {
   thank_you: { text: 'Thank you!' },
 };
 const SHOP = {
+  ready_now: { text: 'Ready na po' },
+  printing_now: { text: 'Printing na' },
+  almost_done: { text: 'Gamay nalang' },
   ready_at_counter: { text: 'Your print is ready at the counter.' },
   see_you_soon: { text: 'See you soon!' },
   thank_you: { text: 'Thank you!' },
@@ -25,6 +31,10 @@ const ready = order => order.state === READY || order.state === 'awaiting_collec
 
 /** Codes this party may send now. Pickup-only: deliveries talk through the rider chat. */
 export function quickMessageCodes(order, party) {
+  if (order?.orderType === 'express' && order.expressOrder?.acceptFlow === 2 && !pickedUp(order)) {
+    return party === 'client' ? ['staple', 'colour_cover', 'is_ready', ...(ready(order) ? (order.expressOrder?.onMyWay ? ['im_here', 'running_late', 'thank_you'] : ['there_in_10', 'keep_until']) : [])]
+      : party === 'supplier' ? ['ready_now', 'printing_now', 'almost_done'] : [];
+  }
   if (order?.fulfillmentMode !== 'pickup' || order.orderType !== 'express') return [];
   const onMyWay = Boolean(order.expressOrder?.onMyWay);
   if (party === 'client') {

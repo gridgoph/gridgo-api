@@ -287,6 +287,7 @@ export function defaultOperationalSettings() {
     operatingHours: defaultOperatingHours(),
     expressRates: expressRates(),
     expressLightColourMaxBps: 2500,
+    orderChatCloseAfterPickupHours: 24,
     groupPaymentTimeoutMinutes: 10,
     serviceFeeRateBps: 1_000,
     organizationDiscountRateBps: 500,
@@ -359,6 +360,7 @@ export function validateOperationalSettings(settings) {
   validateShopMoneySettings(settings);
   validateVerificationSettings(settings);
   validateHomeSettings(settings);
+  if (settings?.orderChatCloseAfterPickupHours !== undefined && (!Number.isInteger(settings.orderChatCloseAfterPickupHours) || settings.orderChatCloseAfterPickupHours < 1 || settings.orderChatCloseAfterPickupHours > 168)) fail(400, 'invalid_order_chat_lifetime', 'Choose 1 to 168 hours.');
   validateExpressRates(Object.hasOwn(settings || {}, 'expressRates') ? settings.expressRates : expressRates());
   validateCashSettings(settings);
   if (settings.shopTeamJoinQrRefreshSeconds !== undefined && (!Number.isInteger(settings.shopTeamJoinQrRefreshSeconds)

@@ -10,6 +10,7 @@ const pick = (record, fields) => Object.fromEntries(fields.filter(field => Objec
 export function staffExpressProjection(express) {
   if (!express || typeof express !== 'object') return null;
   return {
+    ...(express.shopExtras ? { shopExtras: structuredClone(express.shopExtras) } : {}),
     ...pick(express, ['status', 'originalSupplierId', 'currentSupplierId', 'declineCount', 'acceptBy', 'pickedUpAt', 'pickupHandover', 'onMyWay',
       'pickupPinIssued', 'pickupPinLocked', 'pickupPinRetryAfter', 'riderPin']),
     // Counter staff take the client's cash at hand-over, so they see that one

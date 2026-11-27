@@ -1,5 +1,7 @@
 # GRIDGO API
 
+Express order chat, agreed shop extras and the shared team inbox: [Order conversations](docs/ORDER_CLIENT_SHOP_CHAT_API.md#express-order-chat-and-shared-shop-inbox).
+
 Gated shop onboarding, own tier prices, required payout QR and finish-to-live:
 [Shop onboarding](docs/SHOP_ONBOARDING_API.md). Production defaults retain review.
 
