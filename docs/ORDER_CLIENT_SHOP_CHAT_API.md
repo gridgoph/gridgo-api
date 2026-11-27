@@ -4,7 +4,7 @@ API part of gridgo-client#246 / report 4E2F86FA. Apply forward migration `179223
 
 ## Access and lifecycle
 
-Every route requires a verified Clerk session and a database membership. Send `X-GRIDGO-Role` when an identity has several memberships. The owning client, currently assigned approved shop, Operations and Super Admin may read. Riders, unrelated users and other shops may not. Supplier access also respects the existing Operations artwork-release gate.
+Every route requires a verified Clerk session and a database membership. Send `X-GRIDGO-Role` when an identity has several memberships. The owning client, currently assigned eligible shop, Operations and Super Admin may read. Riders, unrelated users and other shops may not. Supplier access also respects the existing Operations artwork-release gate.
 
 There is one conversation per order, materialized on its first message or an Express system event. For regular orders, it opens when the current shop accepts (`shopAcceptance.status = accepted` for that supplier). Older orders without an acceptance snapshot use their accepted/payment-authorized/production-or-later state. It remains open through delivery and the order's snapshotted `issueWindowExpiresAt`, then becomes **read_only**. Completion, cancellation or a pending shop recovery also stops new messages. Staff posts use the same window. Before acceptance the status is `unavailable`; reads return an empty/history projection and sends return `409 client_shop_chat_not_available`.
 

@@ -31,6 +31,9 @@ test('Express masking hides contact/payment/address details and preserves produc
   assert.equal(maskOrderChat('Call 09171234567; wallet number: 1234 5678 9012', order).text, 'Call [number hidden]; wallet number: [number hidden]');
   assert.equal(maskOrderChat('Meet at 18 Cedar Street, by the gate', order).text, 'Meet at [number hidden]');
   assert.equal(maskOrderChat('Cedar gate', order).text, '[number hidden]');
+  assert.equal(maskOrderChat('cedar GATE', order).text, '[number hidden]');
+  assert.equal(maskOrderChat('wallet 1234 5678 9012', order).text, 'wallet [number hidden]');
+  assert.equal(maskOrderChat('Payment is PHP 1200 for 12 pages.', order).text, 'Payment is PHP 1200 for 12 pages.');
   assert.equal(maskOrderChat('12 pages, 3 sets, staple at 2 cm; ready at 5 PM', order).text, '12 pages, 3 sets, staple at 2 cm; ready at 5 PM');
   assert.equal(maskOrderChat('18 Cedar Street', { ...order, shopAcceptance: { status: 'accepted' } }).text, '18 Cedar Street');
   assert.equal(maskOrderChat('000201010212 payment payload 6304ABCD', order).text, '[number hidden]');
