@@ -1,4 +1,5 @@
 import { homePrinterResponse } from './home-printers.js';
+import { standardSignupDocument } from './supplier-onboarding.js';
 import { supplierVerified, verificationSummary } from "./supplier-verification.js";
 import { supplierMatchBlockersFor } from "./supplier-eligibility.js";
 import { effectiveProductionTime, productionTimeReview } from './production-time.js';
@@ -383,7 +384,7 @@ export function catalogItemBlockers(store, item, { publicOnly = false, at } = {}
     .filter((photo) => photo.catalogItemId === item.id)
     .filter((photo) => readyFile(store, photo.fileId));
   // A quote listing is the shop's price for one client's brief; it has no sample photo.
-  if (photos.length === 0 && !item.templateData?.stockPhotos?.length && !isQuoteListing(item)) blockers.push("photo");
+  if (photos.length === 0 && !item.templateData?.stockPhotos?.length && !isQuoteListing(item) && !standardSignupDocument(store,item)) blockers.push("photo");
   for (const group of catalogGroupsForItem(store, item.id)) {
     if (group.options.filter((option) => option.active !== false).length === 0) {
       blockers.push(`option_group:${group.id}`);

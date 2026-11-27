@@ -1389,6 +1389,11 @@ export async function seedDevelopmentShops(database, {
   now = () => new Date().toISOString(),
 } = {}) {
   assertDevelopmentSeedAllowed();
+  await database.transaction(async () => {
+    const store=await loadStore(database);
+    store.settings.supplierOnboarding={autoApproveDocuments:true,unverifiedShopsEnabled:true};
+    await saveStore(database,store);
+  });
   const backend = clerkBackend || createClerkBackend(authConfiguration(process.env));
   const lovis = await seedDevelopmentShop(database, { clerkBackend: backend, objectStorage, now });
   const shops = [lovis];

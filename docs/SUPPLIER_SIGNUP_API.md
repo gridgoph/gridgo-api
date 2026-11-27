@@ -1,5 +1,9 @@
 # Guided supplier sign-up
 
+The additive tier-price flow and gated finish-to-live release are documented in
+[Shop onboarding to live](SHOP_ONBOARDING_API.md). The legacy payloads below
+remain compatible.
+
 API contract for report **2074B695**. The supplier app and supplier web use the
 same calls below. Screens and their release remain separate work. Apply the
 three `1795315000000`–`1795315002000` forward migrations before deploying.
@@ -154,7 +158,7 @@ number/institution, `qrFileId` and `expectedVersion` fields. Add:
 {"holder":"family","consent":{"accepted":true,"wording":"<payoutConsentWording from sign-up GET>"}}
 ```
 
-`holder` is `mine | family | friend | staff`; `accountName` is the name on the QR
+`holder` is `mine | family | business | friend | staff`; `accountName` is the name on the QR
 and remains required. There is no name-match rule. Guided shops, and existing
 shops that opt into holder/consent fields, require consent when binding a QR,
 changing an existing QR destination, or changing holder details. Released callers

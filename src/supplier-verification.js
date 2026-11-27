@@ -1,5 +1,6 @@
 import { homeSettings, homePrinterStatus, homeVerified } from './home-printers.js';
 import { randomUUID } from 'node:crypto';
+import { tierSignup, supplierOnboardingSettings } from './supplier-onboarding.js';
 
 const DAY = 86400000;
 const CLOSED = new Set(['delivered','issue_window_open','completed','payout_released','cancelled']);
@@ -87,6 +88,8 @@ function reservations(store,supplierId) {
 }
 export function verificationSummary(store,supplierId,at=new Date().toISOString()) {
   const home=store.supplierProfiles?.find(p=>p.userId===supplierId&&p.homePrinter);
+  const signup=(store.supplierSignups||[]).find(s=>s.supplierId===supplierId);
+  const onboardingPaused=tierSignup(signup)&&(!signup.steps.finish||!supplierOnboardingSettings(store.settings).unverifiedShopsEnabled);
   const policy={...verificationSettings(store.settings),...(home?{windowDays:homeSettings(store.settings).verificationWindowDays}:{})},verified=supplierVerified(store,supplierId);
   const approval=store.approvalCases?.find(c=>c.userId===supplierId&&c.kind==='supplier');
   const membership=store.userRoleMemberships?.find(m=>m.userId===supplierId&&m.role==='supplier');
@@ -111,9 +114,13 @@ export function verificationSummary(store,supplierId,at=new Date().toISOString()
     capReached:!verified&&paidBeforeVerificationMinor>=policy.payoutCapMinor,
     remainingCapMinor:Math.max(0,policy.payoutCapMinor-paidBeforeVerificationMinor-sum(reservations(store,supplierId).map(e=>e.data.netAmountMinor))),
     heldMinor:sum(held.map(e=>e.amountMinor)),recoveryDueMinor,paidOpenRegularJobs:openJobs.size,
-    newOrdersPaused:(home&&homePrinterStatus(store,home,at).newOrdersPaused)||!supplierCanWork(store,supplierId)||(!verified&&recoveryDueMinor>0)||(!verified&&(!deadlineAt||Date.parse(at)>=Date.parse(deadlineAt)))};
+    newOrdersPaused:(home&&homePrinterStatus(store,home,at).newOrdersPaused)||!supplierCanWork(store,supplierId)||(!verified&&onboardingPaused)||(!verified&&recoveryDueMinor>0)||(!verified&&(!deadlineAt||Date.parse(at)>=Date.parse(deadlineAt)))};
 }
 export function assertVerifiedCashShop(store,supplierId) {if(!supplierVerified(store,supplierId))fail('cash_supplier_verification_required');}
+/** New onboarding cannot use a historical cash protocol to bypass its cap. */
+export function assertOnboardingCashShop(store,supplierId) {
+  if(tierSignup((store.supplierSignups||[]).find(s=>s.supplierId===supplierId)))assertVerifiedCashShop(store,supplierId);
+}
 /** Reserve before a manual transfer. A retry returns the same frozen amount. */
 function reservationData(entry) {
   return {...entry.data,attemptId:entry.data.attemptId||entry.id,payerId:entry.data.payerId??entry.actorId,
@@ -139,7 +146,10 @@ export function assertVerificationReplay(store,order,key,{attemptId,reference,am
 }
 export function prepareVerificationPayout(store,order,{key,amountMinor,at,actor,id,attemptId,recording=false,sharedAttempt=false,reconciling=false,dailyTransferId}) {
   if(!Number.isSafeInteger(amountMinor)||amountMinor<0)fail('invalid_money');
-  if(order.cash&&!key.startsWith('bonus:'))return {status:'ready',key,amountMinor,netAmountMinor:amountMinor,recoveryMinor:0,exempt:true};
+  if(order.cash&&!key.startsWith('bonus:')) {
+    assertOnboardingCashShop(store,order.supplierId);
+    return {status:'ready',key,amountMinor,netAmountMinor:amountMinor,recoveryMinor:0,exempt:true};
+  }
   const previous=latest(store,key);
   if(previous&&['released','reserved'].includes(previous.kind))assertPayoutIdentity(previous,order);
   if(previous?.kind==='released')return {status:'released',key,...previous.data,amountMinor:previous.amountMinor};
@@ -158,7 +168,9 @@ export function prepareVerificationPayout(store,order,{key,amountMinor,at,actor,
   const netAmountMinor=amountMinor-recoveryMinor;
   const occupies=paidEvents(store,order.supplierId).some(e=>e.orderId===order.id)
     ||reservations(store,order.supplierId).some(e=>e.orderId===order.id);
-  const reason=!summary.verified && netAmountMinor>summary.remainingCapMinor?'verification_payout_cap'
+  const signup=(store.supplierSignups||[]).find(s=>s.supplierId===order.supplierId);
+  const reason=!summary.verified&&tierSignup(signup)&&(!signup.steps.finish||!supplierOnboardingSettings(store.settings).unverifiedShopsEnabled)?'supplier_verification_required'
+    :!summary.verified && netAmountMinor>summary.remainingCapMinor?'verification_payout_cap'
     :!summary.verified&&order.orderType!=='express'&&!CLOSED.has(order.state)&&(summary.paidOpenRegularJobs>2||!occupies&&summary.paidOpenRegularJobs>=2)?'verification_open_jobs':null;
   const data={netAmountMinor,recoveryMinor,beforeVerification:!summary.verified,...(reason?{reason}:{})};
   if(reason) {

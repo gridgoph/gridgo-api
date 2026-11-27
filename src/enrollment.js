@@ -9,6 +9,7 @@ import { notifyOpsSignupSubmitted } from "./client-order-notifications.js";
 import { queueInvalidate } from "./notifications.js";
 import { resolveCategoryCode } from "./taxonomy.js";
 import { signupEnrollment, completeSignupEnrollment } from './supplier-signup.js';
+import { missingShopName } from './supplier-onboarding.js';
 import { createSignupDocuments } from './document-capabilities.js';
 
 const VEHICLE_TYPES = new Set(["motorcycle", "car", "van", "truck", "bicycle"]);
@@ -261,7 +262,7 @@ function validateSupplierInput(body) {
   const contactName = nonblank(profile.contactName);
   const phone = nonblank(profile.phone);
   const label = nonblank(location.label);
-  if (!shopName) fields["profile.shopName"] = "is required";
+  if (missingShopName(shopName)) fields["profile.shopName"] = "is required";
   if (!contactName) fields["profile.contactName"] = "is required";
   if (!phone) fields["profile.phone"] = "is required";
   if (!Number.isFinite(location.lat) || location.lat < -90 || location.lat > 90) {

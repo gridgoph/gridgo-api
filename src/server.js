@@ -17,6 +17,7 @@ import { bindShopDeviceRequest, effectiveShopRole, resolveShopWorker, managerRou
 import { shopPaused } from './shop-availability.js';
 import { routeShopStatus } from './shop-status.js';
 import { routeSupplierSignup, signupProjection, signupForShop, routeSignupSetup } from './supplier-signup.js';
+import { supplierOnboardingSettings } from './supplier-onboarding.js';
 import { supplierPayoutStatus } from './supplier-payout-policy.js';
 import { supplierSupportsDocumentOrder } from './document-capabilities.js';
 import { routeShopFileAccess, recordShopFileAccess, fileAccessJobs } from './shop-file-access.js';
@@ -4673,6 +4674,8 @@ async function handleAuditedRequest(req, res) {
         ...store.settings,
         shopMoney: Object.hasOwn(body,"shopMoney") ? {...shopMoneySettings(store.settings),...body.shopMoney,launchedAt:shopMoneySettings(store.settings).launchedAt} : shopMoneySettings(store.settings),
         supplierVerification: Object.hasOwn(body,"supplierVerification") ? body.supplierVerification : verificationSettings(store.settings),
+        supplierOnboarding: Object.hasOwn(body,"supplierOnboarding") ? body.supplierOnboarding : supplierOnboardingSettings(store.settings),
+        areaPriceGuides: Object.hasOwn(body,"areaPriceGuides") ? body.areaPriceGuides : (store.settings.areaPriceGuides||[]),
         homePrinter: Object.hasOwn(body,"homePrinter") ? body.homePrinter : homeSettings(store.settings),
         expressRates: Object.hasOwn(body,"expressRates") ? body.expressRates : expressRates(store.settings),
         // Accept-first Express fee and QR confirmation rules; partial patches keep the rest.

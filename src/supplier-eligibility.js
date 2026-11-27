@@ -2,6 +2,7 @@ import { homePrinterStatus } from './home-printers.js';
 import { shopPaused } from './shop-availability.js';
 import {shopMoneyPaused} from './shop-money-policy.js';
 import { supplierVerified, supplierCanWork, verificationSummary } from "./supplier-verification.js";
+import { missingShopName, tierSignup, supplierOnboardingSettings } from './supplier-onboarding.js';
 /** Missing standing retains the legacy active-account default. */
 export function supplierAccountIsActive(accountStatus) {
   return (accountStatus ?? "active") === "active";
@@ -18,6 +19,7 @@ export function supplierMatchBlockersFor(store, clock = new Date().toISOString()
     if (!supplierAccountIsActive(accountStatuses.get(supplierId))) missing.push("account_inactive");
     if (!profile) missing.push("supplier_profile");
     else {
+      if(profile.shopName&&missingShopName(profile.shopName))missing.push('shop_name');
       if (profile.isClosed === true || shopPaused(profile, at)) missing.push("shop_closed");
       if (!profile.shop) missing.push("shop_location");
     }
@@ -27,6 +29,8 @@ export function supplierMatchBlockersFor(store, clock = new Date().toISOString()
     if(profile?.homePrinter && !supplierCanWork(store,supplierId))missing.push('supplier_not_approved');
     if(profile?.homePrinter) { const status=homePrinterStatus(store,profile,at);if(status.reason)missing.push(status.reason); }
     if (!supplierVerified(store,supplierId)) {
+      const signup=(store.supplierSignups||[]).find(s=>s.supplierId===supplierId);
+      if(tierSignup(signup)&&(!signup.steps.finish||!supplierOnboardingSettings(store.settings).unverifiedShopsEnabled))missing.push('supplier_not_approved');
       if (!supplierCanWork(store,supplierId)) missing.push("supplier_not_approved");
       const hasDocumentService=(store.supplierServices||[]).some(service=>service.supplierId===supplierId
         && !["withdrawn","suspended"].includes(service.state) && (["documents","document_publication"].includes(service.categoryCode)
