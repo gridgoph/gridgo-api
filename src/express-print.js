@@ -57,8 +57,18 @@ export function expressPrintRequest(settings,input,productType) {
  return {version:2,layout:print.layout,paper:{widthMilli:paper.widthMilli,heightMilli:paper.heightMilli},orientation:print.orientation,
   thresholds:colourSettings(settings),express:{...print,lightMaxBps:settings?.expressLightColourMaxBps??EXPRESS_LIGHT_DEFAULT_BPS}};
 }
+export function validateExpressPageSelection(file,print) {
+ const total=Number.isSafeInteger(file.detected?.pageCount)&&file.detected.pageCount>0?file.detected.pageCount:Number.MAX_SAFE_INTEGER;
+ const printed=selectDocumentPages(total,print.pageRange);
+ if(print.colourMode!=='choose'||!print.colourPages)return;
+ const chosen=selectDocumentPages(total,print.colourPages);
+ if(!printed.range)return;
+ const intervals=range=>range.split(',').map(part=>{const [a,b=a]=part.trim().split('-').map(Number);return [a,b];});
+ if(intervals(chosen.range).some(([a,b])=>!intervals(printed.range).some(([start,end])=>start<=a&&end>=b)))fail('invalid_express_colour_pages');
+}
 export function ensureExpressPreview(store,file,input,productType,at,{retry=false}={}) {
  const request=expressPrintRequest(store.settings,input,productType),key=analysisKey(request);
+ validateExpressPageSelection(file,request.express);
  let queued=queueColourRequest(file,request,at,{retry});
  if(!COLOUR_TYPES.includes(file.detectedContentType)&&file.state==='ready'&&!file.colourAnalyses?.some(row=>row.key===key)&&(!file.colourAnalyses||file.colourAnalyses.length<32)) {
   (file.colourAnalyses||=[]).push({key,request,status:'failed',error:'colour_file_unsupported',requestedAt:at,completedAt:at});queued=true;

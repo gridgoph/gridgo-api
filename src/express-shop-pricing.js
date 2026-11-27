@@ -1,11 +1,12 @@
 import {expressCatalogOptions,expressFail} from './express-orders.js';
 import {selectedCatalogPrice,publicCatalogItem} from './supplier-catalog.js';
-import {priceExpressPages,expressPrintRequest} from './express-print.js';
+import {priceExpressPages,expressPrintRequest,validateExpressPageSelection} from './express-print.js';
 import {analysisKey} from './colour-analysis.js';
 
 export const isExpressPrintV2=input=>input.printVersion===2||input.colourMode!=null||input.orientation!=null||input.planType!=null||input.colour==null;
 export function expressPreviewState(store,file,input,productType) {
  const request=expressPrintRequest(store.settings,input,productType),key=analysisKey(request);
+ validateExpressPageSelection(file,request.express);
  const analysis=file.colourAnalyses?.find(row=>row.key===key) || (file.colourAnalyses?.length>=32?{status:'failed',error:'colour_analysis_limit'}:null);
  if(!analysis||analysis.status==='pending')expressFail(409,'express_preview_pending');
  const output=store.files.find(f=>f.fileId===analysis.outputFileId&&f.state==='ready'&&!f.deleteRequestedAt&&!f.deletedAt);

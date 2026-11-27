@@ -14,7 +14,7 @@ export function staffExpressProjection(express) {
     printSettings: (express.printSettings || []).map(print => ({
       ...pick(print, ['fileId', 'groupMemberId', 'groupMemberName', 'copies', 'colour', 'paper', 'paperStock', 'sides', 'layout', 'note', 'acceptedWarnings', 'orientation', 'colourMode', 'colourPages', 'planType', 'ink', 'paperColour', 'renderStatus', 'outputAlreadyApplied', 'productionPrint']),
       ...(print.fallback?{fallback:pick(print.fallback,['reason','colour','originalFile','message'])}:{}),
-      ...(print.pagePricing?{pageMix:{counts:print.pagePricing.counts,pages:print.pagePricing.pages.map(page=>pick(page,['page','outputPage','measuredTier','tier','printColour','youSet','strongColourBps']))}}:{}),
+      ...((print.pagePricing||print.pageMix)?{pageMix:{counts:(print.pagePricing||print.pageMix).counts,pages:(print.pagePricing||print.pageMix).pages.map(page=>pick(page,['page','outputPage','measuredTier','tier','printColour','youSet','strongColourBps']))}}:{}),
       pages: pick(print.pages, ['total', 'range', 'printed']),
     })),
   };

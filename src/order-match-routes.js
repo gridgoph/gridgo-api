@@ -2057,6 +2057,7 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     if(!Array.isArray(body.files)||!body.files.length||body.files.length>20)fail(400,'invalid_express_files');
     let mutated=false;
     const files=body.files.map(input=>{
+      record(input,'file');
       const file=fileFor(store,user,input.fileId,'artwork','fileId');
       const result=ensureExpressPreview(store,file,input,body.productType||'documents',now(),{retry:body.retry===true});
       mutated ||= result.queued;

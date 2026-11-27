@@ -978,6 +978,21 @@ function readGraph(database) {
           AND r.reference_type='user' AND r.reference_id=supplier_profiles.user_id
       ) END AS home_verification_types`]}:options;
     const sql=orderReadQuery(table,where,projection);
+    if(name==='supplier_catalog_items') {
+      // Tier facts share the parent read and snapshot; keep catalogue reads in
+      // their fixed query budget rather than adding a round trip per request.
+      const rows=(await database.query(`SELECT item.*,
+        (SELECT jsonb_agg(to_jsonb(price)) FROM supplier_catalog_express_prices price
+          WHERE price.catalog_item_id=item.id) AS express_price_facts
+        FROM (${sql}) item`,values)).rows;
+      const ids=new Set(rows.map(row=>row.id));
+      loaded.supplier_catalog_express_prices=loaded.supplier_catalog_express_prices.filter(row=>!ids.has(row.catalog_item_id));
+      loaded[name]=rows.map(({express_price_facts,...item})=>{
+        loaded.supplier_catalog_express_prices.push(...(express_price_facts||[]));
+        return item;
+      });
+      return;
+    }
     if(name!=='supplier_payout_accounts') {
       loaded[name]=(await database.query(sql,values)).rows;
       return;
@@ -1172,7 +1187,7 @@ async function readCatalogItemContext(graph, ids) {
   await read('supplier_profiles', 'WHERE user_id = ANY($1::text[])', [owners]);
   await read('supplier_services', 'WHERE id = ANY($1::text[])', [loaded.supplier_catalog_items.map(row => row.supplier_service_id)]);
   await read('supplier_service_file_formats', 'WHERE supplier_service_id = ANY($1::text[])', [loaded.supplier_services.map(row => row.id)]);
-  for (const name of ['supplier_catalog_option_groups', 'supplier_catalog_item_photos', 'supplier_catalog_price_tiers', 'supplier_catalog_speed_tiers', 'supplier_catalog_item_file_formats', 'supplier_catalog_prep_steps', 'supplier_catalog_express_prices', 'supplier_catalog_colour_sizes', 'supplier_catalog_colour_prices']) {
+  for (const name of ['supplier_catalog_option_groups', 'supplier_catalog_item_photos', 'supplier_catalog_price_tiers', 'supplier_catalog_speed_tiers', 'supplier_catalog_item_file_formats', 'supplier_catalog_prep_steps', 'supplier_catalog_colour_sizes', 'supplier_catalog_colour_prices']) {
     await read(name, 'WHERE catalog_item_id = ANY($1::text[])', [items]);
   }
   await read('supplier_catalog_options', 'WHERE option_group_id = ANY($1::text[])', [loaded.supplier_catalog_option_groups.map(row => row.id)]);
@@ -1278,7 +1293,7 @@ async function readCatalogueGraph(graph, actorIds, { supplierIds = null, itemIds
   const items = loaded.supplier_catalog_items.map(row => row.id);
   for (const name of ['supplier_catalog_option_groups', 'supplier_catalog_item_photos', 'supplier_catalog_price_tiers',
     'supplier_catalog_speed_tiers', 'supplier_catalog_item_file_formats', 'supplier_catalog_prep_steps',
-    'supplier_catalog_express_prices', 'supplier_catalog_colour_sizes', 'supplier_catalog_colour_prices']) {
+    'supplier_catalog_colour_sizes', 'supplier_catalog_colour_prices']) {
     await read(name, 'WHERE catalog_item_id = ANY($1::text[])', [items]);
   }
   await read('supplier_catalog_options', 'WHERE option_group_id = ANY($1::text[])', [loaded.supplier_catalog_option_groups.map(row => row.id)]);

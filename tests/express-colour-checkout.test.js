@@ -93,7 +93,7 @@ test('shop Staff receive applied print instructions and per-page mix without mon
   productionPrint:{layout:'actual_size_centered',orientation:'auto',colour:'as_prepared',pageRange:null},pages:{total:3,range:'2-3',printed:2},rateMinor:500,
   pagePricing:{subtotalMinor:1400,counts:{bw:1,light:1,full:0},pages:[{page:2,printColour:'colour',tier:'light',priceMinor:400},{page:3,printColour:'bw',tier:'bw',priceMinor:300}]}}]});
  assert.equal(result.printSettings[0].outputAlreadyApplied,true);assert.equal(result.printSettings[0].productionPrint.pageRange,null);assert.equal(result.printSettings[0].orientation,'portrait');
- assert.equal(result.printSettings[0].pageMix.pages[0].tier,'light');assert.doesNotMatch(JSON.stringify(result),/priceMinor|subtotalMinor|rateMinor|original/);
+ assert.equal(result.printSettings[0].pageMix.pages[0].tier,'light');assert.deepEqual(staffExpressProjection(result),result);assert.doesNotMatch(JSON.stringify(result),/priceMinor|subtotalMinor|rateMinor|original/);
 });
 
 test('legacy reassignment cannot move a shop-priced page mix to another shop without a new quote',async()=>{
@@ -140,4 +140,14 @@ test('exhausted immutable variants expose the same explicit fallback in preview 
  const {file,call}=setup();file.colourAnalyses=Array.from({length:32},(_,i)=>({key:`old_${i}`,status:'failed',request:{}}));
  const result=await call('POST','/express/preview',{files:[input]});
  assert.equal(result.body.files[0].fallback.reason,'colour_analysis_limit');assert.equal(file.colourAnalyses.length,32);
+});
+
+test('invalid colour-page input is refused before queuing or falling back',async()=>{
+ const {file,call}=setup();
+ for(const change of [{colourPages:'bad'},{colourPages:'4'},{pageRange:'1',colourPages:'2'}])await assert.rejects(call('POST','/express/preview',{files:[{...input,...change}]}));
+ assert.equal(file.colourAnalyses?.length||0,0);
+});
+
+test('preview rejects malformed file entries with the API validation error',async()=>{
+ const {call}=setup();for(const file of [null,[], 'file'])await assert.rejects(call('POST','/express/preview',{files:[file]}),e=>e.status===400&&e.code==='invalid_request');
 });
