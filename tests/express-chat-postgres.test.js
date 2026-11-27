@@ -11,7 +11,7 @@ const shop = { headers: { 'X-GRIDGO-Role': 'supplier', 'X-GRIDGO-Shop-Id': 'supp
 import { defaultTaxonomy } from '../src/taxonomy.js';
 import { routeOrderMatch } from '../src/order-match-routes.js';
 import { actors, id } from './fixtures/reschedule.js';
-import { up as positionMigration } from '../migrations/1795802001000_chat_message_positions.js';
+import { up as positionMigration } from '../migrations/1795809101000_chat_message_positions.js';
 
 test('position migration preserves existing chronological history and read markers', { skip }, async t => {
   const db = createDatabase(process.env); t.after(() => db.close());
@@ -96,11 +96,21 @@ test('shared shop inbox, named replies, read badges, filters and expiring typing
 test('Super Admin alone changes pickup chat lifetime; expiry blocks messages and typing', { skip }, async t => {
   const { db, api } = await setup(t);
   let stored = await loadStore(db);
-  const body = { expectedVersion: stored.version, reason: 'Shorten conversation window', orderChatCloseAfterPickupHours: 2 };
+  const onboarding = await api('admin', 'PATCH', '/settings', { expectedVersion: stored.version,
+    reason: 'Set shop onboarding controls', supplierOnboarding: { autoApproveDocuments: true, unverifiedShopsEnabled: false } });
+  assert.equal(onboarding.status, 200);
+  const body = { expectedVersion: onboarding.body.version, reason: 'Shorten conversation window', orderChatCloseAfterPickupHours: 2 };
   assert.equal((await api('ops', 'PATCH', '/settings', body)).status, 403);
   const changed = await api('admin', 'PATCH', '/settings', body);
   assert.equal(changed.status, 200);
   assert.equal(changed.body.settings.orderChatCloseAfterPickupHours, 2);
+  assert.deepEqual(changed.body.settings.supplierOnboarding, { autoApproveDocuments: true, unverifiedShopsEnabled: false });
+  const combined = await api('admin', 'PATCH', '/settings', { expectedVersion: changed.body.version,
+    reason: 'Retain onboarding review', supplierOnboarding: { autoApproveDocuments: false, unverifiedShopsEnabled: false } });
+  assert.equal(combined.status, 200);
+  assert.equal(combined.body.version, changed.body.version + 1);
+  assert.equal(combined.body.settings.orderChatCloseAfterPickupHours, 2);
+  assert.equal((await api('admin', 'PATCH', '/settings', body)).status, 409);
   await db.transaction(async () => {
     stored = await loadStore(db); const o = stored.orders[0];
     o.state = 'completed'; o.expressOrder.pickedUpAt = '2026-10-04T21:00:00Z'; await saveStore(db, stored);

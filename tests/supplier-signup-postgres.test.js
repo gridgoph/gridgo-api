@@ -217,3 +217,51 @@ test('guided home signup persists private consent, documents-only capabilities a
  assert.equal(JSON.stringify(clientIdentity).includes(String(pin.point.lat)),false);
  assert.equal(JSON.stringify(clientIdentity).includes(pin.street),false);
 });
+
+test('tier-price signup keeps the client membership, requires QR and hours, then becomes live without photos after restart',{skip},async t=>{
+ const {db,api,env}=await setup(t,true);
+ let settings=ok(await api('admin','GET','/settings'));
+ const controls={autoApproveDocuments:true,unverifiedShopsEnabled:true};
+ assert.equal((await api('ops','PATCH','/settings',{expectedVersion:settings.version,reason:'Release review',supplierOnboarding:controls})).status,403);
+ ok(await api('admin','PATCH','/settings',{expectedVersion:settings.version,reason:'Development onboarding',supplierOnboarding:controls,
+  areaPriceGuides:[{name:'Central district',lat:7.06,lng:125.6,radiusMeters:1500,ranges:[{paper:'a4',tier:'bw',minMinor:100,maxMinor:400}]}]}));
+ const path='/auth/clerk/supplier-signup';
+ ok(await api('client','PATCH',path,{expectedVersion:0,step:'eligibility',value:{shopKind:'print_shop',registrantRole:'owner',adult:true}}));
+ assert.equal((await api('client','PATCH',path,{expectedVersion:1,step:'shop',value:{shopName:'Temporary',contactName:'Contact',phone:'+639170000001'}})).status,400);
+ ok(await api('client','PATCH',path,{expectedVersion:1,step:'shop',value:{shopName:'Copper Print Studio',contactName:'Contact',phone:'+639170000001'}}));
+ const wording=ok(await api('client','GET',path)).locationConsentWording;
+ ok(await api('client','PATCH',path,{expectedVersion:2,step:'location',value:{point:{lat:7.06,lng:125.6,label:'Shop pickup'},consent:{accepted:true,wording}}}));
+ const pricesMinor={a4:{bw:200,light:500,full:900},long:{bw:400,light:700,full:1200},a3:{bw:1000,light:1500,full:2000}};
+ const draft=ok(await api('client','PATCH',path,{expectedVersion:3,step:'prints',value:{groups:['documents'],documents:{papers:['a4','long','a3'],colours:['bw','colour'],duplex:true,pricesMinor,finishing:{binding:20000}}}}));
+ assert.equal(draft.areaPriceGuides[0].name,'Central district');
+ ok(await api('client','POST','/auth/clerk/enroll/supplier',{signupVersion:4},{key:'tier-enrollment'}));
+ assert.equal((await api('client','POST','/auth/clerk/enroll/supplier',{signupVersion:4},{key:'tier-second'})).status,409);
+ assert.equal((await api('client','POST','/me/supplier-signup/finish',{expectedVersion:4},supplier)).body.error,'supplier_signup_incomplete');
+ const hours=ok(await api('client','GET','/me/shop-hours',null,supplier)).hours;
+ ok(await api('client','PATCH','/me/shop-hours',{expectedVersion:hours.version,schedule:{utcOffsetMinutes:480,week:[1,2,3,4,5,6,0].map(weekday=>({weekday,opensMinute:0,closesMinute:1440})),closures:[]}},supplier));
+ await db.transaction(async()=>{
+  const store=await loadStore(db);store.files.push({fileId:'onboard_receiving',ownerId:'client',purpose:'supplier_payout_qr',state:'ready',objectKey:'private/receiving',
+   declaredContentType:'image/png',detectedContentType:'image/png',originalFilename:'receiving.png',size:100,createdAt:AT,readyAt:AT,references:[]});
+  store.files.push({fileId:'onboard_art',ownerId:'other',purpose:'artwork',state:'ready',objectKey:'private/art.pdf',declaredContentType:'application/pdf',detectedContentType:'application/pdf',originalFilename:'art.pdf',size:100,createdAt:AT,detected:{pageCount:2},artworkCheck:{status:'passed'},references:[]});
+  await saveStore(db,store);
+ });
+ ok(await api('client','PATCH','/me/payout-account',{provider:'other',accountName:'Different recipient',holder:'business',qrFileId:'onboard_receiving',consent:{accepted:true,wording:PAYOUT_CONSENT_WORDING}},supplier));
+ const finished=ok(await api('client','POST','/me/supplier-signup/finish',{expectedVersion:4},supplier));assert.equal(finished.live,true);
+ const second=await apiForTest(t,env);
+ assert.equal(ok(await second('client','GET',path)).signup.nextStep,'complete');
+ const me=ok(await second('client','GET','/auth/me/supplier',null,supplier));assert.equal(me.supplierProfile.shopName,'Copper Print Studio');
+ const state=await loadStore(db);
+ assert.ok(state.userRoleMemberships.some(m=>m.userId==='client'&&m.role==='client'));
+ assert.ok(state.userRoleMemberships.some(m=>m.userId==='client'&&m.role==='supplier'));
+ assert.equal(state.approvalCases.find(c=>c.userId==='client'&&c.kind==='supplier').status,'pending');
+ const standard=state.catalogItems.filter(i=>i.supplierId==='client'&&i.signupDocumentStandard);
+ assert.equal(standard.length,4);assert.ok(standard.every(i=>i.reviewStatus==='approved'));
+ assert.deepEqual(standard.find(i=>i.name==='A4 Colour documents').expressPricing.a4,{bw:200,light:500,full:900});
+ assert.ok(state.catalogItems.filter(i=>i.supplierId==='client'&&!i.signupDocumentStandard).every(i=>i.reviewStatus==='pending'));
+ const readiness=ok(await second('client','GET','/me/supplier-readiness',null,supplier));assert.equal(readiness.operational.ready,true);
+ const map=ok(await second('other','GET','/express/shops?lat=7.06&lng=125.6&fulfillmentMode=pickup'));
+ assert.ok(map.shops.some(s=>s.supplierId==='client'&&s.name==='Copper Print Studio'));
+ const print=ok(await second('other','POST','/express/drafts',{supplierId:'client',location:{lat:7.06,lng:125.6},fulfillmentMode:'pickup',files:[{catalogItemId:standard.find(i=>i.name==='A4 B&W documents').id,fileId:'onboard_art',copies:1,colour:'bw',paper:'a4',sides:'one',layout:'fit_to_paper',acceptedWarnings:[]}]}));
+ assert.ok(print.cartId);
+ const priced=await loadStore(db);assert.equal(priced.cartLines.find(l=>l.cartId===print.cartId).expressPrint.rateMinor,200);
+});

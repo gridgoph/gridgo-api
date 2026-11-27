@@ -1,4 +1,5 @@
 import { parseExpressPricing } from './express-print.js';
+import { missingShopName } from './supplier-onboarding.js';
 import { routeProductTemplates } from './product-templates.js';
 import { expandProductionTimeBody, clearProductionTimeReview, productionTimeFields, productionTimeAudit } from './production-time.js';
 import { isQuoteListing } from "./quote-listings.js";
@@ -788,6 +789,7 @@ async function routeSupplierCatalogExisting({ req, url, store, user, readBody, i
     // half-applied edit behind.
     const phone = Object.hasOwn(body, "phone") ? philippineMobileNumber(body.phone) : null;
     if (body.shopName != null) {
+      if(missingShopName(body.shopName))fail(400,'invalid_shop_name','Enter your shop name.',{field:'shopName'});
       profile.shopName = requiredText(body.shopName, "shopName", 120);
       if (owner) owner.supplierName = profile.shopName;
     }

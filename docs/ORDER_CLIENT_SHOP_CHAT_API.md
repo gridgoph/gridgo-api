@@ -71,8 +71,8 @@ Clients receive an `orders` invalidate, the current shop a `jobs` invalidate, an
 ## Express order chat and shared shop inbox
 
 Report **2F969819**, API tracker gridgoph/gridgo-api#452. Apply forward migrations
-`1795802000000_express_order_chat`, `1795802001000_chat_message_positions` and
-`1795802002000_express_chat_extras` before deploying this API.
+`1795809100000_express_order_chat`, `1795809101000_chat_message_positions` and
+`1795809102000_express_chat_extras` before deploying this API.
 
 Express opens only after Send: the persisted `expressOrder.events` includes
 `sending` or `sent` and the order has an assigned shop. There is no chat route

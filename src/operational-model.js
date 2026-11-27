@@ -1,4 +1,5 @@
 import { homePrinterResponse, validateHomeSettings } from './home-printers.js';
+import { supplierOnboardingSettings, validateSupplierOnboardingSettings } from './supplier-onboarding.js';
 import { assertSupplierPayoutAllowed, supplierPayoutStatus } from './supplier-payout-policy.js';
 import { verificationSettings, validateVerificationSettings, prepareVerificationPayout, completeVerificationPayout } from "./supplier-verification.js";
 import {shopMoneySettings,validateShopMoneySettings} from './shop-money-settings.js';
@@ -277,6 +278,8 @@ export function defaultProductionNudge() {
 export function defaultOperationalSettings() {
   return {
     supplierVerification: verificationSettings(),
+    supplierOnboarding: supplierOnboardingSettings(),
+    areaPriceGuides: [],
     riderPacksMinimumBuilds: riderPacksMinimumBuilds(),
     foundingTesterLaunchAt: null,
     testerMonthlyBudgetMinor: null,
@@ -353,6 +356,7 @@ export function defaultOperationalSettings() {
 }
 
 export function validateOperationalSettings(settings) {
+  validateSupplierOnboardingSettings(settings);
   validateShopMoneySettings(settings);
   validateVerificationSettings(settings);
   validateHomeSettings(settings);

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { supplierOnboardingSettings } from './supplier-onboarding.js';
 import { queueInvalidate, privilegedAdminMemberships } from './notifications.js';
 /** Home-printer policy. Private facts stay on the existing supplier profile. */
 const DAY = 86400000;
@@ -49,7 +50,8 @@ export function homePrinterStatus(store, profile, at) {
  const jobs=(store.orders||[]).filter(o=>(o.expressOrder?.events||[]).some(e=>e.state==='accepted'&&e.supplierId===profile.userId
   && Date.parse(e.at)>Date.parse(at)-7*DAY&&Date.parse(e.at)<=Date.parse(at))).length;
  const deadlineAt=new Date(Date.parse(h.startedAt)+policy.verificationWindowDays*DAY).toISOString();
- const reason=!h.pinConsent?.accepted?'home_pin_consent_required':!h.privacyAgreement?.accepted?'home_file_privacy_required':h.starterRevokedAt?'home_starter_revoked':!h.starterApprovedAt?'home_starter_review_required'
+ const onboardingLive=Boolean(h.onboardingLiveAt)&&supplierOnboardingSettings(store.settings).unverifiedShopsEnabled;
+ const reason=!h.pinConsent?.accepted?'home_pin_consent_required':!h.privacyAgreement?.accepted?'home_file_privacy_required':h.starterRevokedAt?'home_starter_revoked':!h.starterApprovedAt&&!onboardingLive?'home_starter_review_required'
   :!verified&&Date.parse(at)>=Date.parse(deadlineAt)?'home_verification_deadline'
   :!verified&&jobs>=policy.starterWeeklyJobCap?'home_weekly_cap'
   :Date.parse(h.offlineUntil)>Date.parse(at)?'home_fair_play_hold'
@@ -57,7 +59,7 @@ export function homePrinterStatus(store, profile, at) {
  return {printerType:'home',symbol:'house',level:verified?'verified':h.starterApprovedAt&&!h.starterRevokedAt?'starter':'pending',
   verified,online:h.online===true,offersPaused:!!reason,newOrdersPaused:!!reason,reason,deadlineAt,weeklyJobs:jobs,
   weeklyJobCap:verified?null:policy.starterWeeklyJobCap,offlineUntil:h.offlineUntil||null,
-  allowHomePickup:verified&&profile.pickupAvailable===true,pinConsentWording:HOME_PIN_CONSENT,filePrivacyWording:HOME_FILE_AGREEMENT};
+  allowHomePickup:(verified||onboardingLive)&&profile.pickupAvailable===true,pinConsentWording:HOME_PIN_CONSENT,filePrivacyWording:HOME_FILE_AGREEMENT};
 }
 export function recordHomeOffer(store,supplierId,state,at) {
  const profile=homeProfile(store,supplierId);if(!profile)return;

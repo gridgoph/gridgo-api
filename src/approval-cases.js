@@ -3,6 +3,7 @@ import { homeVerificationMissing } from './home-printers.js';
 import { currentApplication, decideClientApplication, sentBackNotificationBody } from "./client-applications.js";
 import { resolveCategoryCode } from "./taxonomy.js";
 import { assertRiderApprovalReady } from "./enrollment.js";
+import { missingShopName } from './supplier-onboarding.js';
 
 export const APPROVAL_CASE_KINDS = new Set(["business_client", "supplier", "rider"]);
 export const APPROVAL_CASE_STATUSES = new Set(["pending", "approved", "rejected", "suspended"]);
@@ -52,7 +53,7 @@ export function supplierApprovalReadiness(store, supplierId) {
   if (!profile) {
     missing.push("supplier_profile");
   } else {
-    if (!nonblank(profile.shopName)) missing.push("shop_name");
+    if (missingShopName(profile.shopName)) missing.push("shop_name");
     if (!nonblank(profile.contactName)) missing.push("contact_name");
     if (
       !profile.shop ||
@@ -426,7 +427,7 @@ export function decideApprovalCase({
   const publishedServiceIds = action === "approve"
     ? publishSupplierServices(store, approvalCase, readiness?.publishableServiceIds || [], actor.id, at)
     : [];
-  const suspendedServiceIds = action === "suspend"
+  const suspendedServiceIds = ["suspend","reject"].includes(action)
     ? suspendSupplierServices(store, approvalCase, actor.id, at, input.reason)
     : [];
   if (action === "approve") {
