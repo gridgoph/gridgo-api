@@ -1,3 +1,4 @@
+import { assertRiderDocumentsComplete, recordRiderConsent, notifyRiderReview } from './rider-onboarding.js';
 import { productionDuration, shopProductionDayMinutes } from "./production-days.js";
 import { CLIENT_APPLICATION_FIELDS, validateClientApplication, bindClientApplication } from "./client-applications.js";
 import crypto from "node:crypto";
@@ -576,7 +577,7 @@ function manilaDate(value) {
   return `${parts.year}-${parts.month}-${parts.day}`;
 }
 
-function assertRiderReady(store, userId, at, { expiredMessage, incompleteMessage, allowTypedLicense = false }) {
+function assertRiderReady(store, userId, at, { expiredMessage, incompleteMessage }) {
   const profile = (store.riderProfiles || []).find((candidate) => candidate.userId === userId);
   const fields = {};
   if (!profile || !VEHICLE_TYPES.has(nonblank(profile.vehicleType))) {
@@ -589,19 +590,16 @@ function assertRiderReady(store, userId, at, { expiredMessage, incompleteMessage
   if (Object.keys(fields).length) invalidApplication(fields);
 
   const today = manilaDate(at);
-  if (currentFutureLicense(store, userId, today)) return;
+  if (currentFutureLicense(store, userId, today)) {
+    assertRiderDocumentsComplete(store, userId, at);
+    return;
+  }
   const licenseDocuments = (store.riderDocuments || []).filter(
     (document) => document.riderId === userId && document.kind === "drivers_license",
   );
   const currentLicense = licenseDocuments.find((document) => document.isCurrent !== false);
   if (currentLicense && currentLicense.expiresOn <= today) {
     fail(409, "document_expired", expiredMessage);
-  }
-  // The rider app still enrolls with a typed licence number and no file. The
-  // legacy verification route may accept that number only when no licence
-  // file was ever attached — a deleted file still blocks approval.
-  if (allowTypedLicense && nonblank(profile.licenseNumber) && licenseDocuments.length === 0) {
-    return;
   }
   fail(
     409,
@@ -612,6 +610,8 @@ function assertRiderReady(store, userId, at, { expiredMessage, incompleteMessage
 }
 
 export function assertRiderApprovalReady(store, userId, at) {
+  const existingCase = (store.approvalCases || []).find(c => c.userId === userId && c.kind === 'rider');
+  if (existingCase?.riderReview?.legacyApproved === true && ['approved', 'suspended'].includes(existingCase.status)) return;
   assertRiderReady(store, userId, at, {
     expiredMessage: "Replace the expired driver's licence before approving this rider.",
     incompleteMessage: "A ready current driver's licence with a future expiry is required before approving this rider.",
@@ -619,42 +619,23 @@ export function assertRiderApprovalReady(store, userId, at) {
   const approvalCase = (store.approvalCases || []).find(
     (candidate) => candidate.userId === userId && candidate.kind === "rider",
   );
-  if (!approvalCase || approvalCase.submittedAt == null) {
+  if (!approvalCase || approvalCase.submittedAt == null || approvalCase.riderReview?.status === "needs_reupload") {
     fail(409, "approval_state_conflict", "The rider must explicitly submit this application before approval.", {
       approvalCase: caseProjection(approvalCase),
     });
   }
+  if (!approvalCase.riderReview?.consent) fail(409, 'consent_required', 'Rider consent is required before approval.');
 }
 
-/**
- * The Operations sign-up queue still decides through POST /users/:id/verification.
- * The rider app has not shipped file upload + explicit submit, so a typed
- * licence number from enroll is enough on this compatibility path. Canonical
- * case decisions keep asserting a ready file and a submitted case.
- */
+
+// The compatibility decision route enforces the same evidence and consent gates.
 export function assertRiderLegacyVerificationReady(store, userId, at) {
-  assertRiderReady(store, userId, at, {
-    expiredMessage: "Replace the expired driver's licence before approving this rider.",
-    incompleteMessage: "A ready current driver's licence with a future expiry is required before approving this rider.",
-    allowTypedLicense: true,
-  });
-  const licenseDocuments = (store.riderDocuments || []).filter(
-    (document) => document.riderId === userId && document.kind === "drivers_license",
-  );
-  if (licenseDocuments.length === 0) return;
-  const approvalCase = (store.approvalCases || []).find(
-    (candidate) => candidate.userId === userId && candidate.kind === "rider",
-  );
-  if (!approvalCase || approvalCase.submittedAt == null) {
-    fail(409, "approval_state_conflict", "The rider must explicitly submit this application before approval.", {
-      approvalCase: caseProjection(approvalCase),
-    });
-  }
+  assertRiderApprovalReady(store, userId, at);
 }
 
 export function submitRiderApplication({ store, user, body, idempotencyKey, createId, now }) {
   if (!plainObject(body)) invalidApplication({ body: "must be a JSON object" });
-  rejectUnexpected(body, ["expectedVersion"]);
+  rejectUnexpected(body, ["expectedVersion", "consent"]);
   if (!Number.isInteger(body.expectedVersion) || body.expectedVersion <= 0) {
     invalidApplication({ expectedVersion: "must be a positive integer" });
   }
@@ -686,7 +667,7 @@ export function submitRiderApplication({ store, user, body, idempotencyKey, crea
       approvalCase: caseProjection(approvalCase),
     });
   }
-  if (approvalCase.submittedAt) {
+  if (approvalCase.submittedAt && approvalCase.riderReview?.status !== "needs_reupload") {
     fail(409, "approval_state_conflict", "This rider application is already submitted. Refresh its current state.", {
       approvalCase: caseProjection(approvalCase),
     });
@@ -696,6 +677,7 @@ export function submitRiderApplication({ store, user, body, idempotencyKey, crea
     expiredMessage: "Replace the expired driver's licence before submitting the rider application.",
     incompleteMessage: "Attach a current driver's licence photo with a future expiry before submitting the rider application.",
   });
+  recordRiderConsent(approvalCase, body.consent, at);
   approvalCase.submittedAt = at;
   approvalCase.updatedAt = at;
   const response = caseProjection(approvalCase);
@@ -708,10 +690,16 @@ export function submitRiderApplication({ store, user, body, idempotencyKey, crea
     actorUserId: user.id,
     actorKind: "applicant",
     requestId,
-    snapshot: { requestPayloadHash: payloadHash(body), approvalCase: response },
+    snapshot: { requestPayloadHash: payloadHash(body), approvalCase: response, riderReview: structuredClone(approvalCase.riderReview) },
     createdAt: at,
   });
+  (store.auditLog ||= []).push({
+    id: createId('aud'), at, actorId: user.id, actorRole: 'rider', action: 'rider.submitted',
+    entityType: 'approval_case', entityId: approvalCase.id,
+    detail: { requestId, version: approvalCase.version, consentVersion: 1 },
+  });
   notifySignupAndInvalidate(store, approvalCase, createId, at);
+  notifyRiderReview(store, approvalCase, "under_review", { createId, at });
   return { approvalCase: response, replay: false };
 }
 
@@ -725,7 +713,7 @@ export function reapplyForApproval({ store, user, pathKind, body, idempotencyKey
       idempotencyKey, createId, now });
     return { status: 200, approvalCase: result.approvalCase, replay: result.status === 200 };
   }
-  rejectUnexpected(body, ["expectedVersion", "correctionSummary"]);
+  rejectUnexpected(body, kind.caseKind === "rider" ? ["expectedVersion", "correctionSummary", "consent"] : ["expectedVersion", "correctionSummary"]);
   const correctionSummary = nonblank(body.correctionSummary);
   const fields = {};
   if (!Number.isInteger(body.expectedVersion) || body.expectedVersion <= 0) {
@@ -765,6 +753,7 @@ export function reapplyForApproval({ store, user, pathKind, body, idempotencyKey
       incompleteMessage: "Attach a current driver's licence photo with a future expiry before reapplying.",
     });
   }
+  if (kind.caseKind === "rider") recordRiderConsent(approvalCase, body.consent, at);
   const previous = caseProjection(approvalCase);
   approvalCase.status = "pending";
   approvalCase.version += 1;
@@ -805,5 +794,6 @@ export function reapplyForApproval({ store, user, pathKind, body, idempotencyKey
     detail: { kind: kind.caseKind, correctionSummary, applicationRevision: approvalCase.applicationRevision },
   });
   notifySignupAndInvalidate(store, approvalCase, createId, at);
+  if (kind.caseKind === "rider") notifyRiderReview(store, approvalCase, "under_review", { createId, at });
   return { status: 200, approvalCase, replay: false };
 }

@@ -12,6 +12,7 @@ import os from "node:os";
 import pg from "pg";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 
+import { recordRiderConsent } from "../src/rider-onboarding.js";
 import { createDatabase } from "../src/database.js";
 import {
   attachRiderDocument,
@@ -146,6 +147,19 @@ function rawRequest(api, rawPath, { method = "POST", subject, body } = {}) {
     clientRequest.on("error", reject);
     clientRequest.end(body == null ? undefined : JSON.stringify(body));
   });
+}
+
+function completeRiderDocuments(store, riderId) {
+  for (const kind of ['drivers_license_back', 'or_cr', 'motorcycle_photo', 'resume']) {
+    if (store.riderDocuments.some(d => d.riderId === riderId && d.kind === kind && d.isCurrent !== false)) continue;
+    const fileId = `${riderId}_${kind}`;
+    store.files.push({ fileId, ownerId: riderId, purpose: 'rider_verification_document', originalFilename: `${kind}.png`,
+      declaredContentType: 'image/png', detectedContentType: 'image/png', size: 128, state: 'ready', objectKey: `riders/${fileId}`, references: [], createdAt: AT });
+    attachRiderDocument(store, store.files.at(-1), {type: 'rider_document', record: store.users.find(u => u.id === riderId),
+      kind, ...(kind === 'motorcycle_photo' ? {description: 'Blue motorcycle, side view'} : {}), replacedDocuments: []}, { documentId: `document_${fileId}`, at: AT });
+  }
+  const c = store.approvalCases.find(c => c.userId === riderId && c.kind === 'rider');
+  recordRiderConsent(c, {accepted: true, version: 1}, AT);
 }
 
 async function clearAndFixture(database, { moneyModelVersion = 1 } = {}) {
@@ -283,6 +297,7 @@ async function clearAndFixture(database, { moneyModelVersion = 1 } = {}) {
       expiresOn: LICENSE_EXPIRY,
       replacedDocuments: [],
     }, { documentId: "rdoc_rider_license_fixture", at: AT });
+    completeRiderDocuments(store, "user_rider");
     await saveStore(database, store);
   });
 }
@@ -467,8 +482,8 @@ test("fixed auth projections authorize every state from memberships and approval
     assert.equal(rider.status, 200, JSON.stringify(rider.body));
     assert.equal(rider.body.riderProfile.vehicleType, "motorcycle");
     assert.equal(rider.body.approvalCase.status, "approved");
-    assert.equal(rider.body.documents.length, 1);
-    assert.equal(rider.body.documents[0].kind, "drivers_license");
+    assert.equal(rider.body.documents.length, 5);
+    assert.ok(rider.body.documents.some(d => d.kind === "drivers_license"));
     assert.equal(rider.body.capabilities.receiveDispatchOffers, true);
 
     assert.equal((await request(instance.api, "/auth/me/ops", { subject: "clerk_ops" })).status, 200);
@@ -840,7 +855,7 @@ test("legacy sync bumps case versions and demoted applicants get an explicit 409
   }
 });
 
-test("sign-up endpoints require Super Admin for every applicant kind", { skip: !DATABASE_URL }, async () => {
+test("sign-up endpoints retain Super Admin gates except rider review access", { skip: !DATABASE_URL }, async () => {
   const database = createDatabase({ DATABASE_URL });
   await clearAndFixture(database);
   await addApprovalDecisionFixtures(database);
@@ -861,6 +876,7 @@ test("sign-up endpoints require Super Admin for every applicant kind", { skip: !
         ["POST", "/users/user_rider/verification"],
       ];
       for (const [method, route] of routes) {
+        if (subject === 'clerk_ops' && ['/approval-cases/case_rider_intake', '/approval-cases/case_rider_intake/approve'].includes(route)) continue;
         const denied = await request(instance.api, route, {
           method, subject, ...(method === "POST" ? { body: { status: "approved", expectedVersion: 1,
             requestId: "approval-denied", reason: "Review evidence", note: "Review evidence" } } : {}),
@@ -1308,8 +1324,10 @@ test("racing approval decisions have one PostgreSQL winner and one set of side e
     assert.equal(events.length, 1);
     assert.deepEqual(notices.map((notice) => `${notice.userId}:${notice.type}`).sort(), [
       "user_ops:ops_approval_decision",
-      `user_rider:approval_${approve.status === 200 ? "approved" : "rejected"}`,
+      `user_ops:rider_${approve.status === 200 ? "approved" : "rejected"}`,
+      `user_rider:rider_${approve.status === 200 ? "approved" : "rejected"}`,
       "user_super:ops_approval_decision",
+      `user_super:rider_${approve.status === 200 ? "approved" : "rejected"}`,
     ]);
     assert.equal(audits.length, 1);
     assert.equal(persisted.approvalCases.find((candidate) => candidate.id === "case_rider").version, 2);
@@ -2811,7 +2829,7 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
     assert.equal(missingVersionSubmit.body.fields.expectedVersion, "must be a positive integer");
 
     const incompleteSubmit = await request(instance.api, "/me/approval-cases/rider/submit", {
-      method: "POST", subject: "clerk_rider_new", body: { expectedVersion: 1 },
+      method: "POST", subject: "clerk_rider_new", body: { expectedVersion: 1, consent: {accepted: true, version: 1} },
       headers: { "Idempotency-Key": "77777777-7777-4777-8777-777777777776" },
     });
     assert.equal(incompleteSubmit.status, 409, JSON.stringify(incompleteSubmit.body));
@@ -2847,6 +2865,7 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
       }, { documentId: "rdoc_new_license", at: "2026-08-16T02:00:00.000Z" });
       assert.equal(attached.approvalCase.id, approvalCase.id);
       assert.equal(attached.approvalCase.submittedAt, undefined);
+      completeRiderDocuments(store, enrolledRider.id);
       store.riderProfiles.find((profile) => profile.userId === enrolledRider.id).plateNumber =
         "PROFILE-COMPLETION-REQUIRED";
       await saveStore(database, store);
@@ -2856,9 +2875,9 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
     assert.equal(resumed.status, 200, JSON.stringify(resumed.body));
     assert.equal(resumed.body.onboardingIncomplete, true);
     assert.equal(resumed.body.approvalCase.submittedAt, null);
-    assert.equal(resumed.body.documents[0].kind, "drivers_license");
+    assert.ok(resumed.body.documents.some(d => d.kind === "drivers_license"));
     const incompleteProfileSubmit = await request(instance.api, "/me/approval-cases/rider/submit", {
-      method: "POST", subject: "clerk_rider_new", body: { expectedVersion: 1 },
+      method: "POST", subject: "clerk_rider_new", body: { expectedVersion: 1, consent: {accepted: true, version: 1} },
       headers: { "Idempotency-Key": "rider-submit-incomplete-profile" },
     });
     assert.equal(incompleteProfileSubmit.status, 400, JSON.stringify(incompleteProfileSubmit.body));
@@ -2894,7 +2913,7 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
       "pending",
     );
     const submitted = await request(instance.api, "/me/approval-cases/rider/submit", {
-      method: "POST", subject: "clerk_rider_new", body: { expectedVersion: 1 },
+      method: "POST", subject: "clerk_rider_new", body: { expectedVersion: 1, consent: {accepted: true, version: 1} },
       headers: { "Idempotency-Key": "77777777-7777-4777-8777-777777777777" },
     });
     assert.equal(submitted.status, 200, JSON.stringify(submitted.body));
@@ -2903,7 +2922,7 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
     assert.equal(completed.body.onboardingIncomplete, false);
     assert.equal(completed.body.approvalCase.submittedAt, submitted.body.approvalCase.submittedAt);
     const duplicateSubmit = await request(instance.api, "/me/approval-cases/rider/submit", {
-      method: "POST", subject: "clerk_rider_new", body: { expectedVersion: 1 },
+      method: "POST", subject: "clerk_rider_new", body: { expectedVersion: 1, consent: {accepted: true, version: 1} },
       headers: { "Idempotency-Key": "rider-submit-second-key" },
     });
     assert.equal(duplicateSubmit.status, 409, JSON.stringify(duplicateSubmit.body));
@@ -2927,9 +2946,10 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
     assert.equal(incompleteAgain.status, 200, JSON.stringify(incompleteAgain.body));
     assert.equal(incompleteAgain.body.onboardingIncomplete, true);
     assert.equal(incompleteAgain.body.approvalCase.submittedAt, null);
-    assert.deepEqual(incompleteAgain.body.documents, []);
+    assert.equal(incompleteAgain.body.documents.length, 4);
+    assert.ok(incompleteAgain.body.documents.every(d => d.kind !== "drivers_license"));
     const deletedResubmit = await request(instance.api, "/me/approval-cases/rider/submit", {
-      method: "POST", subject: "clerk_rider_new", body: { expectedVersion: 1 },
+      method: "POST", subject: "clerk_rider_new", body: { expectedVersion: 1, consent: {accepted: true, version: 1} },
       headers: { "Idempotency-Key": "77777777-7777-4777-8777-777777777778" },
     });
     assert.equal(deletedResubmit.status, 409, JSON.stringify(deletedResubmit.body));
@@ -2959,7 +2979,7 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
     assert.equal(riderRejected.status, 200, JSON.stringify(riderRejected.body));
     assert.equal(riderRejected.body.user.verificationStatus, "rejected");
     const submittedRetryAfterRejection = await request(instance.api, "/me/approval-cases/rider/submit", {
-      method: "POST", subject: "clerk_rider_new", body: { expectedVersion: 1 },
+      method: "POST", subject: "clerk_rider_new", body: { expectedVersion: 1, consent: {accepted: true, version: 1} },
       headers: { "Idempotency-Key": "77777777-7777-4777-8777-777777777777" },
     });
     assert.equal(submittedRetryAfterRejection.status, 200, JSON.stringify(submittedRetryAfterRejection.body));
@@ -2973,6 +2993,7 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
     const riderReapplyBody = {
       expectedVersion: 2,
       correctionSummary: "Re-uploaded the driver's licence photo.",
+      consent: {accepted: true, version: 1},
     };
     const reapplyWithoutLicense = await request(instance.api, "/me/approval-cases/rider/reapply", {
       method: "POST", subject: "clerk_rider_new", body: riderReapplyBody,
@@ -3028,7 +3049,7 @@ test("fixed enrollment and reapplication persist exact role-safe workflows in Po
     assert.equal(Object.hasOwn(legacyRider, "verificationNote"), false);
     assert.deepEqual(
       afterRiderReapply.riderDocuments
-        .filter((document) => document.riderId === invalidatedDocument.riderId)
+        .filter((document) => document.riderId === invalidatedDocument.riderId && document.kind === "drivers_license")
         .map((document) => [document.id, document.isCurrent !== false]),
       [["rdoc_new_license", false], ["rdoc_replacement_license", true]],
     );
@@ -3377,31 +3398,31 @@ test("GET /auth/me and the Clerk webhook refresh the person copy only", { skip: 
   }
 });
 
-test("legacy verification can approve a rider who enrolled with a typed licence number", { skip: !DATABASE_URL }, async () => {
+test("legacy verification refuses typed-license-only rider approval", { skip: !DATABASE_URL }, async () => {
   const database = createDatabase({ DATABASE_URL });
   await clearAndFixture(database);
   await database.transaction(async () => {
     const store = await loadStore(database);
     store.users.push({
-      id: "user_jaylord",
-      clerkUserId: "clerk_jaylord",
-      email: "jaylord@gridgo.test",
-      name: "Jaylord",
+      id: "user_pending_rider",
+      clerkUserId: "clerk_pending_rider",
+      email: "pending-rider@example.invalid",
+      name: "Pending Rider",
       role: "rider",
       verificationStatus: "pending",
       createdAt: AT,
     });
-    store.userRoleMemberships.push({ userId: "user_jaylord", role: "rider", createdAt: AT });
+    store.userRoleMemberships.push({ userId: "user_pending_rider", role: "rider", createdAt: AT });
     store.riderProfiles.push({
-      userId: "user_jaylord",
+      userId: "user_pending_rider",
       vehicleType: "motorcycle",
       plateNumber: "ABC 1234",
       licenseNumber: "N01-1234",
       updatedAt: AT,
     });
     store.approvalCases.push({
-      id: "apc_jaylord",
-      userId: "user_jaylord",
+      id: "apc_pending_rider",
+      userId: "user_pending_rider",
       kind: "rider",
       status: "pending",
       version: 1,
@@ -3413,20 +3434,15 @@ test("legacy verification can approve a rider who enrolled with a typed licence 
   });
   const instance = await startApi();
   try {
-    const approved = await request(instance.api, "/users/user_jaylord/verification", {
+    const approved = await request(instance.api, "/users/user_pending_rider/verification", {
       method: "POST",
       subject: "clerk_super",
       body: { status: "approved", note: "Pilot accreditation complete" },
     });
-    assert.equal(approved.status, 200, JSON.stringify(approved.body));
-    assert.equal(approved.body.user.verificationStatus, "approved");
-    const persisted = await loadStoreEventually(database, (store) => {
-      const approvalCase = store.approvalCases.find((candidate) => candidate.id === "apc_jaylord");
-      return approvalCase?.status === "approved" && approvalCase.submittedAt;
-    });
-    const approvalCase = persisted.approvalCases.find((candidate) => candidate.id === "apc_jaylord");
-    assert.equal(approvalCase.status, "approved");
-    assert.ok(approvalCase.submittedAt);
+    assert.equal(approved.status, 409, JSON.stringify(approved.body));
+    assert.equal(approved.body.error, 'rider_documents_incomplete');
+    const persisted = await loadStore(database);
+    assert.equal(persisted.approvalCases.find(c => c.id === 'apc_pending_rider').status, 'pending');
   } finally {
     instance.child.kill("SIGTERM");
     await new Promise((resolve) => instance.child.once("exit", resolve));
@@ -5621,4 +5637,61 @@ test('an open bracket quote keeps its table and fee when accepted after settings
   assert.equal(order.grossServiceFeeMinor,165000);
   assert.deepEqual(order.serviceFeeSchedule.brackets,brackets);
   assert.equal(order.serviceFeeRateBps,null);
+});
+
+test('rider onboarding requires consent, supports Operations re-upload and keeps evidence private', {skip: !DATABASE_URL}, async t => {
+  const database=createDatabase({DATABASE_URL}); t.after(()=>database.close()); await clearAndFixture(database);
+  await database.transaction(async()=>{
+    const s=await loadStore(database), c=s.approvalCases.find(c=>c.id==='case_rider');
+    c.status='pending'; delete c.submittedAt; delete c.riderReview;
+    s.users.find(u=>u.id==='user_rider').verificationStatus='pending';
+    await saveStore(database,s);
+  });
+  const storage=await startMockObjectStorage({size:128}); t.after(()=>new Promise(r=>storage.server.close(r)));
+  const instance=await startApi({MINIO_ENDPOINT:storage.url,MINIO_ACCESS_KEY:'test-access',MINIO_SECRET_KEY:'test-secret',MINIO_BUCKET:'test-bucket',MINIO_REGION:'us-east-1'});
+  t.after(async()=>{instance.child.kill('SIGTERM');await new Promise(r=>instance.child.once('exit',r));});
+  const submit=(consent,key,version=1)=>request(instance.api,'/me/approval-cases/rider/submit',{method:'POST',subject:'clerk_rider',headers:{'Idempotency-Key':key},body:{expectedVersion:version,...(consent?{consent}:{})}});
+  const missing=await submit(null,'no-consent'); assert.equal(missing.status,400,JSON.stringify(missing.body)); assert.equal(missing.body.error,'consent_required');
+  const sent=await submit({accepted:true,version:1},'first-consent'); assert.equal(sent.status,200,JSON.stringify(sent.body));
+  const state=await request(instance.api,'/auth/me/rider',{subject:'clerk_rider'});
+  assert.equal(state.body.riderVerification.status,'under_review'); assert.equal(state.body.capabilities.acceptAssignments,false);
+  assert.equal((await request(instance.api,'/dispatch/ord_payout/accept',{method:'POST',subject:'clerk_rider',body:{}})).status,403);
+  assert.ok(state.body.riderVerification.consent.acceptedAt); assert.ok(state.body.riderVerification.consent.wording);
+  const queue=await request(instance.api,'/approval-cases?kind=rider',{subject:'clerk_ops'}); assert.equal(queue.status,200,JSON.stringify(queue.body));
+  assert.ok(queue.body.approvalCases.every(c=>c.kind==='rider'));
+  assert.equal((await request(instance.api,'/approval-cases',{subject:'clerk_ops'})).status,403);
+  for(const subject of ['clerk_client','clerk_supplier']) {
+    assert.equal((await request(instance.api,'/approval-cases/case_rider',{subject})).status,403);
+    for(const fileId of ['file_rider_license_fixture','user_rider_drivers_license_back','user_rider_or_cr','user_rider_motorcycle_photo','user_rider_resume']) {
+      assert.equal((await request(instance.api,`/files/${fileId}/download-url`,{subject})).status,403);
+    }
+  }
+  const review={expectedVersion:1,requestId:'request-document-reupload',documents:[{kind:'or_cr',reason:'The registration number is unreadable.'}]};
+  const returned=await request(instance.api,'/approval-cases/case_rider/needs-reupload',{method:'POST',subject:'clerk_ops',body:review});
+  assert.equal(returned.status,200,JSON.stringify(returned.body)); assert.equal(returned.body.riderVerification.status,'needs_reupload');
+  assert.equal(returned.body.riderDocuments.find(d=>d.kind==='or_cr').reuploadReason,review.documents[0].reason);
+  assert.equal((await request(instance.api,'/approval-cases/case_rider/approve',{method:'POST',subject:'clerk_super',body:{expectedVersion:2,requestId:'approve-too-early'}})).status,409);
+  const unchanged=returned.body.riderDocuments.filter(d=>d.kind!=='or_cr').map(d=>d.fileId).sort();
+  // A ready uploaded replacement still goes through the production attachment route.
+  await database.transaction(async()=>{
+    const s=await loadStore(database); s.files.push({...s.files.find(f=>f.fileId==='user_rider_or_cr'),fileId:'replacement_registration',references:[],objectKey:'private/replacement'}); await saveStore(database,s);
+  });
+  const wrongSlot=await request(instance.api,'/files/replacement_registration/attach',{method:'POST',subject:'clerk_rider',body:{riderDocumentType:'resume'}});
+  assert.equal(wrongSlot.status,409,JSON.stringify(wrongSlot.body));
+  const replacement=await request(instance.api,'/files/replacement_registration/attach',{method:'POST',subject:'clerk_rider',body:{riderDocumentType:'or_cr'}});
+  assert.equal(replacement.status,200,JSON.stringify(replacement.body)); assert.equal(replacement.body.approvalCase.version,3);
+  const detail=await request(instance.api,'/approval-cases/case_rider',{subject:'clerk_ops'});
+  assert.deepEqual(detail.body.riderDocuments.filter(d=>d.kind!=='or_cr').map(d=>d.fileId).sort(),unchanged);
+  assert.equal(detail.body.riderDocuments.find(d=>d.kind==='or_cr').reuploadReason,null);
+  const skippedResend=await request(instance.api,'/approval-cases/case_rider/approve',{method:'POST',subject:'clerk_ops',body:{expectedVersion:3,requestId:'cannot-skip-resend'}});
+  assert.equal(skippedResend.status,409); assert.equal(skippedResend.body.error,'approval_state_conflict');
+  const resent=await submit({accepted:true,version:1},'resubmit-consent',3); assert.equal(resent.status,200,JSON.stringify(resent.body));
+  const approved=await request(instance.api,'/approval-cases/case_rider/approve',{method:'POST',subject:'clerk_ops',body:{expectedVersion:3,requestId:'approve-fixed-documents'}});
+  assert.equal(approved.status,200,JSON.stringify(approved.body)); assert.equal(approved.body.riderVerification.status,'approved');
+  assert.equal((await request(instance.api,'/auth/me/rider',{subject:'clerk_rider'})).body.capabilities.acceptAssignments,true);
+  const persisted=await loadStore(database);
+  assert.equal(persisted.riderDocuments.find(d=>d.fileId==='user_rider_or_cr').isCurrent,false);
+  for(const status of ['under_review','needs_reupload','approved']) {
+    for(const userId of ['user_rider','user_ops','user_super']) assert.ok(persisted.notifications.some(n=>n.userId===userId&&n.type===`rider_${status}`));
+  }
 });

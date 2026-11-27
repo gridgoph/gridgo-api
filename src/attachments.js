@@ -196,7 +196,7 @@ export const PURPOSE_POLICIES = Object.freeze({
     contentTypes: ["image/jpeg", "image/png", "image/webp"],
   },
 });
-export const RIDER_DOCUMENT_TYPES = Object.freeze(["drivers_license", "or_cr", "selfie"]);
+export const RIDER_DOCUMENT_TYPES = Object.freeze(["drivers_license", "drivers_license_back", "or_cr", "selfie", "motorcycle_photo", "resume"]);
 const RIDER_DOCUMENT_TYPE_SET = new Set(RIDER_DOCUMENT_TYPES);
 const GENERIC_CONTENT_TYPES = new Set(["", "application/octet-stream"]);
 const EXTENSION_CONTENT_TYPES = new Map([
@@ -745,12 +745,13 @@ export function invalidateRiderDocumentsForFile(store, file, at) {
           (candidate) => candidate.fileId === document.fileId && candidate.state === "ready",
         ),
     );
-    if (hasReadyLicense) continue;
+    if (hasReadyLicense && !invalidated.some(d => d.riderId === riderId && ['drivers_license_back', 'or_cr', 'motorcycle_photo', 'resume'].includes(d.kind))) continue;
     const approvalCase = (store.approvalCases || []).find(
       (candidate) => candidate.userId === riderId && candidate.kind === "rider",
     );
     if (approvalCase?.status === "pending" && approvalCase.submittedAt != null) {
       approvalCase.submittedAt = null;
+      if (approvalCase.riderReview) approvalCase.riderReview.status = 'intake';
       approvalCase.updatedAt = at;
     }
   }
@@ -879,7 +880,7 @@ export function resolveFileTarget(store, purpose, body, user = null) {
     fail(400, "invalid_file_purpose", "Choose one supported file purpose and try again.");
   }
   const allowedFields = purpose === "rider_verification_document"
-    ? ["riderDocumentType", "expiresOn"]
+    ? ["riderDocumentType", "expiresOn", "description"]
     : purpose === "verification_document"
     ? ["documentType", "replaceFileId"]
     : purpose === "service_image"
@@ -947,12 +948,28 @@ export function resolveFileTarget(store, purpose, body, user = null) {
       fail(
         400,
         "invalid_rider_document_type",
-        "Choose drivers_license, or_cr, or selfie for this rider document.",
+        "Choose a supported rider document type.",
         { allowed: RIDER_DOCUMENT_TYPES },
       );
     }
     const record = (store.users || []).find((item) => item.id === user?.id);
     if (!record || !hasRole(record, "rider")) forbidden();
+    const approvalCase = (store.approvalCases || []).find(c => c.userId === record.id && c.kind === 'rider');
+    if (approvalCase?.status === 'pending' && approvalCase.submittedAt) {
+      if (approvalCase.riderReview?.status !== 'needs_reupload'
+        || !approvalCase.riderReview.requestedKinds?.includes(riderDocumentType)) {
+        fail(409, 'approval_state_conflict', 'Only a document requested for re-upload can be replaced during review.');
+      }
+    }
+    let description;
+    if (riderDocumentType === 'motorcycle_photo') {
+      if (typeof body.description !== 'string' || !body.description.trim() || body.description.trim().length > 500) {
+        fail(400, 'invalid_application', 'Describe the motorcycle in 1 to 500 characters.');
+      }
+      description = body.description.trim();
+    } else if (body.description != null) {
+      fail(400, 'unexpected_target_field', 'Only a motorcycle photo accepts a description.');
+    }
     const expiresOn = body?.expiresOn == null ? null : String(body.expiresOn);
     if (riderDocumentType === "drivers_license") {
       if (!/^\d{4}-\d{2}-\d{2}$/.test(expiresOn || "")) {
@@ -986,6 +1003,7 @@ export function resolveFileTarget(store, purpose, body, user = null) {
       type: "rider_document",
       record,
       kind: riderDocumentType,
+      ...(description ? { description } : {}),
       ...(expiresOn ? { expiresOn } : {}),
       replacedDocuments,
     };
@@ -1211,6 +1229,10 @@ export function authorizeFileAttach(user, file, target, store = null) {
   }
   if (file.purpose === "rider_verification_document") {
     if (target?.type !== "rider_document" || !hasRole(user, "rider") || target.record.id !== user.id) forbidden();
+    if (['drivers_license', 'drivers_license_back', 'motorcycle_photo'].includes(target.kind)
+      && !['image/jpeg', 'image/png', 'image/webp'].includes(file.detectedContentType)) {
+      fail(400, 'invalid_document_content_type', 'Upload an image for this document.');
+    }
     if (!RIDER_DOCUMENT_TYPE_SET.has(target.kind)) {
       fail(409, "file_metadata_invalid", "This rider document has no valid document type. Upload the file again.");
     }
@@ -1359,6 +1381,7 @@ export function attachRiderDocument(store, file, target, { documentId, at }) {
     kind: target.kind,
     fileId: file.fileId,
     ...(target.expiresOn ? { expiresOn: target.expiresOn } : {}),
+    ...(target.description ? { description: target.description } : {}),
     isCurrent: true,
     uploadedAt: at,
   };
@@ -1368,6 +1391,10 @@ export function attachRiderDocument(store, file, target, { documentId, at }) {
   const approvalCase = (store.approvalCases || []).find(
     (candidate) => candidate.userId === target.record.id && candidate.kind === "rider",
   );
+  if (approvalCase?.status === 'pending' && approvalCase.riderReview?.status === 'needs_reupload') {
+    approvalCase.version += 1;
+    approvalCase.updatedAt = at;
+  }
   return { document, approvalCase: approvalCase || null };
 }
 

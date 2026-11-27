@@ -1,5 +1,7 @@
 # GRIDGO API
 
+Private rider document uploads, consent, Operations review and per-document re-upload: [Rider onboarding](docs/RIDER_ONBOARDING_API.md).
+
 Ready-made product templates, full price tables, price checks, assisted setup and explicit legacy conversion: [Product templates](docs/PRODUCT_TEMPLATES_API.md).
 
 My shop status, expiring pauses and night Express documents: [Express API](docs/EXPRESS_API.md#my-shop-status-and-night-documents).
@@ -57,7 +59,7 @@ Apps obtain a Clerk session JWT (including Google sign-in) and send it as `Autho
 - `GET /auth/me` returns the mapped identity plus all database memberships and approval-case summaries. A verified Clerk subject with no GRIDGO user is `401 unmapped_identity`; an invalid token is `401 unauthorized`.
 - Each app uses its fixed database projection: `/auth/me/client`, `/auth/me/supplier`, `/auth/me/rider`, `/auth/me/ops`, or `/auth/me/admin`. The URL selects the required membership; request JSON cannot select or grant one.
 - `POST /auth/clerk/activate` is the explicit client-only Google/public SSO path. It creates a new personal client identity, or adds a personal client membership to an already-mapped identity, and returns `{ "user": ... }`; it never merges by email or grants another membership.
-- Fixed supplier/rider enrollment routes add only the membership named by the URL; `/me/business-application` submits a case for an existing client membership. All three require `Idempotency-Key`; supplier/business submit immediately, while rider sign-in resumes document intake followed by explicit submission after a current licence is attached. Existing clients reuse their current Clerk session for shop enrollment or staff invite claims; shop selection, onboarding and 24-hour invitations are documented in [Shop teams](docs/SHOP_TEAM_API.md).
+- Fixed supplier/rider enrollment routes add only the membership named by the URL; `/me/business-application` submits a case for an existing client membership. All three require `Idempotency-Key`; supplier/business submit immediately, while rider sign-in resumes document intake followed by explicit submission after all required rider documents and privacy consent. Existing clients reuse their current Clerk session for shop enrollment or staff invite claims; shop selection, onboarding and 24-hour invitations are documented in [Shop teams](docs/SHOP_TEAM_API.md).
 - Supplier/rider memberships come only from their fixed enrollment routes or the audited GRIDGO role route; Operations and administrator memberships are assignment-only. An activation request can never choose or inherit one of those memberships.
 - `POST /auth/logout` releases the optional push device token to the anonymous app-update pool. The app terminates its Clerk session with Clerk; the API has no local session to revoke.
 

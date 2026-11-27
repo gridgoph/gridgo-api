@@ -91,7 +91,7 @@ const TABLES = [
   { name: "shop_reviews", keys: ["id"], columns: ["id", "order_id", "supplier_id", "client_id", "quality_stars", "speed_stars", "value_stars", "comment", "created_at"] },
   { name: "supplier_payment_terms", keys: ["supplier_id"], columns: ["supplier_id", "delivery_downpayment_rate_bps", "pickup_full_online_enabled", "pickup_downpayment_store_enabled", "pickup_downpayment_rate_bps", "version", "updated_at"] },
   { name: "rider_profiles", keys: ["user_id"], columns: ["user_id", "vehicle_type", "plate_number", "license_number", "version", "updated_at"] },
-  { name: "approval_cases", keys: ["id"], columns: ["id", "user_id", "kind", "status", "version", "application_revision", "business_permit_required", "submitted_at", "decided_at", "decided_by", "rejection_reason", "suspension_reason", "created_at", "updated_at"] },
+  { name: "approval_cases", keys: ["id"], columns: ["id", "user_id", "kind", "status", "version", "application_revision", "business_permit_required", "submitted_at", "decided_at", "decided_by", "rejection_reason", "suspension_reason", "created_at", "updated_at", "rider_review"] },
   { name: "approval_case_events", keys: ["id"], columns: ["id", "approval_case_id", "application_revision", "from_status", "to_status", "actor_user_id", "actor_kind", "reason", "request_id", "snapshot", "created_at"], appendOnly: true },
   { name: "catalog_products", keys: ["id"], columns: ["id", "name", "family", "base_price_minor", "unit", "position", "data"] },
   { name: "taxonomy_categories", keys: ["id"], columns: ["id", "code", "name", "active", "sort_order", "position", "data"] },
@@ -154,7 +154,7 @@ const TABLES = [
   { name: "supplier_shop_media", keys: ["supplier_id", "slot"], columns: ["supplier_id", "slot", "file_id", "updated_at"] },
   { name: "supplier_payout_accounts", keys: ["supplier_id"], columns: ["supplier_id", "provider", "account_name", "account_number", "institution", "qr_file_id", "version", "updated_at"] },
   { name: "file_references", keys: ["file_id", "reference_type", "reference_id", "field"], columns: ["file_id", "reference_type", "reference_id", "field", "position", "data"] },
-  { name: "rider_documents", keys: ["id"], columns: ["id", "rider_id", "kind", "file_id", "expires_on", "is_current", "uploaded_at", "replaced_at"] },
+  { name: "rider_documents", keys: ["id"], columns: ["id", "rider_id", "kind", "file_id", "expires_on", "is_current", "uploaded_at", "replaced_at", "description", "reupload_reason"] },
   { name: "credit_accounts", keys: ["user_id"], columns: ["user_id", "balance_minor", "data"] },
   { name: "credit_ledger", keys: ["id"], columns: ["id", "user_id", "amount_minor", "balance_after_minor", "created_at", "position", "data"] },
   { name: "claims", keys: ["id"], columns: ["id", "order_id", "status", "created_at", "updated_at", "position", "data"] },
@@ -415,7 +415,7 @@ function rowsFromStore(store) {
       submitted_at: approvalCase.submittedAt ?? null, decided_at: approvalCase.decidedAt ?? null,
       decided_by: approvalCase.decidedBy ?? null, rejection_reason: approvalCase.rejectionReason ?? null,
       suspension_reason: approvalCase.suspensionReason ?? null, created_at: approvalCase.createdAt,
-      updated_at: approvalCase.updatedAt,
+      updated_at: approvalCase.updatedAt, rider_review: approvalCase.riderReview || {},
     });
   }
   for (const event of (store.approvalCaseEvents || [])) {
@@ -842,7 +842,7 @@ function rowsFromStore(store) {
     });
   }
   for (const document of (store.riderDocuments || [])) {
-    rows.rider_documents.push({ id: document.id, rider_id: document.riderId, kind: document.kind, file_id: document.fileId, expires_on: document.expiresOn ?? null, is_current: document.isCurrent !== false, uploaded_at: document.uploadedAt, replaced_at: document.replacedAt ?? null });
+    rows.rider_documents.push({ id: document.id, rider_id: document.riderId, kind: document.kind, file_id: document.fileId, expires_on: document.expiresOn ?? null, is_current: document.isCurrent !== false, uploaded_at: document.uploadedAt, description: document.description ?? null, reupload_reason: document.reuploadReason ?? null, replaced_at: document.replacedAt ?? null });
   }
   for (const [userId, account] of Object.entries(store.credits || {})) {
     rows.credit_accounts.push({ user_id: userId, balance_minor: money(account.balanceMinor, "credits.balanceMinor"), data: without(account, ["balanceMinor", "ledger"]) });
@@ -2521,6 +2521,7 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
   store.approvalCases = orderedBy(loaded.approval_cases, "created_at", "id").map((row) => {
     const item = { id: row.id, userId: row.user_id, kind: row.kind, status: row.status, version: row.version, applicationRevision: row.application_revision, createdAt: row.created_at, updatedAt: row.updated_at };
     if (row.business_permit_required) item.businessPermitRequired = true;
+    if (Object.keys(row.rider_review || {}).length) item.riderReview = row.rider_review;
     present(item, "submittedAt", row.submitted_at);
     present(item, "decidedAt", row.decided_at);
     present(item, "decidedBy", row.decided_by);
@@ -2865,6 +2866,8 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
   }));
   store.riderDocuments = orderedBy(loaded.rider_documents, "uploaded_at", "id").map((row) => {
     const item = { id: row.id, riderId: row.rider_id, kind: row.kind, fileId: row.file_id, isCurrent: row.is_current, uploadedAt: row.uploaded_at };
+    present(item, "description", row.description);
+    present(item, "reuploadReason", row.reupload_reason);
     present(item, "expiresOn", row.expires_on);
     present(item, "replacedAt", row.replaced_at);
     return item;

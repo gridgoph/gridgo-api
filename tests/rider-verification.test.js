@@ -39,8 +39,14 @@ test("canonical rider approval still requires a submitted case and a licence fil
   );
 });
 
-test("legacy verification accepts a typed licence number when no file was ever attached", () => {
-  assert.doesNotThrow(() => assertRiderLegacyVerificationReady(riderStore(), "user_rider", AT));
+test("legacy verification cannot bypass document onboarding with a typed license", () => {
+  assert.throws(() => assertRiderLegacyVerificationReady(riderStore(), "user_rider", AT), e => e.code === "rider_documents_incomplete");
+});
+
+test("grandfathered approved riders can be restored without new evidence", () => {
+  const store = riderStore();
+  Object.assign(store.approvalCases[0], {status: 'suspended', riderReview: {legacyApproved: true}});
+  assert.doesNotThrow(() => assertRiderApprovalReady(store, 'user_rider', AT));
 });
 
 test("legacy verification still refuses a rider whose licence file was removed", () => {

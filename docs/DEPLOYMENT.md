@@ -239,7 +239,7 @@ Identity onboarding is:
 
 1. create or invite the identity through Clerk;
 2. have a client call `/auth/clerk/activate`, or have a supplier/rider call the matching fixed enrollment route; an already-mapped identity keeps its existing memberships;
-3. have a rider attach a current driver's licence and explicitly submit the pending case;
+3. have a rider attach the five required documents, accept the document privacy consent and explicitly submit the pending case (apply `1795793000000_rider_document_review` before deploying the rider onboarding API; existing approved riders retain their work eligibility);
 4. Operations completes supplier/rider verification before matching or dispatch; apart from the first-administrator CLI bootstrap, Operations and administrator memberships still require audited assignment through `PATCH /users/:id/role`.
 
 `POST /auth/login` and `/auth/signup` are gone. Mobile/dashboard clients must send their Clerk JWT directly. `POST /auth/logout` only releases a named phone registration; the client terminates its Clerk session using the Clerk SDK.
