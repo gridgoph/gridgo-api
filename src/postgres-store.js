@@ -88,7 +88,7 @@ const TABLES = [
   { name: "supplier_profiles", keys: ["user_id"], columns: ["user_id", "shop_name", "contact_name", "shop_lat", "shop_lng", "shop_label", "pickup_available", "is_closed", "express_enabled", "availability", "schedule", "home_printer", "version", "updated_at"] },
   { name: 'supplier_signups', keys: ['clerk_user_id'], columns: ['clerk_user_id','supplier_id','version','steps','updated_at'] },
   { name: 'supplier_payout_policies', keys: ['supplier_id'], columns: ['supplier_id','holder','consent','paused_until','updated_at'] },
-  { name: "shop_reviews", keys: ["id"], columns: ["id", "order_id", "supplier_id", "client_id", "quality_stars", "speed_stars", "value_stars", "comment", "created_at"] },
+  { name: "shop_reviews", keys: ["id"], columns: ["id", "order_id", "supplier_id", "client_id", "quality_stars", "speed_stars", "value_stars", "comment", "tags", "created_at"] },
   { name: "supplier_payment_terms", keys: ["supplier_id"], columns: ["supplier_id", "delivery_downpayment_rate_bps", "pickup_full_online_enabled", "pickup_downpayment_store_enabled", "pickup_downpayment_rate_bps", "version", "updated_at"] },
   { name: "rider_profiles", keys: ["user_id"], columns: ["user_id", "vehicle_type", "plate_number", "license_number", "version", "updated_at"] },
   { name: "approval_cases", keys: ["id"], columns: ["id", "user_id", "kind", "status", "version", "application_revision", "business_permit_required", "submitted_at", "decided_at", "decided_by", "rejection_reason", "suspension_reason", "created_at", "updated_at"] },
@@ -378,6 +378,7 @@ function rowsFromStore(store) {
       speed_stars: review.speedStars,
       value_stars: review.valueStars,
       comment: review.comment ?? null,
+      tags: review.tags || [],
       created_at: review.createdAt,
     });
   }
@@ -2526,6 +2527,7 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
     speedStars: row.speed_stars,
     valueStars: row.value_stars,
     comment: row.comment,
+    tags: row.tags || [],
     createdAt: row.created_at,
   }));
   store.supplierPaymentTerms = orderedBy(loaded.supplier_payment_terms, "supplier_id").map((row) => ({
