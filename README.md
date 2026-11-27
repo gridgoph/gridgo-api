@@ -1,5 +1,7 @@
 # GRIDGO API
 
+Express order chat, agreed shop extras and the shared team inbox: [Order conversations](docs/ORDER_CLIENT_SHOP_CHAT_API.md#express-order-chat-and-shared-shop-inbox).
+
 Private rider document uploads, consent, Operations review and per-document re-upload: [Rider onboarding](docs/RIDER_ONBOARDING_API.md).
 
 Structured review tags, private comments and client shop summaries: [Shop ratings](docs/SHOP_RATINGS_API.md).

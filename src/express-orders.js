@@ -1,3 +1,4 @@
+import { publicShopExtras } from './express-chat-extras.js';
 import { publicExpressPrint } from './express-shop-pricing.js';
 import { homePrinterStatus, homeVerified, recordHomeOffer, snapshotHomePrinter, homeDistance } from './home-printers.js';
 import { groupExpressMoved, cancelGroupExpressOrder } from './group-express-recovery.js';
@@ -146,13 +147,15 @@ function acceptFirstProjection(order,{own,staff,shop}) {
   const e=order.expressOrder,status=expressStatus(order),out={acceptFlow:2,acceptWindowSeconds:EXPRESS_ACCEPT_FIRST_MS/1000};
   out.request={requestId:e.requestId||order.id,attempt:e.attempt||1,previousOrderId:e.previousOrderId||null,nextOrderId:e.reroute?.nextOrderId||null,
     shopInRound:e.routing?.roundAsked||1,shopsPerRound:EXPRESS_SHOPS_PER_ROUND};
-  if(!own&&!staff)return shop?{request:{attempt:out.request.attempt},acceptFlow:2,acceptWindowSeconds:out.acceptWindowSeconds}:out;
+  if(!own&&!staff)return shop?{request:{attempt:out.request.attempt},acceptFlow:2,acceptWindowSeconds:out.acceptWindowSeconds,
+    ...(e.shopExtras?{shopExtras:publicShopExtras(order)}:{})}:out;
   const r=e.reroute;
   out.reroute=r?{status:r.status,at:r.at,expiresAt:r.expiresAt||null,reason:r.reason||null,nextOrderId:r.nextOrderId||null,retryUntil:r.retryUntil||null,
     candidate:r.candidate?structuredClone(r.candidate):null,searchAway:r.searchAway?structuredClone(r.searchAway):null,
     options:HELD_REROUTE.includes(r.status)&&order.state==='supplier_assigned'?({price_check:['accept','pick','cancel'],exhausted:['search_away','keep_trying','pick','cancel'],retrying:['pick','cancel']})[r.status]:[]}:null;
+  out.shopExtras=publicShopExtras(order);
   const schedule=order.serviceFeeSchedule;
-  out.money={printingMinor:order.supplierSubtotalMinor,gridgoFeeMinor:order.grossServiceFeeMinor??order.serviceFeeMinor,
+  out.money={printingMinor:order.expressOrder?.shopExtras?.printingMinor??order.supplierSubtotalMinor,extrasMinor:order.expressOrder?.shopExtras?.appliedAt?order.expressOrder.shopExtras.price.extrasMinor:0,gridgoFeeMinor:order.grossServiceFeeMinor??order.serviceFeeMinor,
     feeRule:schedule?.version===3?{minimumMinor:schedule.minimumMinor,rateBasisPoints:schedule.rateBps,applied:order.serviceFeeWorking?.[0]?.applied??null,roundTotalUpToMinor:schedule.roundTotalUpToMinor}:null,
     deliveryFeeMinor:order.deliveryFeeMinor,discountMinor:(order.organizationDiscountMinor||0)+(order.voucherDiscountMinor||0)+(order.memberPerkMinor||0),totalMinor:order.totalMinor,
     printedPages:(e.printSettings||[]).reduce((sum,p)=>sum+(p.pages?.printed||0)*(p.copies||1),0)};

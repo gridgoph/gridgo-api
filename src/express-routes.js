@@ -1,3 +1,4 @@
+import { setShopExtras, applyShopExtras } from './express-chat-extras.js';
 import { homeProfile, homePrinterStatus, recordHomeOffer, recordHomeGiveBack } from './home-printers.js';
 import { supplierCanWork } from "./supplier-verification.js";
 import { notifyAdmins } from './domain-events.js';
@@ -17,7 +18,7 @@ import { routeAcceptFirst, acceptFirstAccepted, acceptFirstPickupPayment } from 
 import { recordCounterCash } from './shop-money.js';
 import { confirmVoucher } from './vouchers.js';
 
-export async function routeExpressOrders({req,url,store,user,readBody,id,now,audit}) {
+export async function routeExpressOrders({req,url,store,user,readBody,id,now,audit,database}) {
  if(url.pathname==='/me/express-settings' && ['GET','PATCH'].includes(req.method)) {
    if(user?.role!=='supplier' || isShopStaff(user))fail(403,'shop_owner_required');
    const profile=store.supplierProfiles.find(profile=>profile.userId===user.id);
@@ -50,6 +51,15 @@ export async function routeExpressOrders({req,url,store,user,readBody,id,now,aud
    const totalMinor=orders.reduce((n,o)=>n+BigInt(o.totalMinor),0n);if(totalMinor>BigInt(Number.MAX_SAFE_INTEGER))fail(409,'report_amount_overflow');
    return {status:200,body:{date,orderCount:orders.length,cancelledCount:orders.filter(o=>o.state==='cancelled').length,totalMinor:Number(totalMinor),
     lowRatings:(store.shopReviews||[]).filter(r=>r.qualityStars<=2&&orders.some(o=>o.id===r.orderId)).map(r=>({orderId:r.orderId,supplierId:r.supplierId,qualityStars:r.qualityStars,at:r.createdAt}))}};
+ }
+ const extrasMatch=/^\/orders\/([^/]+)\/express\/extras$/.exec(url.pathname);
+ if(extrasMatch && req.method==='PATCH') {
+   const order=store.orders.find(o=>o.id===extrasMatch[1]);
+   if(!order)fail(404,'order_not_found');
+   if(user?.role!=='supplier'||order.supplierId!==user.id)fail(403,'forbidden');
+   if(!supplierCanWork(store,user.id))fail(403,'supplier_not_approved');
+   const extras=await setShopExtras(database,store,user,order,await readBody(req),{at:now(),id});
+   return {status:200,body:{orderId:order.id,shopExtras:extras},mutated:true};
  }
  const party=/^\/orders\/([^/]+)\/express\/(on-my-way|pickup-pin\/reset)$/.exec(url.pathname);
  if(party&&req.method==='POST') {
@@ -163,6 +173,7 @@ export async function routeExpressOrders({req,url,store,user,readBody,id,now,aud
  acknowledgeInstructions(store,order,user,body,at,(_store,event)=>store.auditLog.push({id:id('aud'),at,actorId:actorUserId(user),actorRole:'supplier',...event,actor:undefined}));
  const home=homeProfile(store,user.id);
  if(home) {const status=homePrinterStatus(store,home,at);if(status.reason)fail(409,status.reason);recordHomeOffer(store,user.id,'accepted',at);}
+ applyShopExtras(store,order,at);
  order.shopAcceptance.status='accepted';order.shopAcceptance.acceptedAt=at;order.shopAcceptance.acceptedBy=actorUserId(user);
  if(payAfterAcceptance&&!paymentSettled(order.payments?.initial))order.expressOrder.payBy=new Date(Date.parse(at)+5*60000).toISOString();
  order.state=payAfterAcceptance&&!paymentSettled(order.payments?.initial)?'awaiting_initial_payment':'payment_authorized';order.timeline.push({at,state:order.state,by:actorUserId(user),note:'Shop accepted Express order.'});

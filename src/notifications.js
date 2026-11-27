@@ -402,7 +402,7 @@ export function notificationVisible(store, notification, userId, role, { shopId 
   // in notices for another shop the same person happens to own.
   const staffContext = (store.shopMemberships || []).find(m => m.userId === userId && m.shopId === (shopId || notification.shopId || userId) && m.role === 'staff');
   if (staffContext && (!requiredRole || requiredRole === 'supplier') && (!role || role === 'supplier')) {
-    if (staffContext.status !== 'active' || notification.expressOffer?.earningsMinor != null || (!managerDispute && !['shop_job_assigned', 'shop_express_offer'].includes(notification.type))
+    if (staffContext.status !== 'active' || notification.expressOffer?.earningsMinor != null || (!managerDispute && !['shop_job_assigned', 'shop_express_offer', 'client_shop_chat_message'].includes(notification.type))
       || (notification.shopId || orderFromNotification(store, notification)?.supplierId) !== staffContext.shopId) return false;
   }
 

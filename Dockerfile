@@ -24,7 +24,7 @@ WORKDIR /app
 
 # PDF previews and bounded per-page colour estimates (PDF/PNG/JPEG/WebP).
 # Word conversion belongs in a separate isolated service.
-RUN apk add --no-cache poppler-utils util-linux imagemagick
+RUN apk add --no-cache poppler-utils util-linux imagemagick zbar tesseract-ocr tesseract-ocr-data-eng
 
 ARG GRIDGO_BUILD_SHA=unknown
 ARG GRIDGO_BUILD_TIME=unknown

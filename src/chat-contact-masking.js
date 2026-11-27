@@ -37,3 +37,22 @@ export function maskChatContacts(body) {
   }
   return { text: masked + text.slice(cursor), contactAttempt: ranges.length > 0 };
 }
+
+/** Express conversation privacy only. Artwork and structured order facts remain intact. */
+export function maskOrderChat(body, order) {
+  if (order?.orderType !== 'express') return maskChatContacts(body);
+  let text = body.normalize('NFKC').replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '');
+  // Payment payloads and explicitly labelled account numbers are never job quantities.
+  text = text.replace(/\b000201[^\n]*/giu, '[number hidden]')
+    .replace(/((?:e[ -]?wallet|wallet|account|payment)\s*(?:number|no\.?|#)?\s*[:=]\s*)[\d\s().-]{6,}/giu, '$1[number hidden]');
+  const home = order.homePrinter?.supplierId === order.supplierId ? order.homePrinter : null;
+  if (home && order.shopAcceptance?.status !== 'accepted') {
+    for (const value of [home.pickupPoint?.description, order.pickup?.label]) {
+      if (typeof value === 'string' && value.trim().length >= 4) text = text.replaceAll(value, '[number hidden]');
+    }
+    text = text.replace(/\b\d{1,5}\s+[\p{L}\d .'-]{1,80}\b(?:street|st\.?|road|rd\.?|avenue|ave\.?|drive|lane|subdivision|village|barangay|brgy\.?)\b[^\n]*/giu, '[number hidden]')
+      .replace(/\b(?:address|pickup point|my (?:house|home|gate))\s*(?::|is|at)\s*[^\n]+/giu, '[number hidden]');
+  }
+  const masked = maskChatContacts(text);
+  return { text: masked.text.replaceAll('[contact hidden]', '[number hidden]'), contactAttempt: masked.contactAttempt || text !== body.normalize('NFKC') };
+}

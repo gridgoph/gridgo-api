@@ -1,3 +1,5 @@
+import { scanChatMedia } from './chat-media-privacy.js';
+import { syncShopChatEvents } from './shop-chat.js';
 import { riderVerification, requestRiderReupload, notifyRiderReview } from './rider-onboarding.js';
 import { homePrinterResponse, homePrinterStatus, homeSettings, homeProfile, snapshotHomePrinter } from './home-printers.js';
 import { routeHomePrinters } from './home-printer-routes.js';
@@ -618,6 +620,7 @@ async function save(view, { notificationsOnly = false } = {}) {
   if(!scope&&shopMoneyChanged(store,originalDomainStore(store)))syncShopMoney(store,{at:now(),id});
   deriveMissingAudit(store, originalDomainStore(store));
   recordOrderActions(store, originalDomainStore(store));
+  await syncShopChatEvents(database, store, originalDomainStore(store), now());
   deriveDomainEvents(store, originalDomainStore(store), {createId:id,at:now()});
   sweepGroups(store,{id,at:now()});
   notifyShopStaff(store, originalDomainStore(store), { id });
@@ -1019,6 +1022,7 @@ function publicOperationalSettings(settings, store = null, user = null) {
     shopMoveCoverBps: shopMoveCoverBps(rest),
     sampleBatchHoldDays: sampleBatchHoldDays(rest),
     clientShopChatContactThreshold: rest.clientShopChatContactThreshold ?? 3,
+    orderChatCloseAfterPickupHours: rest.orderChatCloseAfterPickupHours ?? 24,
     savedFilesLimitBytes: rest.savedFilesLimitBytes ?? DEFAULT_SAVED_FILES_LIMIT_BYTES,
     hubPickup: settingsHubPickup(settings),
     hubPickupEnabled: rest.hubPickupEnabled === true,
@@ -3735,7 +3739,7 @@ async function handleAuditedRequest(req, res) {
       if(trackingResponse.mutated) await save(store);
       return send(res,trackingResponse.status,trackingResponse.body);
     }
-    const expressResponse=await routeExpressOrders({req,url,store,user,readBody,id,now,audit});
+    const expressResponse=await routeExpressOrders({req,url,store,user,readBody,id,now,audit,database});
     if(expressResponse) {
       if(expressResponse.mutated) await save(store);
       return send(res,expressResponse.status,expressResponse.body);
@@ -3977,7 +3981,10 @@ async function handleAuditedRequest(req, res) {
           at: createdAt,
         });
 
-        if (purpose === 'client_shop_chat_attachment' && detectedContentType.startsWith('image/')) pending.metadataSanitizedAt = createdAt;
+        if (purpose === 'client_shop_chat_attachment') {
+          if (detectedContentType.startsWith('image/')) pending.metadataSanitizedAt = createdAt;
+          pending.chatSafety = await scanChatMedia(file.tempPath, detectedContentType);
+        }
         if (artworkCheck) pending.artworkCheck = artworkCheck;
 
         await enqueueMutation(async () => {
@@ -4681,6 +4688,7 @@ async function handleAuditedRequest(req, res) {
         testerSignupFormUrlTemplate: Object.hasOwn(body, 'testerSignupFormUrlTemplate') ? body.testerSignupFormUrlTemplate : (store.settings.testerSignupFormUrlTemplate ?? null),
         foundingTesterLaunchAt: Object.hasOwn(body, 'foundingTesterLaunchAt') ? body.foundingTesterLaunchAt : (store.settings.foundingTesterLaunchAt ?? null),
         ...nextFeeSettings(store.settings, body, store.version + 1, now()),
+        orderChatCloseAfterPickupHours: Object.hasOwn(body, 'orderChatCloseAfterPickupHours') ? body.orderChatCloseAfterPickupHours : (store.settings.orderChatCloseAfterPickupHours ?? 24),
         clientShopChatContactThreshold: Object.hasOwn(body, 'clientShopChatContactThreshold') ? body.clientShopChatContactThreshold : (store.settings.clientShopChatContactThreshold ?? 3),
         savedFilesLimitBytes: Object.hasOwn(body, 'savedFilesLimitBytes') ? body.savedFilesLimitBytes : (store.settings.savedFilesLimitBytes ?? DEFAULT_SAVED_FILES_LIMIT_BYTES),
         operatingHours: Object.hasOwn(body, "operatingHours") ? body.operatingHours && {
