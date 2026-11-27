@@ -2,6 +2,8 @@
 
 Private rider document uploads, consent, Operations review and per-document re-upload: [Rider onboarding](docs/RIDER_ONBOARDING_API.md).
 
+Structured review tags, private comments and client shop summaries: [Shop ratings](docs/SHOP_RATINGS_API.md).
+
 Ready-made product templates, full price tables, price checks, assisted setup and explicit legacy conversion: [Product templates](docs/PRODUCT_TEMPLATES_API.md).
 
 My shop status, expiring pauses and night Express documents: [Express API](docs/EXPRESS_API.md#my-shop-status-and-night-documents).

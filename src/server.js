@@ -224,7 +224,10 @@ import {
 import { rankShops, shopScoreboard, supplierReviewsView } from "./shop-reviews.js";
 import { defaultShopSchedule, projectFinish } from "./availability.js";
 import { decorateCatalogPhotoUrls as signCatalogPhotoUrls } from "./catalog-photo-urls.js";
-import { privateCatalogItem } from "./supplier-catalog.js";
+import { privateCatalogItem, publicSupplierShop } from "./supplier-catalog.js";
+import { approvedCatalogView } from './catalog-review-state.js';
+import { reviewCatalogView } from './review-data.js';
+import { ratingTags, reviewTags, visibleReviewComment, reviewPrivateLabels, shopRatingsSummary } from './shop-rating.js';
 import {
   applyForBusiness,
   assertRiderLegacyVerificationReady,
@@ -3470,6 +3473,15 @@ async function handleAuditedRequest(req, res) {
       return;
     }
 
+    if (req.method === 'GET' && /^\/shops\/[^/]+\/ratings$/.test(pathname)) {
+      if (user.role !== 'client') return send(res, 403, { error: 'forbidden' });
+      const supplierId = decodeURIComponent(pathname.split('/')[2]);
+      const catalog = reviewCatalogView(approvedCatalogView(store), user);
+      if (!publicSupplierShop(catalog, supplierId)) return send(res, 404, { error: 'shop_not_found' });
+      res.setHeader('Cache-Control', 'private, no-store');
+      return send(res, 200, { summary: shopRatingsSummary(store, supplierId, now()) });
+    }
+
     /**
      * What clients said about this shop's work, read back by the shop.
      *
@@ -6028,6 +6040,7 @@ async function handleAuditedRequest(req, res) {
         }
         scores[field] = value;
       }
+      const tags = ratingTags(body.tags, scores.qualityStars);
       const comment = body.comment == null ? null : String(body.comment).trim();
       if (comment && comment.length > 2_000) {
         return send(res, 400, { error: "invalid_rating", message: "Keep a comment under 2,000 characters.", field: "comment" });
@@ -6042,6 +6055,7 @@ async function handleAuditedRequest(req, res) {
         speedStars: scores.speedStars,
         valueStars: scores.valueStars,
         comment: comment || null,
+        tags,
         createdAt: at,
       };
       store.shopReviews.push(review);
@@ -6055,7 +6069,7 @@ async function handleAuditedRequest(req, res) {
         detail: { supplierId: order.supplierId, qualityStars: review.qualityStars },
       });
       await save(store);
-      return send(res, 201, { review });
+      return send(res, 201, { review: { ...review, tags: reviewTags(review), comment: visibleReviewComment(review.comment, reviewPrivateLabels(store, review.supplierId)) } });
     }
 
     if (req.method === "POST" && /^\/orders\/[^/]+\/issues$/.test(pathname)) {

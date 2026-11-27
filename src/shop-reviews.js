@@ -1,3 +1,4 @@
+import { reviewTags, visibleReviewComment, reviewPrivateLabels } from './shop-rating.js';
 import { reportOrderAllowed } from './review-data.js';
 import { isQuoteListing } from "./quote-listings.js";
 /**
@@ -195,6 +196,7 @@ export function supplierReviewsView(store, supplierId) {
     };
   }).sort((left, right) => (left.position ?? Infinity) - (right.position ?? Infinity) || left.categoryName.localeCompare(right.categoryName));
 
+  const privateLabels = reviewPrivateLabels(store, supplierId);
   return {
     summary: {
       ...shop.overall,
@@ -215,7 +217,8 @@ export function supplierReviewsView(store, supplierId) {
       qualityStars: row.qualityStars,
       speedStars: row.speedStars,
       valueStars: row.valueStars,
-      comment: row.comment ?? null,
+      comment: visibleReviewComment(row.comment, privateLabels),
+      tags: reviewTags(row),
       ...row.subject,
     })),
   };
