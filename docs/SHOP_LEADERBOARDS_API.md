@@ -102,12 +102,14 @@ unique ordinal, including ties, so a group awards at most the configured count.
 
 ## Monthly closing and client badge
 
-The normal lifecycle runner probes for the previous completed month and closes
-it under the domain transaction lock. `shop_leaderboard_months` freezes the
+The normal lifecycle runner probes for real accept-first Express activity in the
+previous completed month and closes that month under the domain transaction
+lock. Months without such activity are skipped, so a fresh/regular-only
+installation does not create award notifications or trigger unrelated upkeep. `shop_leaderboard_months` freezes the
 policy, period, validity, local winning ranks, score parts and group sizes.
 Each candidate wins if its rank in its **own** radius group is within
 `monthlyTopCount`. There may consequently be more than three winners across
-distant groups. Zero-winner months also get a marker. Concurrent workers and
+distant groups. Active months with zero eligible winners also get a marker. Concurrent workers and
 restarts see that marker and cannot award the month again.
 
 Closing uses facts timestamped no later than the month's last millisecond and

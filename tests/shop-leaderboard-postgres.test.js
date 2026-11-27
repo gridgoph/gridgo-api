@@ -66,6 +66,7 @@ test('monthly snapshots and sticker delivery persist atomically and cannot be re
 
 test('only Super Admin reads or changes validated leaderboard settings with version and audit',DB,async t=>{
   const {db,store}=await setup(t);await db.transaction(()=>saveStore(db,store));
+  assert.equal(await leaderboardMonthDue(db,AT),false,'ordinary orders must not start monthly award maintenance');
   const api=await parityApiForTest(t,false,Date.parse(AT));
   const admin=await api('admin','GET','/settings');
   assert.equal(admin.body.settings.shopLeaderboard.minimumOrders,5);

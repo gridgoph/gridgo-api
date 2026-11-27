@@ -1,3 +1,4 @@
+import { activeOrderSql } from './order-removal.js';
 import { leaderboardPeriod, leaderboardSettings, leaderboardScores, localLeaderboard } from './shop-leaderboard.js';
 import { appendAudit } from './audit.js';
 import { privilegedAdminMemberships, queueInvalidate } from './notifications.js';
@@ -53,7 +54,15 @@ export function closeLeaderboardMonth(store,{at,id}) {
   return true;
 }
 
-/** Cheap lifecycle candidate probe. Reads never create or alter an award. */
+/** No maintenance for months without real Express activity. A bookkeeping-only
+ * startup save would otherwise run unrelated order/audit/notification upkeep. */
 export async function leaderboardMonthDue(database,at) {
-  return !(await database.query('SELECT 1 FROM shop_leaderboard_months WHERE month=$1',[previousLeaderboardMonth(at).month])).rowCount;
+  const {month,period}=previousLeaderboardMonth(at);
+  return (await database.query(`SELECT 1 FROM orders o
+    WHERE o.data->>'orderType'='express' AND o.data#>>'{expressOrder,acceptFlow}'='2'
+      AND NOT o.review_data AND ${activeOrderSql('o.id')}
+      AND (o.data#>>'{shopAcceptance,assignedAt}')::timestamptz >= $2::timestamptz
+      AND (o.data#>>'{shopAcceptance,assignedAt}')::timestamptz < $3::timestamptz
+      AND NOT EXISTS (SELECT 1 FROM shop_leaderboard_months WHERE month=$1)
+    LIMIT 1`,[month,period.startAt,period.endAt])).rowCount>0;
 }
