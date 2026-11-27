@@ -230,6 +230,25 @@ test('accept opens a five-minute window; with cash switched off, QR is the only 
   assert.equal(order.state, 'payment_authorized');
   assert.equal(order.expressOrder.paymentRelease.kind, 'receipt_under_limit');
   assert.equal(order.payments.initial.status, 'pending_confirmation');
+  // A receipt proves one payment only.
+  const reuse = setup(); const other = await send(reuse);
+  reuse.store.files.find(f => f.fileId === 'file_qr').references.push({ type: 'order', id: 'some_other_order', field: 'payment:initial:proof' });
+  await reuse.express('accept', reuse.shop('shop_a'), other.order.id, {}, later(10));
+  await assert.rejects(reuse.express('pay', reuse.client, other.order.id, { method: 'qr_ph', reference: 'REF-9', proofFileId: 'file_qr' }, later(20)), e => e.code === 'payment_proof_already_used');
+  reuse.store.files.push({ fileId: 'file_qr2', ownerId: reuse.client.id, purpose: 'payment_proof', state: 'ready', references: [] });
+  reuse.store.orders.push({ id: 'paid_before', payments: { initial: { method: 'qr_manual', reference: 'ref-9' } } });
+  await assert.rejects(reuse.express('pay', reuse.client, other.order.id, { method: 'qr_ph', reference: 'REF-9', proofFileId: 'file_qr2' }, later(20)), e => e.code === 'payment_reference_already_used');
+  // A rejected receipt keeps handover blocked, even after a replacement, until Operations confirms.
+  order.state = 'ready_for_dispatch';
+  order.payments.initial.status = 'rejected';
+  order.expressOrder.paymentRelease.receiptRejected = { at: later(90), reason: 'Amount does not match' };
+  ctx.store.files.push({ fileId: 'file_qr3', ownerId: ctx.client.id, purpose: 'payment_proof', state: 'ready', references: [] });
+  await ctx.express('pay', ctx.client, order.id, { method: 'qr_ph', reference: 'REF-1B', proofFileId: 'file_qr3' }, later(100));
+  assert.equal(order.payments.initial.status, 'pending_confirmation');
+  await assert.rejects(ctx.express('pickup', ctx.shop('shop_a'), order.id, { code: order.expressOrder.pickupCode }, later(120)), e => e.code === 'payment_required');
+  order.payments.initial.status = 'confirmed'; delete order.expressOrder.paymentRelease.receiptRejected;
+  await ctx.express('pickup', ctx.shop('shop_a'), order.id, { code: order.expressOrder.pickupCode }, later(130));
+  assert.ok(order.expressOrder.pickedUpAt);
   // No payment: the window closes and nothing is charged.
   const ctx2 = setup(); const second = await send(ctx2);
   await ctx2.express('accept', ctx2.shop('shop_a'), second.order.id, {}, later(10));

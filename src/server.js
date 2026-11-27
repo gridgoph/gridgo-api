@@ -6728,6 +6728,7 @@ async function handleAuditedRequest(req, res) {
           : order.expressOrder?.paymentTiming==='after_acceptance'&&order.shopAcceptance?.status==='accepted'&&order.fileCheck?.status==='passed'
           ? 'payment_authorized' : order.moneyModelVersion === 3 ? "needs_qa" : "payment_authorized";
         if (order.expressOrder?.paymentReview) order.expressOrder.paymentReview.confirmedAt = confirmedAt;
+        if (order.expressOrder?.paymentRelease?.receiptRejected) delete order.expressOrder.paymentRelease.receiptRejected;
         // Paid up front, the one confirmation settles the whole order.
         order.paymentStatus = order.payments?.final_online?.status === "not_required"
           ? "paid" : "initial_payment_confirmed";
@@ -7054,7 +7055,10 @@ async function handleAuditedRequest(req, res) {
       if(order.orderType==='express'&&homeProfile(store,order.supplierId)&&order.shopAcceptance?.status!=='accepted'
         &&['supplier_accepted','payment_authorized','production','supplier_self_qc','ready_for_dispatch'].includes(next))return send(res,409,{error:'home_express_accept_required'});
       if(order.expressOrder?.paymentTiming==='after_acceptance'&&['supplier_accepted','payment_authorized','production','supplier_self_qc','ready_for_dispatch'].includes(next)
-        && !paymentSettled(order.payments?.initial) && !order.expressOrder.paymentRelease)return send(res,409,{error:'payment_required',message:'The shop must accept A3 Express through its accept action, then the client pays before work starts.'});
+        && !paymentSettled(order.payments?.initial) && !(order.expressOrder.paymentRelease && !order.expressOrder.paymentRelease.receiptRejected))return send(res,409,{error:'payment_required',message:'The shop must accept A3 Express through its accept action, then the client pays before work starts.'});
+      // Accept-first delivery reaches a rider only on a confirmed payment; a receipt lets the shop print, not dispatch.
+      if(order.expressOrder?.acceptFlow===2 && order.fulfillmentMode==='delivery' && !paymentSettled(order.payments?.initial)
+        && ['ready_for_dispatch','rider_assigned','picked_up','out_for_delivery','awaiting_collection','delivered','issue_window_open','completed'].includes(next))return send(res,409,{error:'payment_required'});
       if(order.orderType==='express' && order.fulfillmentMode==='pickup' && ['rider_assigned','picked_up','out_for_delivery','awaiting_collection','delivered','issue_window_open','completed'].includes(next)) {
         return send(res,409,{error:'express_pickup_code_required'});
       }

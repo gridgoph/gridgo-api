@@ -864,9 +864,18 @@ accept-first orders. Errors: `409 express_payment_not_due`,
 `400 invalid_express_payment_method`. If no payment is chosen by `payBy`, the
 attempt is cancelled and nothing is charged.
 
+A receipt proves one payment: a proof file attached to another order returns
+`409 payment_proof_already_used`, and a QR reference already used on another
+order returns `409 payment_reference_already_used`.
+
 If Operations rejects a receipt that already released the shop, work continues,
 `paymentRelease.receiptRejected` is set, and handover waits. The client sends a
-new receipt to `/express/pay`.
+new receipt to `/express/pay`. Handover still waits until Operations confirms that
+new receipt, which clears `receiptRejected`.
+
+An accept-first **delivery** moves to `ready_for_dispatch` or any rider state
+only once the payment is confirmed (`409 payment_required`). A receipt under the
+limit lets the shop print; it does not send a rider.
 
 **Pickup.** The shop's existing PIN step (`POST /orders/:id/express/pickup`
 with `code`) completes the handover. For cash at pickup it also needs
@@ -874,7 +883,8 @@ with `code`) completes the handover. For cash at pickup it also needs
 is then confirmed (`confirmationSource: "counter_cash"`), and the shop's counter
 debt for GRIDGO's share (the fee) is recorded once, as in
 [Shop money](SHOP_MONEY_API.md). A receipt released under the limit may be handed
-over while Operations still reviews it.
+over at the counter while Operations still reviews it. GRIDGO accepts that risk
+up to the limit, as the reports ask; a rejected receipt blocks handover.
 
 ### Super Admin settings
 

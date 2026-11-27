@@ -298,6 +298,10 @@ function pay(store, user, order, body, ctx) {
     if (!proof) fail(404, 'file_not_found');
     if (proof.purpose !== 'payment_proof') fail(400, 'payment_proof_invalid');
     if (proof.state !== 'ready') fail(409, 'file_not_ready');
+    // A receipt proves one payment: its file and its reference cannot be reused on another order.
+    if ((proof.references || []).some(ref => ref.type === 'order' && ref.id !== order.id)) fail(409, 'payment_proof_already_used');
+    if ((store.orders || []).some(row => row.id !== order.id && Object.values(row.payments || {}).some(p => p?.method === 'qr_manual'
+      && typeof p.reference === 'string' && p.reference.trim().toLowerCase() === reference.toLowerCase()))) fail(409, 'payment_reference_already_used');
     const field = 'payment:initial:proof';
     if (!(proof.references || []).some(ref => ref.type === 'order' && ref.id === order.id && ref.field === field)) {
       proof.references = [...(proof.references || []), { type: 'order', id: order.id, field }];
@@ -307,7 +311,8 @@ function pay(store, user, order, body, ctx) {
     order.paymentMethod = 'qr_manual';
     order.paymentStatus = 'initial_payment_pending';
     const rules = expressCheckoutSettings(store.settings);
-    if (resubmit) delete e.paymentRelease.receiptRejected;
+    // A replacement receipt keeps handover blocked until Operations confirms it.
+    if (resubmit) e.paymentRelease.receiptRejected.resubmittedAt = at;
     else if (rules.paymentConfirmation === 'gateway' || installment.amountMinor <= rules.manualQrInstantMaxMinor) {
       e.paymentRelease = { method: 'qr_ph', kind: 'receipt_under_limit', at };
     } else {
@@ -340,7 +345,8 @@ export function acceptFirstAccepted(store, order, at) {
 export function acceptFirstPickupPayment(order, body) {
   const release = order.expressOrder?.paymentRelease;
   if (!isAcceptFirst(order) || !release) return null;
-  if (release.receiptRejected) fail(409, 'payment_required');
+  // After a rejected receipt, only a confirmed payment hands the print over.
+  if (release.receiptRejected) return paymentSettled(order.payments?.initial) ? 'released' : null;
   if (release.method === 'cash_at_pickup' && !paymentSettled(order.payments?.initial)) {
     if (body.cashReceived !== true) fail(409, 'express_cash_confirmation_required');
     return 'cash';
