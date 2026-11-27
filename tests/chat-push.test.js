@@ -9,7 +9,7 @@ import path from "node:path";
 import { createDatabase } from "../src/database.js";
 import { loadStore, saveStore } from "../src/postgres-store.js";
 import { fixture, AT } from "./fixtures/reschedule.js";
-import { apiForTest } from "./fixtures/reschedule-http.js";
+import { apiForTest, domainClockEnv } from "./fixtures/reschedule-http.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const roleOf = key => ({ ops: "ops_admin", admin: "super_admin" })[key] || key;
@@ -66,7 +66,8 @@ async function setup(t) {
   store.deviceTokens.push({ id: "dev_stranger", userId: null, appRole: "client", token: tokenFor("stranger"),
     platform: "android", tokenProvider: "fcm", createdAt: AT, updatedAt: AT });
   await db.transaction(() => saveStore(db, store));
-  const rawApi = await apiForTest(t, { GRIDGO_FCM_SERVICE_ACCOUNT_FILE: credentials, GRIDGO_FCM_BASE_URL: origin });
+  // Stay before the daily settlement window so only chat creates handset pushes.
+  const rawApi = await apiForTest(t, { ...domainClockEnv(AT), GRIDGO_FCM_SERVICE_ACCOUNT_FILE: credentials, GRIDGO_FCM_BASE_URL: origin });
   const api = (key, method, endpoint, body) => rawApi(key, method, endpoint, body, { headers: { "x-gridgo-role": roleOf(key) } });
   // Refresh the real app token through the authenticated registration route.
   for (const key of ["client", "supplier", "rider"]) {
@@ -133,7 +134,7 @@ for (const [kind, sender, recipient, type] of paths) {
     assert.equal((await notices()).rowCount, 1);
     assert.equal((await db.query("SELECT count(*)::int AS n FROM notification_push_outbox")).rows[0].n, countBefore);
     // Time travel only the notice; no sleeping five minutes or changing policy.
-    await db.query("UPDATE notifications SET created_at=now()-interval '5 minutes 1 second' WHERE id=$1", [notificationId]);
+    await db.query("UPDATE notifications SET created_at=$2::timestamptz-interval '5 minutes 1 second' WHERE id=$1", [notificationId, AT]);
     assert.equal((await api(sender, "POST", endpoint, { body: "PRIVATE next burst" })).status, 201);
     assert.equal((await notices()).rowCount, 2);
     await waitFor(() => requests.length === 2, "next message after five minutes should send again");
@@ -146,7 +147,7 @@ test("delivery: a previous rider's unread notice cannot swallow the new rider's 
   await db.transaction(async () => {
     const store = await loadStore(db);
     store.notifications.push({ id: "previous_rider_notice", userId: "client", appRole: "client", orderId: "order",
-      chatRiderId: "previous_rider", type: "delivery_message", title: "Old rider", body: "Old rider", at: new Date().toISOString(), read: false });
+      chatRiderId: "previous_rider", type: "delivery_message", title: "Old rider", body: "Old rider", at: AT, read: false });
     await saveStore(db, store);
   });
   assert.equal((await api("rider", "POST", "/orders/order/delivery-chat/messages", { body: "PRIVATE new rider" })).status, 201);
