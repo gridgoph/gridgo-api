@@ -196,8 +196,7 @@ export async function routeTeamWork({req,url,store,user,member,readBody,id,now,a
   if(req.method==='POST' && !pin[1]) {
     const body=await readBody(req);
     if(!object(body)||Object.keys(body).some(k=>!['name','pin','role','photoFileId','jobAlerts'].includes(k))|| typeof body.name!=='string'||!body.name.trim()||body.name.trim().length>100
-      || (body.role!==undefined && !['staff','manager'].includes(body.role)) || (body.jobAlerts!==undefined && typeof body.jobAlerts!=='boolean')) fail(400,'invalid_shop_member_update');
-    if(role==='manager' && body.role==='manager') fail(403,'shop_owner_required');
+      || (body.role!==undefined && body.role!=='staff') || (body.jobAlerts!==undefined && typeof body.jobAlerts!=='boolean')) fail(400,'invalid_shop_member_update');
     const person={id:id('shp'),shopId,name:body.name.trim(),role:body.role || 'staff',status:'active',pinHash:await pinHash(body.pin),pinVersion:1,failedAttempts:0,jobAlerts:body.jobAlerts!==false,createdAt:at,updatedAt:at};
     if(body.photoFileId) person.photoFileId=photoFor(store,body.photoFileId,shopId,user.id);
     store.shopPinStaff.push(person);bindTeamPhoto(store,person.photoFileId,shopId,person.id);event('pin_staff_created',person.id);
@@ -213,8 +212,7 @@ export async function routeTeamWork({req,url,store,user,member,readBody,id,now,a
     const body=await readBody(req);
     if(!object(body)||!Object.keys(body).length||Object.keys(body).some(k=>!['name','role','jobAlerts','photoFileId'].includes(k))
       || (body.name!==undefined && (typeof body.name!=='string'||!body.name.trim()||body.name.length>100))
-      || (body.role!==undefined && !['staff','manager'].includes(body.role)) || (body.jobAlerts!==undefined && typeof body.jobAlerts!=='boolean')) fail(400,'invalid_shop_member_update');
-    if(role==='manager' && body.role==='manager')fail(403,'shop_owner_required');
+      || (body.role!==undefined && body.role!=='staff') || (body.jobAlerts!==undefined && typeof body.jobAlerts!=='boolean')) fail(400,'invalid_shop_member_update');
     if(body.role && body.role!==target.role)target.pinVersion++;
     if(Object.hasOwn(body,'photoFileId')){target.photoFileId=photoFor(store,body.photoFileId,shopId,user.id);bindTeamPhoto(store,target.photoFileId,shopId,target.id);}
     for(const key of ['name','role','jobAlerts'])if(Object.hasOwn(body,key))target[key]=key==='name'?body[key].trim():body[key];
