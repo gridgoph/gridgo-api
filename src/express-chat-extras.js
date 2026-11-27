@@ -4,6 +4,7 @@ import { isAcceptFirst, homePrinterLimitMinor } from './express-checkout-rules.j
 import { maskOrderChat } from './chat-contact-masking.js';
 import { createPayoutMilestones } from './operational-model.js';
 import { queueOrderInvalidate } from './notifications.js';
+import { notifyAdmins } from './domain-events.js';
 const fail = (status, code) => { throw Object.assign(new Error(code), { status, code }); };
 const safe = n => { if (n < 0n || n > BigInt(Number.MAX_SAFE_INTEGER)) fail(400, 'invalid_money'); return Number(n); };
 export function extraPrice(order, items) {
@@ -57,6 +58,7 @@ export async function setShopExtras(database, store, user, order, body, { at, id
     items, price, addedByUserId: actorUserId(user), ...(user.actorPinStaffId ? { addedByPinStaffId: user.actorPinStaffId } : {}), updatedAt: at };
   store.auditLog.push({ id: id('aud'), at, actorId: actorUserId(user), actorRole: 'supplier', action: 'express.extras_updated',
     entityType: 'order', entityId: order.id, orderId: order.id, detail: { count: items.length, extrasMinor: price.extrasMinor } });
+  notifyAdmins(store, 'express_extras_updated', 'Shop extras updated', order, `express-extras:${order.id}:${order.expressOrder.shopExtras.version}`, { createId: id, at });
   queueOrderInvalidate(store, order, ['orders','jobs','chat']);
   return publicShopExtras(order);
 }

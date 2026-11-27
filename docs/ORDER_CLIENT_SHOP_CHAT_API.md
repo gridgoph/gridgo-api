@@ -192,6 +192,7 @@ creating negative payment allocations.
 The edit returns `shopExtras` with the proposed printing/extras/total, version
 and `{label,quantity,unitPriceMinor,amountMinor,addedBy:"shop",marker:"added by shop"}`
 items. Shop job projections retain that bounded quote for recovery after refresh.
+Each extras edit writes durable notices to both Operations and Super Admin.
 Accept commits the extras, payment allocations, supplier payout base and invoice
 in one transaction. Original print lines and the original fee schedule remain
 intact. The same `serviceFeeMoney` code used by accept-first prices printing plus

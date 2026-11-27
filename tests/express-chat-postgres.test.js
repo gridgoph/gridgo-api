@@ -152,6 +152,8 @@ test('agreed extras commit once at acceptance, reprice fees and payment, and ass
   const proposed = await api('other', 'PATCH', extraPath, body, shop);
   assert.equal(proposed.status, 200, JSON.stringify(proposed.body));
   assert.equal(proposed.body.shopExtras.totalMinor, 13350);
+  const notices = (await loadStore(db)).notifications.filter(n => n.type === 'express_extras_updated');
+  assert.deepEqual(notices.map(n => n.appRole).sort(), ['ops_admin', 'super_admin']);
   assert.equal((await api('other', 'PATCH', extraPath, body, shop)).body.error, 'express_extras_stale');
   const accepted = await api('other', 'POST', `/orders/${orderId}/express/accept`, {}, shop);
   assert.equal(accepted.status, 200, JSON.stringify(accepted.body) + getOutput());
