@@ -78,11 +78,18 @@ test('only Super Admin reads or changes validated leaderboard settings with vers
     const response=await api('admin','PATCH','/settings',{expectedVersion:version,reason:'Invalid policy',shopLeaderboard:patch});
     assert.equal(response.status,400,JSON.stringify(response.body));assert.equal(response.body.error,'invalid_shop_leaderboard_settings');
   }
-  const changed=await api('admin','PATCH','/settings',{expectedVersion:version,reason:'Adjust local competition',shopLeaderboard:{minimumOrders:6,radiusKm:3,monthlyTopCount:2,weights:{stars:30,acceptance:40}}});
+  const changed=await api('admin','PATCH','/settings',{expectedVersion:version,reason:'Adjust local competition',expressLightColourMaxBps:1800,shopLeaderboard:{minimumOrders:6,radiusKm:3,monthlyTopCount:2,weights:{stars:30,acceptance:40}}});
   assert.equal(changed.status,200,JSON.stringify(changed.body));
   const loaded=await db.transaction(()=>loadStore(db));
+  assert.equal(loaded.settings.expressLightColourMaxBps,1800);
+  assert.equal(changed.body.version,version+1);
   assert.deepEqual(loaded.settings.shopLeaderboard,{weights:{stars:30,acceptance:40,onTime:20,answerSpeed:10},minimumOrders:6,radiusKm:3,monthlyTopCount:2});
   assert.ok(loaded.auditLog.some(row=>row.action==='settings.operational_update'));
+  const colourOnly=await api('admin','PATCH','/settings',{expectedVersion:version+1,reason:'Adjust print detection',expressLightColourMaxBps:2200});
+  assert.equal(colourOnly.status,200);
+  const combined=await db.transaction(()=>loadStore(db));
+  assert.equal(combined.settings.expressLightColourMaxBps,2200);
+  assert.deepEqual(combined.settings.shopLeaderboard,loaded.settings.shopLeaderboard);
   const conflict=await api('admin','PATCH','/settings',{expectedVersion:version,reason:'Stale policy',shopLeaderboard:{minimumOrders:8}});
   assert.equal(conflict.status,409);assert.equal(conflict.body.error,'settings_version_conflict');
 });

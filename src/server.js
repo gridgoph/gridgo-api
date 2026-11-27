@@ -4741,6 +4741,7 @@ async function handleAuditedRequest(req, res) {
         pricingPaymentFeeBps: Object.hasOwn(body, "pricingPaymentFeeBps")
           ? body.pricingPaymentFeeBps
           : (store.settings.pricingPaymentFeeBps ?? null),
+        expressLightColourMaxBps: Object.hasOwn(body,"expressLightColourMaxBps") ? body.expressLightColourMaxBps : store.settings.expressLightColourMaxBps ?? 2500,
         colourDetection: Object.hasOwn(body, "colourDetection") ? body.colourDetection : colourSettings(store.settings),
         artworkGuidance: Object.hasOwn(body, "artworkGuidance")
           ? validateArtworkGuidance(body.artworkGuidance, store.taxonomy, (status, code, message, details) => {

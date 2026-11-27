@@ -35,3 +35,12 @@ test('Word external resources and active fields remain unrendered', async t => {
     docxEntries().map(([name, value]) => [name, name === 'word/document.xml' ? value.replace('<w:t>', '<w:instrText>INCLUDEPICTURE ').replace('</w:t>', '</w:instrText>') : value]),
   ]) await assert.rejects(render(t, zip(entries), DOCX_CONTENT_TYPE), { code: 'preview_word_not_available', status: 422 });
 });
+
+test('blue paper is a preview backdrop, including in the production image toolchain',async t=>{
+ const {execFileSync}=await import('node:child_process');
+ const directory=await fs.mkdtemp(path.join(os.tmpdir(),'paper-preview-test-'));t.after(()=>fs.rm(directory,{recursive:true,force:true}));
+ const source=path.join(directory,'input.pdf'),output=path.join(directory,'preview.png');await fs.writeFile(source,previewPdf());
+ const png=await renderArtworkPreview(source,'application/pdf',{paperColour:'blue'});await fs.writeFile(output,png);
+ const pixel=execFileSync('convert',[output,'-crop','1x1+0+0','-depth','8','rgb:-']);
+ assert.deepEqual([...pixel],[130,181,230]);assert.ok(png.length<=8*1024*1024);
+});
