@@ -3,7 +3,7 @@ const DAY = 86_400_000;
 const ARTWORK = new Set(['artwork', 'mockup']);
 export const DEFAULT_SAVED_FILES_LIMIT_BYTES = 500_000_000;
 export const isSavedArtwork = file => ARTWORK.has(file?.purpose) && Boolean(file.savedAt);
-const MONEY = new Set(['supplier_invoice', 'payment_proof', 'payout_receipt', 'refund_receipt', 'refund_qr', 'refund_evidence']);
+const MONEY = new Set(['supplier_invoice', 'payment_proof', 'payout_receipt', 'shop_payment_receipt', 'refund_receipt', 'refund_qr', 'refund_evidence']);
 const PHOTOS = new Set(['finished_product_photo', 'packing_photo', 'production_photo', 'fulfilment_proof', 'delivery_photo', 'delivery_package_photo', 'handoff_signature', 'acknowledgement_signature', 'approval_signature', 'approval_sample_photo']);
 const CLOSED = new Set(['completed', 'payout_released', 'cancelled']);
 const CASE_TERMINALS = {

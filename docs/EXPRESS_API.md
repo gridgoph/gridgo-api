@@ -1282,3 +1282,9 @@ left out. There is no warning.
 [Shop ratings](SHOP_RATINGS_API.md) defines structured review tags, private
 comment display and `GET /shops/:supplierId/ratings` for clients choosing a shop.
 Home printers use the same five-review threshold and summary without addresses.
+
+## Weekly settlement, missed jobs and demand alerts
+
+The additive owner Money/Jobs contract, production release controls, immutable
+scheduled-payout boundary, receipt confirmation, missed-offer pause and daily
+printer-demand budget are in [Weekly shop settlement](SHOP_WEEKLY_SETTLEMENT_API.md).

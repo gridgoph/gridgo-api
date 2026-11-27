@@ -56,7 +56,7 @@ test('night demand push rechecks expiry, opt-out and owner access after durable 
   loaded.supplierProfiles.find(p=>p.userId==='supplier').availability.printerDemandPings=false;
   assert.equal(deviceAcceptsNotification(loaded,device,loaded.notifications[0],at),false);
 });
-test('concurrent client demand commits a durable per-shop nightly budget across two API processes',{skip:!DATABASE_URL},async t=>{
+test('concurrent client demand commits a durable per-shop daily budget across two API processes',{skip:!DATABASE_URL},async t=>{
   const {db,api}=await setup(t),otherApi=await apiForTest(t,{GRIDGO_FCM_SERVICE_ACCOUNT_FILE:'',GRIDGO_WEB_PUSH_VAPID_PRIVATE_KEY:''});
   const store=await loadStore(db);
   store.taxonomy.categories.push({id:'document_category',code:'document_publication',name:'Documents',active:true});
@@ -79,13 +79,13 @@ test('concurrent client demand commits a durable per-shop nightly budget across 
   const responses=await Promise.all([1,2,3,4].map((n)=>(n%2?api:otherApi)(`demand_${n}`,'POST','/express/demand',body)));
   for(const response of responses)assert.deepEqual(response.body,{ok:true},JSON.stringify(response));
   const loaded=await loadStore(db),pings=loaded.supplierProfiles.find(p=>p.userId==='supplier').availability.demandPings;
-  assert.equal(pings.length,3);assert.equal(loaded.notifications.filter(n=>n.type==='printer_demand').length,6);
-  assert.equal(loaded.notifications.filter(n=>n.type==='ops_printer_demand'&&n.userId==='admin').length,3);
-  assert.equal(loaded.notifications.filter(n=>n.type==='ops_printer_demand'&&n.userId==='ops').length,3);
+  assert.equal(pings.length,2);assert.equal(loaded.notifications.filter(n=>n.type==='printer_demand').length,4);
+  assert.equal(loaded.notifications.filter(n=>n.type==='ops_printer_demand'&&n.userId==='admin').length,2);
+  assert.equal(loaded.notifications.filter(n=>n.type==='ops_printer_demand'&&n.userId==='ops').length,2);
   const repeat=await api(pings[0].clientId,'POST','/express/demand',body);assert.deepEqual(repeat.body,{ok:true});
-  assert.equal((await loadStore(db)).supplierProfiles.find(p=>p.userId==='supplier').availability.demandPings.length,3);
+  assert.equal((await loadStore(db)).supplierProfiles.find(p=>p.userId==='supplier').availability.demandPings.length,2);
 });
-test('persisted ping budgets survive midnight hours edits and restores without resetting either night', {skip:!DATABASE_URL}, async t=>{
+test('persisted daily ping budgets survive hours edits without reset', {skip:!DATABASE_URL}, async t=>{
   const {routeShopHours}=await import('../src/shop-hours.js');
   const {defaultShopSchedule}=await import('../src/availability.js');
   const {pingPrinterDemand}=await import('../src/printer-demand.js');
@@ -119,13 +119,13 @@ test('persisted ping budgets survive midnight hours edits and restores without r
   assert.equal(await ping('client'),true);
   await hours(early);assert.equal(await ping('other'),true);
   await hours(defaultShopSchedule());assert.equal(await ping('client'),false);
-  assert.equal(await ping('other'),true);assert.equal(await ping('third_client'),true);assert.equal(await ping('fourth_client'),false);
-  await hours(early);assert.equal(await ping('other'),false);assert.equal(await ping('third_client'),true);
+  assert.equal(await ping('other'),false);assert.equal(await ping('third_client'),false);assert.equal(await ping('fourth_client'),false);
+  await hours(early);assert.equal(await ping('other'),false);assert.equal(await ping('third_client'),false);
   await hours(defaultShopSchedule());assert.equal(await ping('client'),false);assert.equal(await ping('fourth_client'),false);
   const loaded=await loadStore(db),history=loaded.supplierProfiles.find(p=>p.userId==='supplier').availability.demandPings;
-  assert.equal(history.filter(p=>p.night==='2026-11-23').length,3);
+  assert.equal(history.filter(p=>p.night==='2026-11-23').length,0);
   assert.equal(history.filter(p=>p.night==='2026-11-24').length,2);
-  assert.equal(loaded.notifications.filter(n=>n.type==='printer_demand'&&n.userId==='supplier'&&n.night==='2026-11-23').length,3);
+  assert.equal(loaded.notifications.filter(n=>n.type==='printer_demand'&&n.userId==='supplier'&&n.night==='2026-11-23').length,0);
 });
 test('outbox retries cap mobile and browser transport expiry at shortened night hours without extending issued deadlines', {skip:!DATABASE_URL}, async t=>{
   const {createECDH}=await import('node:crypto');

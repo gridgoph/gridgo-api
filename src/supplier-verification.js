@@ -1,6 +1,7 @@
 import { homeSettings, homePrinterStatus, homeVerified } from './home-printers.js';
 import { randomUUID } from 'node:crypto';
 import { tierSignup, supplierOnboardingSettings } from './supplier-onboarding.js';
+import { scheduledShopPayout } from './payout-plan.js';
 
 const DAY = 86400000;
 const CLOSED = new Set(['delivered','issue_window_open','completed','payout_released','cancelled']);
@@ -164,7 +165,11 @@ export function prepareVerificationPayout(store,order,{key,amountMinor,at,actor,
   if(attemptId && (!sharedAttempt || !reservations(store,order.supplierId).some(e=>e.orderId===order.id&&reservationData(e).attemptId===attemptId)))fail('verification_payout_attempt_required');
   const summary=verificationSummary(store,order.supplierId,at);
   const reservedRecovery=sum(reservations(store,order.supplierId).map(e=>e.data.recoveryMinor));
-  const recoveryMinor=Math.min(amountMinor,Math.max(0,summary.recoveryDueMinor-reservedRecovery));
+  const scheduled=scheduledShopPayout(store,order.supplierId,key);
+  const availableRecovery=Math.max(0,summary.recoveryDueMinor-reservedRecovery);
+  if(scheduled&&(scheduled.amountMinor!==amountMinor||scheduled.amountMinor-scheduled.netAmountMinor>availableRecovery))
+    return {status:'held',key,amountMinor,reason:'scheduled_payout_reconciliation_required'};
+  const recoveryMinor=scheduled?scheduled.amountMinor-scheduled.netAmountMinor:Math.min(amountMinor,availableRecovery);
   const netAmountMinor=amountMinor-recoveryMinor;
   const occupies=paidEvents(store,order.supplierId).some(e=>e.orderId===order.id)
     ||reservations(store,order.supplierId).some(e=>e.orderId===order.id);

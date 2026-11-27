@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {fixture,id,actors} from './fixtures/reschedule.js';
-import {syncShopMoney,shopMoneyBalances,runShopSettlement,sweepShopMoney,routeShopMoney,clientPaymentSnapshot,shopMoneyPaused} from '../src/shop-money.js';
+import {syncShopMoney,shopMoneyBalances,runShopSettlement,sweepShopMoney,routeShopMoney,clientPaymentSnapshot,shopMoneyPaused,recordCounterCash} from '../src/shop-money.js';
 import {shopMoneySettings,validateShopMoneySettings,nextShopPayout} from '../src/shop-money-settings.js';
 import {recordShopRecovery,verificationSummary,prepareVerificationPayout,completeVerificationPayout} from '../src/supplier-verification.js';
 import {supplierMatchBlockersFor} from '../src/supplier-eligibility.js';
@@ -19,6 +19,16 @@ function setup({amount=30000,bonus=false}={}) {
 const call=(store,path,body={},actor=actors.ops,at=AT,method='POST')=>routeShopMoney({req:{method,headers:{}},url:new URL(path,'http://api.test'),store,user:actor,readBody:async()=>body,now:()=>at,id});
 function receipt(s){s.files.push({fileId:'receipt',ownerId:'ops',purpose:'payout_receipt',state:'ready',objectKey:'private/receipt',references:[]});}
 const rowFor=run=>run.data.shops.find(s=>s.supplierId==='supplier');
+
+test('a scheduled run keeps its amount when a later counter handover records fees',async()=>{
+ const s=setup(),run=runShopSettlement(s,ctx),scheduled=structuredClone(run);
+ const cash=structuredClone(s.orders[0]);Object.assign(cash,{id:'cash-after-run',paymentMethod:'counter_cash',clientPayment:{methods:['counter_cash']},supplierPlatformPayoutMinor:0,serviceFeeMinor:5000,totalMinor:35000});s.orders.push(cash);
+ recordCounterCash(s,cash,{amountMinor:35000,reason:'Counter handover'},{...ctx,at:'2026-11-23T08:01:00.000Z'});
+ const path=`/ops/shop-money/runs/${run.id}/shops/supplier/prepare`;
+ const first=await call(s,path);assert.equal(first.body.transfer.data.netAmountMinor,30000);
+ assert.equal((await call(s,path)).body.transfer.data.netAmountMinor,30000);
+ assert.deepEqual(run,scheduled);assert.equal(shopMoneyBalances(s,'supplier',AT).owingMinor,5000);
+});
 
 test('ledger accrual, actual payouts, both balances and recovery offsets are idempotent',()=>{
  const s=setup();syncShopMoney(s,ctx);assert.equal(shopMoneyBalances(s,'supplier',AT).owedMinor,30000);

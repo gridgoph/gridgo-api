@@ -75,21 +75,20 @@ test('pause expires at the exact hour or Manila midnight and preserves independe
   await assert.rejects(status(store,{...user,shopRole:'staff'},{expectedVersion:4,pause:null}),e=>e.code==='shop_owner_required');
   assert.equal((await status(store,{...user,shopRole:'staff'},null,at('19:00'),'GET')).status,200);
 });
-test('printer demand requires opt-in, nearby location, active window and at most three distinct clients per night',()=>{
+test('printer demand uses a Manila daily budget, includes daytime and closed shops, and respects mute',()=>{
   const {store,client,profile}=setup();let serial=0;
   const ping=(user=client,time=at('19:00'),location=profile.shop)=>pingPrinterDemand(store,user,{location},{at:time,id:p=>`${p}_${++serial}`});
   profile.availability.printerDemandPings=false;store.supplierProfiles[1].availability.printerDemandPings=false;
   assert.equal(ping(),false);profile.availability.printerDemandPings=true;
-  assert.equal(ping(client,at('17:00')),false);
   assert.equal(ping(client,at('19:00'),{lat:8,lng:126}),false);
-  assert.equal(ping(),true);assert.equal(ping(),false);
-  for (let n=1;n<=4;n++) ping({...client,id:`client_${n}`});
-  assert.equal(store.notifications.filter(n=>n.type==='printer_demand').length,3);
-  assert.equal(profile.availability.demandPings.length,3);
-  assert.equal(ping({...client,id:'fourth'},'2026-11-24T01:00:00+08:00'),false);
+  profile.isClosed=true;
+  assert.equal(ping(client,at('17:00')),true);assert.equal(ping(),false);
+  for(let n=1;n<=4;n++)ping({...client,id:`client_${n}`});
+  assert.equal(store.notifications.filter(n=>n.type==='printer_demand').length,2);
+  assert.equal(profile.availability.demandPings.length,2);
+  assert.equal(ping({...client,id:'next_day'},'2026-11-24T01:00:00+08:00'),true);
   assert.equal(ping(client,'2026-11-24T19:00:00+08:00'),true);
-  profile.availability.nightJobs='until_21';
-  assert.equal(ping({...client,id:'late'},'2026-11-24T21:00:00+08:00'),false);
+  assert.equal(ping({...client,id:'limit'},'2026-11-24T21:00:00+08:00'),false);
 });
 test('night Express draft and checkout snapshot immediate promises; close and delivery gates revalidate at checkout',async()=>{
   const {store,client,profile}=setup();store.version=1;

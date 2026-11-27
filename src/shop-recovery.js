@@ -25,7 +25,7 @@ const fail = (code) => { throw Object.assign(new Error(code), { status: 409, cod
 const normalized = (value) => String(value || '').trim().toLowerCase();
 
 export function startShopAcceptance(store, order, at) {
-  if(order.orderType === "express") return startExpressAcceptance(order,at);
+  if(order.orderType === "express") return startExpressAcceptance(order,at,store.settings);
   snapshotShopClock(store, order);
   const schedule = structuredClone(shopSlaClock(order)?.schedule || store.supplierProfiles?.find((row) => row.userId === order.supplierId)?.schedule || defaultShopSchedule());
   order.shopAcceptance = { supplierId: order.supplierId, assignedAt: at, deadlineAt: addOpeningMilliseconds(schedule, at, 3600000),

@@ -391,3 +391,16 @@ test('accept-first rerouting applies the monthly boost only for the saved Neares
     assert.equal(current(ctx.store,order).supplierId,expected,sort);
   }
 });
+
+test('a new-job pause refuses an outstanding offer but leaves an already accepted job accessible',async()=>{
+ for(const kind of ['missed','money']) {
+  const ctx=setup(),{order}=await send(ctx),profile=ctx.store.supplierProfiles.find(p=>p.userId==='shop_a');
+  const pause=()=>{if(kind==='missed')profile.availability={...profile.availability,missedJobPause:{active:true}};
+   else (ctx.store.shopMoneyEvents||=[]).push({id:'overdue-example',kind:'pay_request',supplierId:'shop_a',data:{amountMinor:1,deadlineAt:AT}});};
+  pause();
+  await assert.rejects(ctx.express('accept',ctx.shop('shop_a'),order.id,{},later(10)),e=>e.code==='shop_new_jobs_paused');
+  profile.availability={};ctx.store.shopMoneyEvents=[];
+  await ctx.express('accept',ctx.shop('shop_a'),order.id,{},later(20));pause();
+  assert.equal((await ctx.express('accept',ctx.shop('shop_a'),order.id,{},later(25))).status,200);
+ }
+});

@@ -7,7 +7,7 @@ import {recordPreparedSupplierTransfer} from './supplier-transfer-reconciliation
 import {resolvePayoutReceipt} from './payout-receipt.js';
 import {opsPayoutAccountProjection} from './payout-account.js';
 import {changePaymentsFor,changePayoutsFor} from './order-change-policy.js';
-import {shopMoneySettings,manilaClock,businessDate,nextShopPayout} from './shop-money-settings.js';
+import {shopMoneySettings,manilaClock,businessDate,nextShopPayout,weeklyShopPeriod,shopReceiptReviewBy} from './shop-money-settings.js';
 import {shopMoneyPolicy,shopMoneyPaused,payRequestClosed} from './shop-money-policy.js';
 import {clientPaymentSnapshot} from './shop-payment-method.js';
 import {identityHasMembership,selectActorRole} from './authorization-context.js';
@@ -107,8 +107,9 @@ export function recordCounterCash(store,order,{amountMinor,reason},ctx) {
   syncShopMoney(store,c);
   const award=ledger(store).find(e=>e.key===`bonus-award:${order.id}:${order.supplierId}`);
   const shareMinor=award?.data.waiveCounterFee?0:order.clientServiceFeeMinor??order.serviceFeeMinor;
-  recordShopRecovery(store,order.supplierId,`counter:${order.id}`,shareMinor,c,{debt:true});
-  const row=append(store,{key:`counter:${order.id}`,supplierId:order.supplierId,kind:'counter_cash',data:{orderId:order.id,amountMinor,shareMinor,reason}},c,true);
+  const weekly=shopMoneySettings(store.settings).weeklyNettingEnabled;
+  if(!weekly)recordShopRecovery(store,order.supplierId,`counter:${order.id}`,shareMinor,c,{debt:true});
+  const row=append(store,{key:`counter:${order.id}`,supplierId:order.supplierId,kind:'counter_cash',data:{orderId:order.id,amountMinor,shareMinor,reason,...(weekly?{weekly:true}:{} )}},c,true);
   syncShopMoney(store,c);
   return row;
 }
@@ -132,12 +133,14 @@ const settlementPayoutHeld=(s,o)=>Boolean(o.payoutHold||(s.claims||[]).some(cl=>
   ||(s.issues||[]).some(issue=>issue.orderId===o.id&&!['resolved','dismissed'].includes(issue.status))
   ||(s.refundRequests||[]).some(r=>r.orderId===o.id&&['requested','reviewed'].includes(r.status)));
 /** A dry run uses the exact proof/collection/hold checks and sequential cap reservations. */
-function prepareItems(store,supplierId,ctx,{dry=false,keys}={}) {
+function prepareItems(store,supplierId,ctx,{dry=false,keys,beforeAt}={}) {
   const s=dry?structuredClone(store):store,c=context(ctx),items=[],held=[];
   const payoutStatus=supplierPayoutStatus(s,supplierId,c.at);
   if(payoutStatus.held)return {items,held:[{key:`supplier:${supplierId}`,reason:payoutStatus.reason}],netAmountMinor:0,grossAmountMinor:0};
   for(const o of s.orders||[]) {
     if(o.supplierId!==supplierId||o.reviewData||!o.commercialCommittedAt)continue;
+    if(beforeAt&&Date.parse(o.commercialCommittedAt)>=Date.parse(beforeAt)
+      &&!(s.shopMoneyEvents||[]).some(e=>e.kind==='settlement_run'&&e.data.shops.some(shop=>shop.supplierId===supplierId&&shop.items.some(i=>i.orderId===o.id))))continue;
     const externalPrincipal=o.cash||o.clientPayment?.methods.includes('counter_cash');
     for(const m of externalPrincipal?[]:o.payoutMilestones||[]) {
       const key=`stage:${o.id}:${m.code}`;
@@ -193,31 +196,48 @@ function prepareItems(store,supplierId,ctx,{dry=false,keys}={}) {
   return {items,held,netAmountMinor:total(items.map(i=>i.netAmountMinor)),grossAmountMinor:total(items.map(i=>i.amountMinor))};
 }
 export function runShopSettlement(store,ctx) {
-  const c=context(ctx),p=shopMoneySettings(store.settings),clock=manilaClock(c.at),key=`run:${clock.date}`;
+  const c=context(ctx),p=shopMoneySettings(store.settings),clock=manilaClock(c.at),period=weeklyShopPeriod(store.settings,c.at),key=p.weeklyNettingEnabled?`weekly:${period.start}`:`run:${clock.date}`;
   const previous=events(store).find(e=>e.key===key);if(previous)return previous;
-  if(clock.time<p.payoutTime||!businessDate(clock.date,p))return null;
+  if(p.weeklyNettingEnabled?Date.parse(c.at)<Date.parse(period.runAt):clock.time<p.payoutTime||!businessDate(clock.date,p))return null;
+  if(p.weeklyNettingEnabled)for(const e of events(store).filter(e=>e.kind==='counter_cash'&&e.data.weekly&&Date.parse(e.at)<Date.parse(`${period.end}T00:00:00+08:00`)))
+    recordShopRecovery(store,e.supplierId,`counter:${e.data.orderId}`,e.data.shareMinor,c,{debt:true});
   syncShopMoney(store,c);
   const shops=[];
   for(const supplierId of new Set((store.userRoleMemberships||[]).filter(m=>m.role==='supplier').map(m=>m.userId))) {
-    const prepared=prepareItems(store,supplierId,c,{dry:true}),balances=shopMoneyBalances(store,supplierId,c.at);
+    const prepared=prepareItems(store,supplierId,c,{dry:true,...(p.weeklyNettingEnabled?{beforeAt:`${period.end}T00:00:00+08:00`}:{})}),balances=shopMoneyBalances(store,supplierId,c.at);
     const available=prepared.netAmountMinor;
-    const eligible=available>=p.minimumMinor||available===0&&prepared.items.some(i=>i.recoveryMinor>0);
+    const eligible=p.weeklyNettingEnabled?prepared.items.length>0:available>=p.minimumMinor||available===0&&prepared.items.some(i=>i.recoveryMinor>0);
+    const offsetMinor=total(prepared.items.map(i=>i.recoveryMinor||0));
+    const reservedRecovery=total((store.supplierVerificationLedger||[]).filter(e=>e.supplierId===supplierId&&e.kind==='reserved'
+      &&(store.supplierVerificationLedger||[]).filter(x=>x.payoutKey===e.payoutKey).at(-1)===e).map(e=>e.data.recoveryMinor||0));
+    const dueMinor=p.weeklyNettingEnabled?Math.max(0,verificationSummary(store,supplierId,c.at).recoveryDueMinor-offsetMinor-reservedRecovery):Math.max(0,-balances.netMinor);
     shops.push({supplierId,...balances,availableMinor:available,rolloverMinor:eligible?0:available,amountMinor:eligible?available:0,
+      ...(p.weeklyNettingEnabled?{offsetMinor,payGridgoMinor:dueMinor,period,qrEarningsMinor:prepared.grossAmountMinor,
+        cashOrderCount:events(store).filter(e=>e.kind==='counter_cash'&&e.supplierId===supplierId&&Date.parse(e.at)>=Date.parse(`${period.start}T00:00:00+08:00`)&&Date.parse(e.at)<Date.parse(`${period.end}T00:00:00+08:00`)).length,
+        cashFeesMinor:total(events(store).filter(e=>e.kind==='counter_cash'&&e.supplierId===supplierId&&Date.parse(e.at)>=Date.parse(`${period.start}T00:00:00+08:00`)&&Date.parse(e.at)<Date.parse(`${period.end}T00:00:00+08:00`)).map(e=>e.data.shareMinor)),qrOrderCount:new Set(prepared.items.map(i=>i.orderId)).size}:{}),
       items:eligible?prepared.items.map(i=>({key:i.key,orderId:i.orderId,amountMinor:i.amountMinor,netAmountMinor:i.netAmountMinor})):[],held:prepared.held});
-    if(shopMoneyPolicy(store,supplierId).counterCashEnabled&&balances.netMinor<0&&!events(store).some(e=>e.kind==='pay_request'&&e.supplierId===supplierId&&!payRequestClosed(store,e.id))) {
-      append(store,{key:`pay:${clock.date}:${supplierId}`,supplierId,kind:'pay_request',data:{amountMinor:-balances.netMinor,reference:`GG-${c.id('pay').replace(/[^a-z0-9]/gi,'').slice(-24).toUpperCase()}`,
-        deadlineAt:new Date(`${clock.date}T${p.payDeadline}:00+08:00`).toISOString()}},c,true);
+    if((p.weeklyNettingEnabled||shopMoneyPolicy(store,supplierId).counterCashEnabled)&&dueMinor>0&&!events(store).some(e=>e.kind==='pay_request'&&e.supplierId===supplierId&&!payRequestClosed(store,e.id))) {
+      append(store,{key:`pay:${key}:${supplierId}`,supplierId,kind:'pay_request',data:{amountMinor:dueMinor,reference:`GG-${c.id('pay').replace(/[^a-z0-9]/gi,'').slice(-24).toUpperCase()}`,
+        ...(p.weeklyNettingEnabled?{weekly:true}:{}),deadlineAt:p.weeklyNettingEnabled?period.deadlineAt:new Date(`${clock.date}T${p.payDeadline}:00+08:00`).toISOString()}},c,true);
     }
-    if(balances.owedMinor||balances.owingMinor)notify(store,supplierId,'shop_money_settlement','Daily shop settlement','Your daily balances and payout status are ready in Money.',c);
+    if(balances.owedMinor||balances.owingMinor)notify(store,supplierId,'shop_money_settlement',p.weeklyNettingEnabled?'Weekly shop settlement':'Daily shop settlement','Your balances and payout status are ready in Money.',c);
   }
-  return append(store,{key,kind:'settlement_run',data:{date:clock.date,minimumMinor:p.minimumMinor,payoutTime:p.payoutTime,shops}},c,true);
+  return append(store,{key,kind:'settlement_run',data:{date:clock.date,minimumMinor:p.weeklyNettingEnabled?0:p.minimumMinor,payoutTime:p.payoutTime,...(p.weeklyNettingEnabled?{weekly:true,period}:{}),shops}},c,true);
 }
 export function sweepShopMoney(store,ctx) {
   const c=context(ctx),before=events(store).length;
   const journalChanged=syncShopMoney(store,c);
   runShopSettlement(store,c);
   const clock=manilaClock(c.at),p=shopMoneySettings(store.settings);
+  for(const receipt of events(store).filter(e=>e.kind==='payment_receipt'&&!payRequestClosed(store,e.data.requestId)&&Date.parse(e.data.reviewBy)<=Date.parse(c.at))) {
+    const key=`receipt-overdue:${receipt.id}`;
+    if(!events(store).some(e=>e.key===key)) {
+      append(store,{key,supplierId:receipt.supplierId,kind:'receipt_review_overdue',data:{requestId:receipt.data.requestId,receiptId:receipt.id}},c,true);
+      notify(store,receipt.supplierId,'shop_money_review_overdue','Payment review waiting','The payment receipt is awaiting review. Operations has been notified.',c);
+    }
+  }
   for(const request of events(store).filter(e=>e.kind==='pay_request'&&!payRequestClosed(store,e.id))) {
+    if(request.data.weekly&&!p.overduePauseEnabled)continue;
     for(const [kind,condition] of [['reminder',clock.time>=p.reminderTime&&request.at.slice(0,10)<=c.at.slice(0,10)],['paused',request.data.deadlineAt<=c.at]]) {
       const key=`${kind}:${request.id}`;
       if(condition&&!events(store).some(e=>e.key===key)) {
@@ -233,11 +253,16 @@ export function sweepShopMoney(store,ctx) {
 export async function shopMoneyWorkDue(database,at) {
   const settings=(await database.query('SELECT settings FROM platform_settings WHERE singleton')).rows[0]?.settings||{};
   const p=shopMoneySettings(settings),clock=manilaClock(at);
-  if(clock.time>=p.payoutTime&&businessDate(clock.date,p)&&!(await database.query('SELECT 1 FROM shop_money_events WHERE event_key=$1',[`run:${clock.date}`])).rowCount)return true;
+  const period=weeklyShopPeriod(settings,at),key=p.weeklyNettingEnabled?`weekly:${period.start}`:`run:${clock.date}`;
+  if((p.weeklyNettingEnabled?Date.parse(at)>=Date.parse(period.runAt):clock.time>=p.payoutTime&&businessDate(clock.date,p))&&!(await database.query('SELECT 1 FROM shop_money_events WHERE event_key=$1',[key])).rowCount)return true;
   if((await database.query(`SELECT 1 FROM shop_money_events r WHERE r.kind='pay_request'
+    AND (r.data->>'weekly' IS DISTINCT FROM 'true' OR $3::boolean)
     AND NOT EXISTS(SELECT 1 FROM shop_money_events c WHERE c.kind IN ('pay_confirmed','pay_offset') AND c.data->>'requestId'=r.id)
     AND (($2::boolean AND NOT EXISTS(SELECT 1 FROM shop_money_events m WHERE m.event_key='reminder:'||r.id))
-      OR ((r.data->>'deadlineAt')::timestamptz<=$1::timestamptz AND NOT EXISTS(SELECT 1 FROM shop_money_events m WHERE m.event_key='paused:'||r.id))) LIMIT 1`,[at,clock.time>=p.reminderTime])).rowCount)return true;
+      OR ((r.data->>'deadlineAt')::timestamptz<=$1::timestamptz AND NOT EXISTS(SELECT 1 FROM shop_money_events m WHERE m.event_key='paused:'||r.id))) LIMIT 1`,[at,clock.time>=p.reminderTime,p.overduePauseEnabled])).rowCount)return true;
+  if((await database.query(`SELECT 1 FROM shop_money_events r WHERE r.kind='payment_receipt' AND (r.data->>'reviewBy')::timestamptz<=$1::timestamptz
+    AND NOT EXISTS(SELECT 1 FROM shop_money_events c WHERE c.kind IN ('pay_confirmed','pay_offset') AND c.data->>'requestId'=r.data->>'requestId')
+    AND NOT EXISTS(SELECT 1 FROM shop_money_events n WHERE n.event_key='receipt-overdue:'||r.id) LIMIT 1`,[at])).rowCount)return true;
   return (await database.query(`SELECT 1 FROM orders o WHERE o.supplier_id IS NOT NULL AND o.commercial_committed_at IS NOT NULL
     AND o.supplier_platform_payout_minor>0 AND NOT o.review_data AND o.state<>'cancelled'
     AND jsonb_typeof(o.data->'cash') IS DISTINCT FROM 'object' AND o.data->>'paymentMethod' IS DISTINCT FROM 'counter_cash'
@@ -247,13 +272,13 @@ export async function shopMoneyWorkDue(database,at) {
 
 export async function routeShopMoney({req,url,store,user,readBody,now,id,database}) {
   const path=url.pathname;
-  if(!path.startsWith('/ops/shop-money')&&path!=='/me/shop-money')return null;
-  const superAdmin=identityHasMembership(user,'super_admin'),ops=superAdmin||identityHasMembership(user,'ops_admin'),mine=path==='/me/shop-money';
+  if(!path.startsWith('/ops/shop-money')&&path!=='/me/shop-money'&&!path.startsWith('/me/shop-money/'))return null;
+  const superAdmin=identityHasMembership(user,'super_admin'),ops=superAdmin||identityHasMembership(user,'ops_admin'),mine=path.startsWith('/me/shop-money');
   if(mine?!identityHasMembership(user,'supplier')||['staff','manager'].includes(user?.shopRole):!ops)fail('forbidden',403);
   if(!mine&&ops&&!['ops_admin','super_admin'].includes(user.role))user=selectActorRole(store,user,superAdmin?'super_admin':'ops_admin');
   const c={at:now(),id,actor:user};
   if(req.method==='GET') {
-    const supplierId=mine?user.id:/^\/ops\/shop-money\/shops\/([^/]+)$/.exec(path)?.[1];
+    const supplierId=path==='/me/shop-money'?user.id:/^\/ops\/shop-money\/shops\/([^/]+)$/.exec(path)?.[1];
     if(supplierId) {
       if(!(store.userRoleMemberships||[]).some(m=>m.userId===supplierId&&m.role==='supplier'))fail('supplier_not_found',404);
       const query=url.searchParams,period=query.get('period')||'month';
@@ -267,20 +292,47 @@ export async function routeShopMoney({req,url,store,user,readBody,now,id,databas
       const methods={};for(const j of jobs)for(const method of j.clientPayment.methods)methods[method]=(methods[method]||0)+1;
       const pending=events(store).find(e=>e.kind==='pay_request'&&e.supplierId===supplierId&&!payRequestClosed(store,e.id));
       return {status:200,body:{balances:shopMoneyBalances(store,supplierId,c.at),policy:shopMoneyPolicy(store,supplierId),history,jobs,earningsByDay:days,paymentMethods:methods,
-        payGridgo:pending?{requestId:pending.id,...pending.data,amountMinor:Math.min(pending.data.amountMinor,verificationSummary(store,supplierId,c.at).recoveryDueMinor),confirmation:'manual',qrImageUrl:store.settings.paymentQrFileId?`/public/payment-qr?v=${encodeURIComponent(store.settings.paymentQrFileId)}`:null}:null}};
+        weeklySettlement:events(store).findLast(e=>e.kind==='settlement_run'&&e.data.weekly&&e.data.shops.some(s=>s.supplierId===supplierId))?.data.shops.find(s=>s.supplierId===supplierId)||null,
+        payGridgo:pending?{requestId:pending.id,...pending.data,amountMinor:Math.min(pending.data.amountMinor,verificationSummary(store,supplierId,c.at).recoveryDueMinor),confirmation:'manual',
+          receipt:events(store).findLast(e=>e.kind==='payment_receipt'&&e.data.requestId===pending.id)?.data||null,
+          reviewMinutes:shopMoneySettings(store.settings).reviewMinutes,reviewHours:{opens:shopMoneySettings(store.settings).reviewOpens,closes:shopMoneySettings(store.settings).reviewCloses,timeZone:'Asia/Manila'},
+          qrImageUrl:store.settings.paymentQrFileId?`/public/payment-qr?v=${encodeURIComponent(store.settings.paymentQrFileId)}`:null}:null}};
     }
     if(path==='/ops/shop-money') {
       const all=events(store).filter(e=>e.kind==='transfer_reserved'),recent=new Set(all.slice(-100).map(e=>e.id));
       const transfers=all.map(e=>({...e,status:events(store).findLast(x=>x.data?.transferId===e.id)?.kind||'transfer_reserved'}))
         .filter(e=>recent.has(e.id)||!['transfer_paid','transfer_cancelled'].includes(e.status));
       const suppliers=new Set([...(store.userRoleMemberships||[]).filter(m=>m.role==='supplier').map(m=>m.userId),...ledger(store).map(e=>e.supplierId)]);
-      return {status:200,body:{shops:[...suppliers].map(supplierId=>({supplierId,...shopMoneyBalances(store,supplierId,c.at)})),runs:events(store).filter(e=>e.kind==='settlement_run').slice(-31),transfers}};
+      return {status:200,body:{shops:[...suppliers].map(supplierId=>({supplierId,...shopMoneyBalances(store,supplierId,c.at)})),runs:events(store).filter(e=>e.kind==='settlement_run').slice(-31),transfers,
+        receipts:events(store).filter(e=>e.kind==='payment_receipt'&&!payRequestClosed(store,e.data.requestId)).map(e=>({id:e.id,supplierId:e.supplierId,...e.data}))}};
     }
     return null;
   }
   if(req.method!=='POST'&&req.method!=='PATCH')return null;
-  if(!ops)fail('forbidden',403);
   const body=await readBody(req);
+  if(!body||typeof body!=='object'||Array.isArray(body))fail('invalid_shop_payment',400);
+  const receiptPath=/^\/me\/shop-money\/payments\/([^/]+)\/receipt$/.exec(path);
+  if(receiptPath&&req.method==='POST') {
+    const request=events(store).find(e=>e.id===receiptPath[1]&&e.kind==='pay_request'&&e.supplierId===user.id);
+    if(!request)fail('payment_request_not_found',404);
+    const reference=typeof body.reference==='string'?body.reference.trim().toUpperCase():null;
+    if(!reference||reference.length>80||!Number.isSafeInteger(body.amountMinor)||body.amountMinor<=0)fail('invalid_shop_payment',400);
+    const previous=events(store).find(e=>e.kind==='payment_receipt'&&e.data.requestId===request.id&&e.data.reference===reference);
+    if(previous) {
+      if(previous.data.amountMinor!==body.amountMinor||previous.data.receiptFileId!==body.receiptFileId)fail('payment_reference_conflict');
+      return {status:200,body:{receipt:previous.data,replayed:true}};
+    }
+    if(payRequestClosed(store,request.id))fail('payment_request_closed');
+    if(body.amountMinor!==Math.min(request.data.amountMinor,verificationSummary(store,user.id,c.at).recoveryDueMinor))fail('payment_amount_changed');
+    const file=(store.files||[]).find(f=>f.fileId===body.receiptFileId&&f.ownerId===user.id&&f.purpose==='shop_payment_receipt'&&f.state==='ready'&&!f.deleteRequestedAt&&!f.deletedAt);
+    if(!file||file.references?.length)fail('shop_payment_receipt_required',400);
+    if(events(store).some(e=>e.kind==='payment_receipt'&&e.data.reference===reference))fail('payment_reference_conflict');
+    (file.references||=[]).push({type:'user',id:user.id,field:'shopPaymentReceipt',requestId:request.id});
+    const row=append(store,{key:`receipt:${request.id}:${reference}`,supplierId:user.id,kind:'payment_receipt',data:{requestId:request.id,amountMinor:body.amountMinor,reference,receiptFileId:file.fileId,submittedAt:c.at,reviewBy:shopReceiptReviewBy(store.settings,c.at)}},c,true);
+    notify(store,user.id,'shop_money_receipt','Payment receipt submitted','Your receipt is waiting for confirmation. Accepted jobs can continue.',c);
+    return {status:200,body:{receipt:row.data},mutated:true};
+  }
+  if(!ops)fail('forbidden',403);
   const counter=/^\/ops\/shop-money\/shops\/([^/]+)\/counter-cash$/.exec(path);
   if(counter&&req.method==='POST') {
     const o=(store.orders||[]).find(o=>o.id===body.orderId&&o.supplierId===counter[1]&&!o.reviewData);
@@ -388,8 +440,10 @@ export async function routeShopMoney({req,url,store,user,readBody,now,id,databas
     if(previous){if(previous.data.reference!==body.reference.trim().toUpperCase()||previous.data.amountMinor!==body.amountMinor)fail('payment_reference_conflict');return {status:200,body:{payment:previous,replayed:true}};}
     if(events(store).some(e=>e.kind==='pay_confirmed'&&e.data.reference===body.reference.trim().toUpperCase()))fail('payment_reference_conflict');
     const outstanding=verificationSummary(store,request.supplierId,c.at).recoveryDueMinor;
+    if(request.data.weekly&&!events(store).some(e=>e.kind==='payment_receipt'&&e.data.requestId===request.id&&e.data.amountMinor===body.amountMinor&&e.data.reference===body.reference.trim().toUpperCase()))fail('shop_payment_receipt_required');
     if(body.amountMinor!==Math.min(request.data.amountMinor,outstanding))fail('payment_amount_changed');
-    if((store.orders||[]).some(o=>o.supplierId===request.supplierId&&verificationReservationsForOrder(store,o).some(e=>e.data.recoveryMinor>0)))fail('verification_transfer_reconciliation_required');
+    const reservedRecovery=total((store.orders||[]).filter(o=>o.supplierId===request.supplierId).flatMap(o=>verificationReservationsForOrder(store,o)).map(e=>e.data.recoveryMinor||0));
+    if(reservedRecovery>0&&(!request.data.weekly||body.amountMinor>outstanding-reservedRecovery))fail('verification_transfer_reconciliation_required');
     recordShopRecovery(store,request.supplierId,request.id,body.amountMinor,c);
     const row=append(store,{key:`pay-confirmed:${request.id}`,supplierId:request.supplierId,kind:'pay_confirmed',data:{requestId:request.id,amountMinor:body.amountMinor,reference:body.reference.trim().toUpperCase(),reason:body.reason}},c,true);
     syncShopMoney(store,c);notify(store,request.supplierId,'shop_money_reopened','Pay GRIDGO confirmed','Your payment was confirmed. Your shop can receive new orders under its current eligibility.',c);

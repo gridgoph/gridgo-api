@@ -5,11 +5,14 @@ export const NIGHT_MODES = ['off', 'until_21', 'until_23', 'all_night'];
 const DAY = 86400000;
 export const manilaDay = at => new Date(Date.parse(at) + 480 * 60000).toISOString().slice(0, 10);
 const midnight = day => Date.parse(`${day}T00:00:00+08:00`);
-export const shopPaused = (profile, at) => Date.parse(profile?.availability?.pausedUntil) > Date.parse(at);
+export const shopPaused = (profile, at) => profile?.availability?.missedJobPause?.active===true
+  ||Date.parse(profile?.availability?.pausedUntil)>Date.parse(at)
+  ||profile?.availability?.openRestoreClosed===true&&Date.parse(profile.availability.openUntil)<=Date.parse(at);
 const closedOn = (schedule, day) => schedule.closures?.some(c => c.startDay <= day && c.endDay >= day);
 
 /** Separate night windows leave published production calendars unchanged. */
 export function nightWindow(profile, at) {
+  if(Date.parse(profile?.availability?.openUntil)>Date.parse(at))return {night:manilaDay(at),startsAt:at,endsAt:profile.availability.openUntil,temporary:true};
   const mode = profile?.availability?.nightJobs || 'off';
   if (!NIGHT_MODES.includes(mode) || mode === 'off') return null;
   const schedule = profile.schedule || defaultShopSchedule();

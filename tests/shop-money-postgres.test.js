@@ -107,3 +107,22 @@ test('historical runtime cannot separately prepare, record or cancel an active d
  const confirmation=await api('ops','POST',`/ops/shop-money/transfers/${transfer.id}/confirm`,{amountMinor:12000,reference:'WHOLE-BATCH',receiptFileId:'receipt',fundsSentConfirmed:true,paidAt:new Date().toISOString(),reason:'Verified whole transfer'});
  assert.equal(confirmation.status,200,JSON.stringify(confirmation.body));assert.equal(shopMoneyBalances(await loadStore(db),'supplier',AT).owedMinor,0);
 });
+
+test('scheduled run amounts survive later cash fees, including a historical writer attempt',{skip:!process.env.DATABASE_URL},async t=>{
+ const db=createDatabase(process.env);t.after(()=>db.close());await setup(db);
+ const {recordShopRecovery,prepareVerificationPayout}=await import('../src/supplier-verification.js');
+ const {routeShopMoney}=await import('../src/shop-money.js');
+ await db.transaction(async()=>{const s=await loadStore(db);recordShopRecovery(s,'supplier','later-cash-fee',5000,{at:AT,id},{debt:true});await saveStore(db,s);});
+ await assert.rejects(db.transaction(async()=>{
+  const s=await loadStore(db),events=s.shopMoneyEvents;s.shopMoneyEvents=[];
+  prepareVerificationPayout(s,s.orders[0],{key:'stage:order:delivered',amountMinor:10000,at:AT,id,actor:s.users.find(u=>u.id==='ops')});
+  s.shopMoneyEvents=events;await saveStore(db,s);
+ }),/scheduled_payout_reconciliation_required/);
+ await db.transaction(async()=>{
+  const s=await loadStore(db),run=s.shopMoneyEvents.find(e=>e.kind==='settlement_run');
+  const call=()=>routeShopMoney({req:{method:'POST'},url:new URL(`http://api.test/ops/shop-money/runs/${run.id}/shops/supplier/prepare`),store:s,user:s.users.find(u=>u.id==='ops'),readBody:async()=>({}),now:()=>AT,id,database:db});
+  assert.equal((await call()).body.transfer.data.netAmountMinor,12000);
+  assert.equal((await call()).body.transfer.data.netAmountMinor,12000);
+  await saveStore(db,s);
+ });
+});

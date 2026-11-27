@@ -35,10 +35,10 @@ export function beginAcceptFirst(store, order, { at, createId }) {
   // Uploads are checked automatically at upload and checkout; nobody reviews Express files by hand.
   order.fileCheck = { status: 'passed', requestedAt: at, reviewedAt: at, reviewedBy: null, reason: null, checklist: null, automatic: true };
   order.state = 'supplier_assigned';
-  order.timeline.push({ at, state: 'supplier_assigned', by: 'system', note: 'Sent to the shop. It has one minute to accept; the client pays after it accepts.' });
+  startExpressAcceptance(order, at, store.settings);
+  order.timeline.push({ at, state: 'supplier_assigned', by: 'system', note: `Sent to the shop. It has ${order.shopAcceptance.windowSeconds} seconds to accept; the client pays after it accepts.` });
   // Files are cleared automatically, so the job is ready for the shop the moment it accepts.
   for (const job of store.orderJobs || []) if (job.orderId === order.id) { job.state = 'approved_for_production'; job.updatedAt = at; }
-  startExpressAcceptance(order, at);
   notifyOrderParties(store, order, { createId, at });
   queueOrderInvalidate(store, order, ['orders', 'jobs', 'notifications']);
 }
@@ -218,7 +218,7 @@ function advance(store, order, ctx) {
 }
 
 function refusal(store, order, { at, id, kind, actorId }) {
-  // No shop warning: the refusal only counts in the shop's accept rate.
+  // The timeout transition already applied the missed-offer availability policy.
   audit(store, order, kind, { at, id, actorId, detail: { supplierId: order.supplierId } });
   order.expressOrder.reroute = { status: 'searching', at };
   advance(store, order, { at, id });
