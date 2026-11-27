@@ -129,6 +129,37 @@ home is available only when Verified and explicitly enabled.
 An owner using their client membership retains their own personal account name
 and contacts; their home-printer card and pickup details still follow these rules.
 
+### Pickup point
+
+A home printer may share a **pickup point** instead of its home pin, for
+[accept-first Express](EXPRESS_API.md#accept-first-express-send-accept-then-pay).
+Set it with `PATCH /me/home-printer`:
+
+```json
+{ "expectedVersion": 4, "pickupPoint": { "point": { "lat": 7.0645, "lng": 125.609 },
+  "kind": "gate", "description": "Green gate beside the chapel",
+  "consent": { "accepted": true, "wording": "<HOME_PICKUP_POINT_CONSENT>" } } }
+```
+
+- `kind` is `gate`, `guardhouse` or `landmark`.
+- `description` is 1–160 characters.
+- `consent.wording` must equal the server's fixed sentence (`HOME_PICKUP_POINT_CONSENT` in `src/home-printers.js`).
+- `null` removes the point. A home printer that offers delivery only leaves `allowHomePickup` off.
+- Errors: `400 invalid_home_pickup_point` and `400 home_pickup_point_consent_required`.
+- The owner reads the point back in `GET /me/home-printer` as `pickupPoint`.
+
+The point is frozen on the order with the other private home metadata. It is
+shown as `expressOrder.pickupPoint` only to the **owning client** of an
+accept-first **pickup** order, and only from the shop's acceptance until pickup or
+cancellation. It holds `kind`, `description`, `lat`, `lng`, `barangay`,
+`distanceMeters`, a straight-line `walkingTimeMinutes` at 80 m per minute, and
+`onlyVisibleToYou: true`. Everyone else, and the same client before acceptance
+or after pickup or cancellation, receives no point. Accept-first order history
+keeps the barangay only, with no street.
+
+Accept-first home printers take QR only, and orders up to the manual QR limit
+while QR is confirmed by hand. See [Express](EXPRESS_API.md#home-printers).
+
 ## Rider app
 
 Reuse `GET /dispatch/offers`, `POST /dispatch/:orderId/accept`,
@@ -141,6 +172,10 @@ previous riders and completed/cancelled order reads get no pin or house
 information. The printer's personal name is not supplied to the rider; adapt
 signature-name prefill for the anonymous home-printer contact. No new rider
 location endpoint or payout flow is needed.
+
+On an accept-first delivery, the assigned rider's `pickup` is the home printer's
+pickup point (`lat`, `lng`, `label` from its description, `pickupPointKind`)
+instead of the home pin, when a pickup point is set.
 
 ## Staff and policy
 

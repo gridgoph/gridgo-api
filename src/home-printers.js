@@ -4,6 +4,23 @@ import { queueInvalidate, privilegedAdminMemberships } from './notifications.js'
 const DAY = 86400000;
 export const HOME_PIN_CONSENT = 'I agree that clients see only my barangay and approximate distance, paid home-pickup clients see my street, and the assigned rider sees my exact pin only during an active job.';
 export const HOME_FILE_AGREEMENT = 'I will keep client files private, use them only to print the job, and delete them after completing it.';
+export const HOME_PICKUP_POINT_CONSENT = 'I agree that a client sees this pickup point only after I accept their order and until pickup or cancellation, and that a rider sees it only for a delivery.';
+const POINT_KINDS = ['gate', 'guardhouse', 'landmark'];
+/** The meeting point a home printer chooses to share; never its home pin. */
+export function homePickupPoint(value, at) {
+ if (value === null) return null;
+ const point = value?.point, text = value?.description;
+ if (!point || !Number.isFinite(point.lat) || Math.abs(point.lat) > 90 || !Number.isFinite(point.lng) || Math.abs(point.lng) > 180
+  || !POINT_KINDS.includes(value.kind) || typeof text !== 'string' || !text.trim() || text.trim().length > 160) fail(400, 'invalid_home_pickup_point');
+ if (value.consent?.accepted !== true || value.consent.wording !== HOME_PICKUP_POINT_CONSENT) fail(400, 'home_pickup_point_consent_required');
+ return { lat: point.lat, lng: point.lng, kind: value.kind, description: text.trim(), consent: { accepted: true, wording: HOME_PICKUP_POINT_CONSENT, at } };
+}
+/** Accept-first pickup only: the owning client, from acceptance until pickup or cancellation. */
+export function homePickupPointVisible(order, user) {
+ return user?.role === 'client' && user.id === order?.clientId && order.expressOrder?.acceptFlow === 2 && order.fulfillmentMode === 'pickup'
+  && order.shopAcceptance?.status === 'accepted' && !order.expressOrder.pickedUpAt
+  && ['awaiting_initial_payment', 'initial_payment_review', 'payment_authorized', 'production', 'supplier_self_qc', 'ready_for_dispatch'].includes(order.state);
+}
 export const homeProfile = (store, id) => store?.supplierProfiles?.find(p => p.userId === id && p.homePrinter);
 export const homeSettings = settings => ({minimumAgeYears:18,starterWeeklyJobCap:30,verificationWindowDays:30,...settings?.homePrinter});
 const fail = (status, code) => { throw Object.assign(new Error(code), {status, code}); };
@@ -65,7 +82,8 @@ export function snapshotHomePrinter(store,order) {
  if(!profile){delete order.homePrinter;return;}
  const h=profile.homePrinter;
  order.homePrinter={supplierId:profile.userId,barangay:h.barangay,street:h.street,pin:structuredClone(order.pickup||profile.shop),
-  propertyType:h.propertyType,landmark:h.landmark,privateNames:[profile.shopName,profile.contactName,store.users?.find(u=>u.id===profile.userId)?.name].filter(Boolean)};
+  propertyType:h.propertyType,landmark:h.landmark,privateNames:[profile.shopName,profile.contactName,store.users?.find(u=>u.id===profile.userId)?.name].filter(Boolean),
+  ...(h.pickupPoint?{pickupPoint:{lat:h.pickupPoint.lat,lng:h.pickupPoint.lng,kind:h.pickupPoint.kind,description:h.pickupPoint.description}}:{})};
 }
 // Pre-policy orders have no home snapshot. Use their frozen pickup, never
 // today's shop pin; an unknown historical street is not disclosed after payment.
@@ -81,10 +99,13 @@ const activeRider=(user,order)=>user?.role==='rider'&&user.id===order?.riderId
  && ['rider_assigned','picked_up','out_for_delivery','awaiting_collection'].includes(order.state);
 const settled=p=>['confirmed','not_required'].includes(p?.status);
 export function homePickupProjection(order,user,home) {
+ // A rider on an accept-first delivery is sent to the shared pickup point, never the home pin.
+ if(activeRider(user,order)&&order.expressOrder?.acceptFlow===2&&home.pickupPoint)return {lat:home.pickupPoint.lat,lng:home.pickupPoint.lng,label:home.pickupPoint.description,pickupPointKind:home.pickupPoint.kind};
  if(activeRider(user,order))return {...structuredClone(home.pin),...(home.landmark?{landmark:home.landmark}:{}),...(home.propertyType?{propertyType:home.propertyType}:{})};
  const paid=user?.role==='client'&&user.id===order?.clientId&&order.fulfillmentMode==='pickup'
   &&settled(order.payments?.initial)&&settled(order.payments?.final_online);
- return {barangay:home.barangay,...(paid&&home.street?{street:home.street}:{})};
+ // Accept-first history keeps the barangay only; the meeting point is revealed separately.
+ return {barangay:home.barangay,...(paid&&home.street&&order?.expressOrder?.acceptFlow!==2?{street:home.street}:{})};
 }
 /** Shared JSON boundary, including nested quote/job and legacy publicUser shapes.
  * Exact coordinates are never returned to clients, even after pickup payment.
@@ -137,6 +158,9 @@ export function homePrinterResponse(store,value,user) {
    // A multi-role identity may read its own personal account in the client app;
    // this does not grant access to its home's shop details or job pickup pin.
    if(user?.id&&item.id===user.id&&['name','email','phone'].includes(k)){out[k]=v;continue;}
+   // The revealed meeting point is shared on purpose with this client only.
+   if(k==='pickupPoint'&&v&&context&&homePickupPointVisible(context,user)){out[k]=structuredClone(v);continue;}
+   if(k==='pickupPoint'&&user?.role!=='supplier')continue;
    if(k==='homePrinterHistory'||k==='homePrinter'&&!v?.level)continue;
    if(home&&['contactName','phone','email','landmark','propertyType','privateNames','privateDetails','hours','shopHours','schedule'].includes(k))continue;
    if(home&&(['shopName','supplierName'].includes(k)||k==='name'&&(item.id===home.supplierId||item.userId===home.supplierId||item.printerType==='home'))){out[k]=home.barangay;continue;}

@@ -3,6 +3,9 @@ import { reviewTiming } from './operating-hours.js';
 // only the upload's structural verdict and the Operations decision are stored.
 export function supplierArtworkReleased(order) {
   if (!order) return false;
+  // An accept-first offer the shop refused, or that was withdrawn, leaves its
+  // queue and files; the request continues on another attempt.
+  if (order.expressOrder?.acceptFlow === 2 && !['pending', 'accepted'].includes(order.shopAcceptance?.status)) return false;
   if (order.fileCheck) return order.fileCheck.status === 'passed';
   // Existing in-flight work remains visible. Legacy intake has not passed QA.
   return !['draft', 'submitted', 'needs_qa', 'client_correction', 'proof_approval', 'initial_payment_review'].includes(order.state)

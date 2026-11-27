@@ -1,3 +1,4 @@
+import { groupLevelFee } from './service-fee.js';
 import { sumMinor } from './refund-policy.js';
 
 const minor = value => {
@@ -34,7 +35,7 @@ export function voucherMoney(groups, valueMinor = 0, { coversOrderTotal = false,
           totalMinor:sumMinor([g.supplierSubtotalMinor,fee-org,g.deliveryFeeMinor-discount])};})};
   }
   const fees = groups.map(voucherFeeMinor);
-  const deliveries = groups.map(g => !coversOrderTotal && g.serviceFeeSchedule?.version === 2 ? 0 : minor(g.deliveryFeeMinor));
+  const deliveries = groups.map(g => !coversOrderTotal && groupLevelFee(g.serviceFeeSchedule) ? 0 : minor(g.deliveryFeeMinor));
   const principals = groups.map(g => coversOrderTotal ? minor(g.supplierSubtotalMinor) : 0);
   const feeTotal = sumMinor(fees), deliveryTotal = sumMinor(deliveries), principalTotal = sumMinor(principals);
   const organizationDiscountMinor = sumMinor(groups.map(g => minor(g.organizationDiscountMinor ?? 0)));

@@ -12,6 +12,9 @@ import { completeHandover } from './hub-handover.js';
 import { claimBlocksHandover } from './shop-handover.js';
 import { acknowledgeInstructions } from './special-instructions.js';
 import { isReviewData } from './review-data.js';
+import { routeAcceptFirst, acceptFirstAccepted, acceptFirstPickupPayment } from './express-accept-first.js';
+import { recordCounterCash } from './shop-money.js';
+import { confirmVoucher } from './vouchers.js';
 
 export async function routeExpressOrders({req,url,store,user,readBody,id,now,audit}) {
  if(url.pathname==='/me/express-settings' && ['GET','PATCH'].includes(req.method)) {
@@ -47,6 +50,8 @@ export async function routeExpressOrders({req,url,store,user,readBody,id,now,aud
    return {status:200,body:{date,orderCount:orders.length,cancelledCount:orders.filter(o=>o.state==='cancelled').length,totalMinor:Number(totalMinor),
     lowRatings:(store.shopReviews||[]).filter(r=>r.qualityStars<=2&&orders.some(o=>o.id===r.orderId)).map(r=>({orderId:r.orderId,supplierId:r.supplierId,qualityStars:r.qualityStars,at:r.createdAt}))}};
  }
+ const clientAction=await routeAcceptFirst({req,url,store,user,readBody,id,now});
+ if(clientAction)return clientAction;
  const match=/^\/orders\/([^/]+)\/express\/(accept|decline|pickup|give-back)$/.exec(url.pathname);
  if(!match||req.method!=='POST')return null;
  if(user?.role!=='supplier')fail(403,'forbidden');
@@ -76,7 +81,9 @@ export async function routeExpressOrders({req,url,store,user,readBody,id,now,aud
    if(order.fulfillmentMode!=='pickup')fail(409,'express_pickup_required');
    if(order.expressOrder.pickedUpAt)return response();
    if(order.state!=='ready_for_dispatch')fail(409,'express_not_ready');
-   if(!paymentSettled(order.payments?.initial)||!paymentSettled(order.payments?.final_online))fail(409,'payment_required');
+   // Accept-first: cash is confirmed by this PIN entry; a released QR receipt may still be in review.
+   const release=acceptFirstPickupPayment(order,body);
+   if(!release&&(!paymentSettled(order.payments?.initial)||!paymentSettled(order.payments?.final_online)))fail(409,'payment_required');
    if(claimBlocksHandover(store,order))fail(409,'payout_held');
    const e=order.expressOrder;
    if(Date.parse(e.retryAfter||'')>Date.parse(at))return {status:429,body:{error:'express_pickup_attempts_exceeded',retryAfter:e.retryAfter},mutated:false};
@@ -88,6 +95,12 @@ export async function routeExpressOrders({req,url,store,user,readBody,id,now,aud
      return {status:409,body:{error:'express_pickup_code_mismatch'},mutated:true};
    }
    e.pickedUpAt=at;
+   if(release==='cash') {
+     Object.assign(order.payments.initial,{status:'confirmed',confirmedAt:at,confirmedBy:actorUserId(user),confirmationSource:'counter_cash',amountReceivedMinor:order.payments.initial.amountMinor});
+     order.paymentStatus='paid';
+     confirmVoucher(store,[order],{id,at,actorId:actorUserId(user)});
+     recordCounterCash(store,order,{amountMinor:order.totalMinor,reason:'Cash collected at Express pickup.'},{at,id,actor:user});
+   }
    completeHandover(store,order,{actor:{...user,id:actorUserId(user)},at,id,note:'Client collected Express order using the counter code.'});
    for(const job of store.orderJobs||[])if(job.orderId===order.id){job.state='delivered';job.updatedAt=at;}
    expressEvent(store,order,'picked_up',{at,id,actorId:actorUserId(user)});
@@ -113,5 +126,6 @@ export async function routeExpressOrders({req,url,store,user,readBody,id,now,aud
  order.shopAcceptance.status='accepted';order.shopAcceptance.acceptedAt=at;order.shopAcceptance.acceptedBy=actorUserId(user);
  if(payAfterAcceptance&&!paymentSettled(order.payments?.initial))order.expressOrder.payBy=new Date(Date.parse(at)+5*60000).toISOString();
  order.state=payAfterAcceptance&&!paymentSettled(order.payments?.initial)?'awaiting_initial_payment':'payment_authorized';order.timeline.push({at,state:order.state,by:actorUserId(user),note:'Shop accepted Express order.'});
+ acceptFirstAccepted(store,order,at);
  expressEvent(store,order,'accepted',{at,id,actorId:actorUserId(user)});return response();
 }

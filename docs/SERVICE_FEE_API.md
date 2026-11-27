@@ -111,6 +111,27 @@ infer a single whole-order rate for them. Fresh reference seeds install the brac
 table, but do not create users or operational records. The migration records its
 previous/new settings in the append-only audit log.
 
+## Express accept-first rule (version 3)
+
+[Accept-first Express](EXPRESS_API.md#accept-first-express-send-accept-then-pay)
+orders use a separate, Express-only schedule, version 3:
+
+```json
+{ "version": 3, "rule": "express_minimum_or_rate", "minimumMinor": 500, "rateBps": 2000, "roundTotalUpToMinor": 50 }
+```
+
+- The fee is the higher of `minimumMinor` and `rateBps` of the printing subtotal.
+- Printing plus fee is rounded **up** to the next PHP 0.50.
+- The arithmetic is exact rational BigInt (`ceil((principal*10000 + max(minimum*10000, principal*rate)) / 500000) * 50 - principal`). PostgreSQL computes the same value.
+- Super Admin sets the minimum and rate in `expressCheckout`.
+- Each order snapshots its own rule, like the brackets.
+- At commitment, `supplierPlatformPayoutMinor` must equal the printing subtotal, so the shop keeps its full price.
+
+The brackets above are unchanged and still price every non-Express order,
+group Express, and legacy Express drafts that do not opt in. Version 3 is
+charged once per shop delivery group, like the brackets. The rules below apply
+to it in the same way: discounts reduce only the fee, after the rounding.
+
 ## Discounts, refunds and payout
 
 Calculate the gross fee first. The organization discount remains a percentage of

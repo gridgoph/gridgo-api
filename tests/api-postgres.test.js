@@ -2028,8 +2028,9 @@ test('delivery zone limit updates persist with the settings handshake and preser
     assert.equal(updated.status, 200, JSON.stringify(updated.body));
     assert.equal(updated.body.version, current.version + 1);
     assert.deepEqual(updated.body.settings.deliveryFeeBands, deliveryFeeBands);
-    const { expressRates, ...clientSettings } = updated.body.settings;
+    const { expressRates, expressCheckout, ...clientSettings } = updated.body.settings;
     assert.deepEqual(expressRates, { bwMinor: 300, colourMinor: 500 });
+    assert.equal(expressCheckout.paymentConfirmation, 'manual');
     assert.deepEqual((await request(instance.api, '/settings', { subject: 'clerk_client' })).body.settings, clientSettings);
     assert.equal((await patch(input)).body.error, 'settings_version_conflict');
     const store = await loadStoreEventually(database, store => store.settings.deliveryFeeBands[0].maxDistanceMeters === 1200);

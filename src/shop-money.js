@@ -99,6 +99,19 @@ export function syncShopMoney(store,ctx) {
 }
 /** Incidental full saves must not initialize unrelated financial history. The
  * independent journal sweep handles backfill; actual money changes sync here. */
+/** Cash the shop took at its counter: the shop keeps its price and owes GRIDGO's
+ * share, recorded once per order. Used by staff and by the Express pickup PIN. */
+export function recordCounterCash(store,order,{amountMinor,reason},ctx) {
+  const c=context(ctx);
+  const existing=events(store).find(e=>e.key===`counter:${order.id}`);if(existing)return existing;
+  syncShopMoney(store,c);
+  const award=ledger(store).find(e=>e.key===`bonus-award:${order.id}:${order.supplierId}`);
+  const shareMinor=award?.data.waiveCounterFee?0:order.clientServiceFeeMinor??order.serviceFeeMinor;
+  recordShopRecovery(store,order.supplierId,`counter:${order.id}`,shareMinor,c,{debt:true});
+  const row=append(store,{key:`counter:${order.id}`,supplierId:order.supplierId,kind:'counter_cash',data:{orderId:order.id,amountMinor,shareMinor,reason}},c,true);
+  syncShopMoney(store,c);
+  return row;
+}
 export function shopMoneyChanged(store,before) {
   if(!before)return true;
   const financial=s=>({orders:(s.orders||[]).map(o=>({id:o.id,supplierId:o.supplierId,createdAt:o.createdAt,commercialCommittedAt:o.commercialCommittedAt,
@@ -275,13 +288,7 @@ export async function routeShopMoney({req,url,store,user,readBody,now,id,databas
     if(!o||!o.commercialCommittedAt||o.paymentMethod!=='counter_cash'||!o.clientPayment?.methods.includes('counter_cash'))fail('counter_cash_order_required');
     if(body.amountMinor!==o.totalMinor||body.cashReceivedConfirmed!==true||typeof body.reason!=='string'||!body.reason.trim())fail('counter_cash_confirmation_required',400);
     const existing=events(store).find(e=>e.key===`counter:${o.id}`);if(existing)return {status:200,body:{collection:existing,replayed:true}};
-    syncShopMoney(store,c);
-    const award=ledger(store).find(e=>e.key===`bonus-award:${o.id}:${o.supplierId}`);
-    const shareMinor=award?.data.waiveCounterFee?0:o.clientServiceFeeMinor??o.serviceFeeMinor;
-    recordShopRecovery(store,counter[1],`counter:${o.id}`,shareMinor,c,{debt:true});
-    const row=append(store,{key:`counter:${o.id}`,supplierId:counter[1],kind:'counter_cash',data:{orderId:o.id,amountMinor:body.amountMinor,shareMinor,reason:body.reason}},c,true);
-    syncShopMoney(store,c);
-    return {status:200,body:{collection:row},mutated:true};
+    return {status:200,body:{collection:recordCounterCash(store,o,{amountMinor:body.amountMinor,reason:body.reason},c)},mutated:true};
   }
   if(path==='/ops/shop-money/run'&&req.method==='POST')return {status:200,body:{run:runShopSettlement(store,c)},mutated:true};
   const policy=/^\/ops\/shop-money\/shops\/([^/]+)\/policy$/.exec(path);
