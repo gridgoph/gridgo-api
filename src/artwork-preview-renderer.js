@@ -49,7 +49,8 @@ export async function renderArtworkPreview(source, type, {paperColour='white'} =
     await fs.copyFile(source, pdf);
     if(paperColour==='blue') {
       await run('pdftocairo',['-f','1','-l','1','-singlefile','-scale-to','1600','-png','-transp',pdf,path.join(directory,'transparent')],directory,'rasterization');
-      await run('convert',['-limit','memory','64MiB','-limit','map','64MiB','-limit','disk','0','-limit','thread','1',path.join(directory,'transparent.png'),'-background','#82b5e6','-alpha','remove','-alpha','off',path.join(directory,'page.png')],directory,'paper_preview');
+      // ImageMagick 7 HDRI needs this bounded cache for a 1600px RGBA preview.
+      await run('convert',['-limit','memory','128MiB','-limit','map','128MiB','-limit','disk','0','-limit','thread','1',path.join(directory,'transparent.png'),'-background','#82b5e6','-alpha','remove','-alpha','off',path.join(directory,'page.png')],directory,'paper_preview');
     } else await run('pdftoppm', ['-f', '1', '-l', '1', '-singlefile', '-scale-to', '1600', '-png', pdf, path.join(directory, 'page')], directory, 'rasterization');
     const output = path.join(directory, 'page.png');
     const result = await fs.stat(output).catch(() => null);
