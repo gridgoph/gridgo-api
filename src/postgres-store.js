@@ -1462,6 +1462,7 @@ const USER_READ = /^\/users(?:\/[^/]+(?:\/(?:verification-documents|payout-accou
 const AUDIT_READ = /^\/audit$|^\/orders\/[^/]+\/audit$/;
 const STAFF_ITEM_READ = /^\/ops\/catalog-items\/[^/]+$/;
 const ORDER_DETAIL_READ = /^\/orders\/[^/]+$/;
+const TRACKER_NAMED_STATES = new Set(['supplier_accepted', 'payment_authorized', 'awaiting_initial_payment', 'initial_payment_review', 'production', 'supplier_self_qc']);
 const BASKET_READ = /^\/baskets(?:\/[^/]+(?:\/invoice)?)?$/;
 const QUOTE_READ = /^\/(me|ops)\/quote-requests(?:\/([^/]+))?$/;
 export function isHotReadPath(pathname) { return BASKET_READ.test(pathname) || isStaffDeskRead(pathname) || pathname === '/dispatch/offers' || OPS_QUEUE_READ.test(pathname) || USER_READ.test(pathname) || AUDIT_READ.test(pathname) || STAFF_ITEM_READ.test(pathname) || pathname === '/me/files' || HOT_READ_PATHS.has(pathname) || ORDER_DETAIL_READ.test(pathname) || isCatalogReadPath(pathname) || isOwnCatalogReadPath(pathname) || isCartReadPath(pathname) || MATCH_READ_PATHS.has(pathname) || FILE_READ.test(pathname) || QUOTE_READ.test(pathname); }
@@ -1769,6 +1770,13 @@ async function readOrderGraph(database, graph, pathname, { role, includeReviewDa
   }
   if (referenceContext) for (const row of [...referenceContext.orders, ...referenceContext.orderJobs]) {
     for (const field of userFields) if (row[field]) userIds.add(row[field]);
+  }
+  // Tracker first names: who accepted and who started printing (src/order-tracker.js).
+  for (const order of graph.finish().orders || []) {
+    if (typeof order.shopAcceptance?.acceptedBy === 'string') userIds.add(order.shopAcceptance.acceptedBy);
+    for (const entry of Array.isArray(order.timeline) ? order.timeline : []) {
+      if (TRACKER_NAMED_STATES.has(entry?.state) && typeof entry.by === 'string') userIds.add(entry.by);
+    }
   }
   await readIdentity(graph, [...userIds]);
   const store = graph.finish();

@@ -63,7 +63,7 @@ export function staffRouteAllowed(method, path) {
   if (['POST', 'PATCH', 'DELETE'].includes(method) && /^\/notifications\/[^/]+(?:\/read)?$/.test(path)) return true;
   if (method === 'GET' && /^\/orders\/[^/]+$/.test(path)) return true;
   if (method === 'GET' && /^\/dispatch\/[^/]+\/location$/.test(path)) return true;
-  if (method === 'POST' && /^\/orders\/[^/]+\/(transition|decline|production-finished|express\/(accept|decline|pickup)|files\/[^/]+\/access)$/.test(path)) return true;
+  if (method === 'POST' && /^\/orders\/[^/]+\/(transition|decline|production-finished|production-progress|express\/(accept|decline|pickup)|files\/[^/]+\/access)$/.test(path)) return true;
   if (['GET', 'POST'].includes(method) && /^\/orders\/[^/]+\/(client-shop-chat|pickup-chat)(?:\/messages(?:\/[^/]+\/reports)?)?$/.test(path)) return true;
   if (method === 'POST' && path === '/files') return true;
   if (method === 'GET' && /^\/files\/[^/]+(?:\/(download-url|preview-url))?$/.test(path)) return true;

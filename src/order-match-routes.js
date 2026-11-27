@@ -4,6 +4,7 @@ import { shopPaused } from './shop-availability.js';
 import { assertDocumentRequest } from './document-capabilities.js';
 import { pingPrinterDemand } from './printer-demand.js';
 import { isDeepStrictEqual } from 'node:util';
+import { wantsPickupPin } from './pickup-pin.js';
 import { expressRates, expressLinePrice, expressPoint, expressShopList, assertExpressNightJob, expressGuide, updateExpressGuide, createExpressSnapshot, publicExpress, expressClientProjection, expressCatalogOptions } from './express-orders.js';
 import { expressPrinterChoices, fastestPermittedPrinter } from './express-printers.js';
 import { isReviewData, markReviewPayment, reviewCatalogView, REVIEW_CATALOG_TABLES } from './review-data.js';
@@ -1227,7 +1228,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
   const downpaymentPercent = cash || basketId ? 100 : downpaymentPercentSetting(store.settings);
   const order = {
     id: orderId,
-    ...(cart.orderType === "express" ? {orderType:"express", expressOrder:createExpressSnapshot(cart,cartLines,at)} : {}),
+    ...(cart.orderType === "express" ? {orderType:"express", expressOrder:createExpressSnapshot(cart,cartLines,at,{pickupPin:wantsPickupPin(body,{fulfillmentMode:cart.fulfillmentMode,group})})} : {}),
     ...(group?{groupOrder:{id:group.id,hostId:group.hostId,hostName:user.name,memberCount:(store.expressGroupMembers||[]).filter(m=>m.groupId===group.id&&m.active).length,backupReceiver:structuredClone(group.backupReceiver)}}:{}),
     shopClockVersion: 1,
     operatingClock: operatingClockSnapshot(store.settings, store.version),

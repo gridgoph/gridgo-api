@@ -1,7 +1,8 @@
 import { homeProfile, homePrinterStatus, recordHomeOffer, recordHomeGiveBack } from './home-printers.js';
 import { supplierCanWork } from "./supplier-verification.js";
 import { notifyAdmins } from './domain-events.js';
-import { queueInvalidate } from './notifications.js';
+import { queueInvalidate, queueOrderInvalidate, approvedRole } from './notifications.js';
+import { clientOnMyWay, riderOnMyWay, resetPickupPin, checkPinAttempt, parseCashCollected, counterCashDueMinor, pickupPinOrder } from './pickup-pin.js';
 import { actorUserId, isShopStaff } from './shop-team.js';
 import { createInviteCode, publicTesterInvites } from './tester-invites.js';
 import { timingSafeEqual } from 'node:crypto';
@@ -47,6 +48,23 @@ export async function routeExpressOrders({req,url,store,user,readBody,id,now,aud
    return {status:200,body:{date,orderCount:orders.length,cancelledCount:orders.filter(o=>o.state==='cancelled').length,totalMinor:Number(totalMinor),
     lowRatings:(store.shopReviews||[]).filter(r=>r.qualityStars<=2&&orders.some(o=>o.id===r.orderId)).map(r=>({orderId:r.orderId,supplierId:r.supplierId,qualityStars:r.qualityStars,at:r.createdAt}))}};
  }
+ const party=/^\/orders\/([^/]+)\/express\/(on-my-way|pickup-pin\/reset)$/.exec(url.pathname);
+ if(party&&req.method==='POST') {
+   const order=store.orders.find(o=>o.id===party[1]&&o.orderType==='express');
+   if(!order)fail(404,'order_not_found');
+   const at=now(),body=await readBody(req);
+   if(party[2]==='pickup-pin/reset') {
+     if(!['ops_admin','super_admin'].includes(user?.role)||!store.userRoleMemberships.some(m=>m.userId===user.id&&m.role===user.role))fail(403,'forbidden');
+     resetPickupPin(store,order,body,{at,id,audit,user});
+   } else if(user?.role==='client') {
+     if(order.clientId!==user.id)fail(403,'forbidden');
+     clientOnMyWay(store,order,body,{at,id,audit,user});
+   } else if(user?.role==='rider') {
+     if(!approvedRole(store,user.id,'rider'))fail(403,'forbidden');
+     riderOnMyWay(store,order,user,{at,id,audit});
+   } else fail(403,'forbidden');
+   return {status:200,body:{orderId:order.id,state:order.state,expressOrder:publicExpress(order,user)},mutated:true};
+ }
  const match=/^\/orders\/([^/]+)\/express\/(accept|decline|pickup|give-back)$/.exec(url.pathname);
  if(!match||req.method!=='POST')return null;
  if(user?.role!=='supplier')fail(403,'forbidden');
@@ -73,12 +91,41 @@ export async function routeExpressOrders({req,url,store,user,readBody,id,now,aud
    return response();
  }
  if(action==='pickup') {
-   if(order.fulfillmentMode!=='pickup')fail(409,'express_pickup_required');
-   if(order.expressOrder.pickedUpAt)return response();
-   if(order.state!=='ready_for_dispatch')fail(409,'express_not_ready');
-   if(!paymentSettled(order.payments?.initial)||!paymentSettled(order.payments?.final_online))fail(409,'payment_required');
-   if(claimBlocksHandover(store,order))fail(409,'payout_held');
    const e=order.expressOrder;
+   if(order.fulfillmentMode==='delivery'&&e.riderPin) {
+     // Delivery: the shop checks the rider's PIN. It moves nothing; the rider's
+     // own pickup checks still hand the package over.
+     if(e.riderPin.riderId!==order.riderId||order.state!=='rider_assigned')fail(409,'express_rider_pin_unavailable');
+     if(e.riderPin.verifiedAt)return response();
+     const refused=checkPinAttempt(store,order,e.riderPin,body.code,{at,id,kind:'rider'});
+     if(refused)return refused;
+     e.riderPin.verifiedAt=at;e.riderPin.verifiedBy=actorUserId(user);order.updatedAt=at;
+     audit(store,{actor:user,action:'express.rider_pin_verified',entityType:'order',entityId:order.id,orderId:order.id});
+     queueOrderInvalidate(store,order,['orders','jobs','dispatch']);
+     return response();
+   }
+   if(order.fulfillmentMode!=='pickup')fail(409,'express_pickup_required');
+   if(e.pickedUpAt)return response();
+   if(order.state!=='ready_for_dispatch')fail(409,'express_not_ready');
+   const counterCash=pickupPinOrder(order)?counterCashDueMinor(order):0;
+   if(!counterCash&&(!paymentSettled(order.payments?.initial)||!paymentSettled(order.payments?.final_online)))fail(409,'payment_required');
+   if(claimBlocksHandover(store,order))fail(409,'payout_held');
+   if(pickupPinOrder(order)) {
+     if(!e.pickupPin)fail(409,'express_pickup_pin_not_issued');
+     const cashCollectedMinor=parseCashCollected(order,body);
+     const refused=checkPinAttempt(store,order,e.pickupPin,body.code,{at,id,kind:'client'});
+     if(refused)return refused;
+     e.pickedUpAt=at;
+     e.pickupHandover={at,method:'pickup_pin',byUserId:actorUserId(user),cashCollectedMinor};
+     completeHandover(store,order,{actor:{...user,id:actorUserId(user)},at,id,note:cashCollectedMinor?'Client collected Express order with the pickup PIN; the shop received the cash.':'Client collected Express order with the pickup PIN.'});
+     for(const job of store.orderJobs||[])if(job.orderId===order.id){job.state='delivered';job.updatedAt=at;}
+     if(cashCollectedMinor){
+       audit(store,{actor:user,action:'express.counter_cash_collected',entityType:'order',entityId:order.id,orderId:order.id,detail:{cashCollectedMinor}});
+       notifyAdmins(store,'ops_express_counter_cash_collected','Counter cash collected at hand-over',order,`counter-cash:${order.id}`,{createId:id,at});
+     }
+     expressEvent(store,order,'picked_up',{at,id,actorId:actorUserId(user)});
+     return response();
+   }
    if(Date.parse(e.retryAfter||'')>Date.parse(at))return {status:429,body:{error:'express_pickup_attempts_exceeded',retryAfter:e.retryAfter},mutated:false};
    if(e.retryAfter){delete e.retryAfter;e.failedAttempts=0;}
    const code=typeof body.code==='string'?body.code:'';
