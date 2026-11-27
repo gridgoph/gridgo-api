@@ -6,6 +6,7 @@ import { appendAudit, deriveMissingAudit, withAuditRequest, setAuditActor } from
 import { resetDatabase } from './fixtures/reset-database.js';
 import { fixture, AT } from './fixtures/reschedule.js';
 import { apiForTest } from './fixtures/reschedule-http.js';
+import { syncShopMoney } from '../src/shop-money.js';
 const DATABASE_URL = process.env.DATABASE_URL;
 async function setup(t) {
   const db = createDatabase({ DATABASE_URL }); t.after(() => db.close());
@@ -48,6 +49,8 @@ test('audit SQL rejects UPDATE, DELETE, TRUNCATE and store edits; references and
 test('audit HTTP search, bounded paging, date filters, CSV, permissions and order scopes', { skip: !DATABASE_URL }, async t => {
   const db = await setup(t);
   await write(db, store => {
+    // Own the financial evidence under test instead of racing startup backfill.
+    syncShopMoney(store, { at: AT });
     const actor = store.users.find(u => u.id === 'admin');
     for (const [id, at, action, orderId] of [
       ['a', '2026-10-01T12:00:00.000Z', 'order.transition', 'order'],
