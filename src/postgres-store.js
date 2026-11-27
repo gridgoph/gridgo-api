@@ -88,6 +88,8 @@ const TABLES = [
   { name: "supplier_profiles", keys: ["user_id"], columns: ["user_id", "shop_name", "contact_name", "shop_lat", "shop_lng", "shop_label", "pickup_available", "is_closed", "express_enabled", "availability", "schedule", "home_printer", "version", "updated_at"] },
   { name: 'supplier_signups', keys: ['clerk_user_id'], columns: ['clerk_user_id','supplier_id','version','steps','updated_at'] },
   { name: 'supplier_payout_policies', keys: ['supplier_id'], columns: ['supplier_id','holder','consent','paused_until','updated_at'] },
+  { name: 'shop_leaderboard_months', keys: ['month'], columns: ['month','closed_at','data'], appendOnly: true },
+  { name: 'shop_top_stickers', keys: ['month','supplier_id'], columns: ['month','supplier_id','delivered_at','delivered_by'] },
   { name: "shop_reviews", keys: ["id"], columns: ["id", "order_id", "supplier_id", "client_id", "quality_stars", "speed_stars", "value_stars", "comment", "tags", "created_at"] },
   { name: "supplier_payment_terms", keys: ["supplier_id"], columns: ["supplier_id", "delivery_downpayment_rate_bps", "pickup_full_online_enabled", "pickup_downpayment_store_enabled", "pickup_downpayment_rate_bps", "version", "updated_at"] },
   { name: "rider_profiles", keys: ["user_id"], columns: ["user_id", "vehicle_type", "plate_number", "license_number", "version", "updated_at"] },
@@ -242,6 +244,8 @@ export function emptyStore() {
     productionLapses: [],
     orderJobs: [],
     shopReviews: [],
+    shopLeaderboardMonths: [],
+    shopTopStickers: [],
     catalogPriceTiers: [],
     catalogSpeedTiers: [],
     orderLineItems: [],
@@ -368,6 +372,10 @@ function rowsFromStore(store) {
   }
   rows.supplier_signups=(store.supplierSignups||[]).map(s=>({clerk_user_id:s.clerkUserId,supplier_id:s.supplierId,version:s.version,steps:s.steps,updated_at:s.updatedAt}));
   rows.supplier_payout_policies=(store.supplierPayoutPolicies||[]).map(p=>({supplier_id:p.supplierId,holder:p.holder??null,consent:p.consent??null,paused_until:p.pausedUntil??null,updated_at:p.updatedAt}));
+  rows.shop_leaderboard_months=(store.shopLeaderboardMonths||[]).map(row=>({month:row.month,closed_at:row.closedAt,
+    data:without(row,['month','closedAt'])}));
+  rows.shop_top_stickers=(store.shopTopStickers||[]).map(row=>({month:row.month,supplier_id:row.supplierId,
+    delivered_at:row.deliveredAt??null,delivered_by:row.deliveredBy??null}));
   for (const review of (store.shopReviews || [])) {
     rows.shop_reviews.push({
       id: review.id,
@@ -2519,6 +2527,9 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
   });
   store.supplierSignups=loaded.supplier_signups.map(s=>({clerkUserId:s.clerk_user_id,supplierId:s.supplier_id,version:s.version,steps:s.steps,updatedAt:s.updated_at}));
   store.supplierPayoutPolicies=loaded.supplier_payout_policies.map(p=>({supplierId:p.supplier_id,holder:p.holder,consent:p.consent,pausedUntil:p.paused_until,updatedAt:p.updated_at}));
+  store.shopLeaderboardMonths=loaded.shop_leaderboard_months.map(row=>({...row.data,month:row.month,closedAt:row.closed_at}));
+  store.shopTopStickers=loaded.shop_top_stickers.map(row=>({month:row.month,supplierId:row.supplier_id,
+    deliveredAt:row.delivered_at,deliveredBy:row.delivered_by}));
   store.shopReviews = orderedBy(loaded.shop_reviews, "supplier_id", "created_at", "id").map((row) => ({
     id: row.id,
     orderId: row.order_id,

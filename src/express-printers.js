@@ -1,3 +1,4 @@
+import { nearestTopShopOrder } from './shop-leaderboard-months.js';
 import { homeDistance } from './home-printers.js';
 import { expressFail, expressShopList } from './express-orders.js';
 import { expressFilterData } from './express-shop-facts.js';
@@ -11,6 +12,7 @@ export const EXPRESS_PRINTER_SORTS=['nearby','nearest','all_davao','fastest','re
 export function expressPrinterOrder(store,location,sort) {
  const distance=row=>homeDistance(location,store.supplierProfiles.find(p=>p.userId===row.supplierId)?.shop);
  return (a,b)=>Number(b.selectable)-Number(a.selectable)
+  ||nearestTopShopOrder(sort,a,b)
   ||(sort==='fastest'||sort==='ready_soonest'?Date.parse(a.readyAt||'9999-01-01')-Date.parse(b.readyAt||'9999-01-01')
    :sort==='top_rated'?(b.rating?.average||0)-(a.rating?.average||0)
    :sort==='lowest_price'?(a.quote?.clientItemSubtotalMinor??Infinity)-(b.quote?.clientItemSubtotalMinor??Infinity)

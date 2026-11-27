@@ -3,8 +3,6 @@ import { isReviewData } from './review-data.js';
 import { publicCatalogItem } from './supplier-catalog.js';
 import { expressLinePrice } from './express-orders.js';
 
-/** A rated shop (public threshold already met) at or above this average. */
-export const TOP_SHOP_MIN_AVERAGE = 4.5;
 export const EXPRESS_SERVICES = ['stapling', 'binding', 'lamination', 'rush'];
 export const EXPRESS_PAYMENT_METHODS = ['cash', 'qr_ph'];
 const PRICE_BUCKETS = 10;
