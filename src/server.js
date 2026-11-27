@@ -36,7 +36,7 @@ import { hydrateCashWallets, reserveCash } from './cash-ledger.js';
 import { cashAmounts, cashCovered, cashFail, cashSettings } from './cash-policy.js';
 import { recordOrderActions } from './shop-order-actions.js';
 import { shopMembershipsFor, selectedShop, assertActiveShop, shopSummary, staffRouteAllowed, identityShopRoute,
-  supplierShopActor, notifyShopStaff, routeShopTeam, claimShopInvite, discoverShopInvites, isShopStaff, actorUserId, assertStaffFile } from './shop-team.js';
+  supplierShopActor, notifyShopStaff, routeShopTeam, claimShopInvite, discoverShopInvites, previewShopInvite, isShopStaff, actorUserId, assertStaffFile } from './shop-team.js';
 import { STAFF_LIST_PAGE, staffListPlan, staffPageRequested, staffPageBody } from './staff-list-pages.js';
 import { ORDER_REMOVAL_ROUTE, removeOrder, activeOrderSql } from './order-removal.js';
 import { routeTesterProgram } from './tester-program-routes.js';
@@ -1014,6 +1014,7 @@ function publicOperationalSettings(settings, store = null, user = null) {
     shopMoney: shopMoneySettings(settings),
     riderCommissionBps: rest.riderCommissionBps ?? 8_000,
     riderOfferTimeoutSeconds: offerTimeoutSeconds(rest),
+    shopTeamJoinQrRefreshSeconds: rest.shopTeamJoinQrRefreshSeconds ?? 60,
     shopEarlyAccessEnabled: rest.shopEarlyAccessEnabled === true,
     clientRiderLocationRevealDistanceMeters: rest.clientRiderLocationRevealDistanceMeters ?? 1_000,
     riderLocationRefreshIntervalSeconds: trackingSettings(rest).refreshIntervalSeconds,
@@ -2815,7 +2816,12 @@ async function handleAuditedRequest(req, res) {
       const clerkUser = req.gridgoClerkUser?.clerkUser;
       if (!clerkUser || clerkUser.id !== verified.claims.sub) return send(res, 502, { error: 'clerk_unavailable' });
       res.setHeader('Cache-Control', 'private, no-store');
-      if (pathname === '/auth/shop-invites') return send(res, 200, { invites: discoverShopInvites(store, clerkUser, now()) });
+      if (pathname === '/auth/shop-invites') {
+        const body = await readBody(req);
+        if (!body || typeof body !== 'object' || Array.isArray(body)) return send(res, 400, { error: 'invalid_shop_invite_claim' });
+        return send(res, 200, Object.hasOwn(body, 'token') ? previewShopInvite(store, body.token, now())
+          : { invites: discoverShopInvites(store, clerkUser, now()) });
+      }
       const result = claimShopInvite({ store, claims: verified.claims, clerkUser, body: await readBody(req), id, at: now(), audit });
       await save(store);
       return send(res, 200, result);
@@ -4681,6 +4687,7 @@ async function handleAuditedRequest(req, res) {
         groupPaymentTimeoutMinutes: Object.hasOwn(body,"groupPaymentTimeoutMinutes") ? body.groupPaymentTimeoutMinutes : (store.settings.groupPaymentTimeoutMinutes??10),
         cash: Object.hasOwn(body,'cash') ? (body.cash && typeof body.cash==='object' && !Array.isArray(body.cash)
           ? {...cashSettings(store.settings),...body.cash}:body.cash) : cashSettings(store.settings),
+        shopTeamJoinQrRefreshSeconds: Object.hasOwn(body, 'shopTeamJoinQrRefreshSeconds') ? body.shopTeamJoinQrRefreshSeconds : (store.settings.shopTeamJoinQrRefreshSeconds ?? 60),
         riderOfferTimeoutSeconds: Object.hasOwn(body, 'riderOfferTimeoutSeconds') ? body.riderOfferTimeoutSeconds : offerTimeoutSeconds(store.settings),
         riderPacksMinimumBuilds: Object.hasOwn(body, 'riderPacksMinimumBuilds')
           ? body.riderPacksMinimumBuilds : riderPacksMinimumBuilds(store.settings),

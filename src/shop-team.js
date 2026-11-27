@@ -134,6 +134,7 @@ function inviteAvailable(invite, at) {
   if (Date.parse(invite.expiresAt) <= Date.parse(at)) shopTeamError(410, 'shop_invite_expired');
 }
 const publicInvite = (row, at) => ({ id: row.id, shopId: row.shopId, kind: row.kind, identity: row.identity,
+  ...(row.joinRole ? { role: row.joinRole, refreshSeconds: row.refreshSeconds } : {}),
   createdAt: row.createdAt, expiresAt: row.expiresAt, claimedBy: row.claimedBy || null,
   status: row.claimedAt ? 'claimed' : row.revokedAt ? 'revoked' : Date.parse(row.expiresAt) <= Date.parse(at) ? 'expired' : 'open' });
 export function publicMember(store, member) {
@@ -141,18 +142,40 @@ export function publicMember(store, member) {
   return { userId: member.userId, name: person?.name || 'Member', role: effectiveShopRole(store, member), status: member.status,
     createdAt: member.createdAt, updatedAt: member.updatedAt, jobAlerts: memberPreferences(store,member.shopId,member.userId)?.jobAlerts !== false, photoFileId: memberPreferences(store,member.shopId,member.userId)?.photoFileId || null };
 }
-function issueShopInvite({ store, user, shopId, kind, identity, at, id, audit }) {
+function issueShopInvite({ store, user, shopId, kind, identity, joinRole = null, at, id, audit }) {
+  const refreshSeconds = joinRole ? (store.settings.shopTeamJoinQrRefreshSeconds ?? 60) : null;
+  // A refreshed role QR invalidates the previous code for that role only.
+  if (joinRole) for (const previous of store.shopInvites || []) {
+    if (previous.shopId === shopId && previous.joinRole === joinRole && !previous.claimedAt && !previous.revokedAt) previous.revokedAt = at;
+  }
   const token = randomBytes(32).toString('base64url');
   const invite = { id: id('shi'), shopId, kind, identity, tokenHash: inviteHash(token), createdBy: user.id,
-    createdAt: at, lifetimeHours: 24, expiresAt: new Date(Date.parse(at) + 24 * 3600000).toISOString() };
+    createdAt: at, lifetimeHours: 24, joinRole, refreshSeconds, expiresAt: new Date(Date.parse(at) + (refreshSeconds ? refreshSeconds * 1000 : 24 * 3600000)).toISOString() };
   (store.shopInvites||=[]).push(invite);
-  audit(store, { actor: user, action: 'shop_team.invite_created', entityType: 'shop_invite', entityId: invite.id, detail: { shopId, kind } });
-  return { status: 201, mutated: true, body: { invite: publicInvite(invite, at), token, delivery: 'share_link' } };
+  audit(store, { actor: user, action: 'shop_team.invite_created', entityType: 'shop_invite', entityId: invite.id, detail: { shopId, kind, ...(joinRole ? { role: joinRole, refreshSeconds } : {}) } });
+  return { status: 201, mutated: true, body: { invite: publicInvite(invite, at), token, delivery: joinRole ? 'scan_qr' : 'share_link', ...(joinRole ? { refreshSeconds } : {}) } };
 }
 export function discoverShopInvites(store, clerkUser, at = isoNow()) {
   const verified = verifiedIdentities(clerkUser);
   return (store.shopInvites || []).filter(row => !row.claimedAt && !row.revokedAt && Date.parse(row.expiresAt) > Date.parse(at)
     && verified[row.kind==='owner'?'phone':row.kind]?.includes(row.identity)).map(row => ({ ...publicInvite(row, at), shop: shopSummary(store, { shopId: row.shopId, role: 'staff', status: 'pending' }) }));
+}
+function assertRoleInviteIssuer(store, invite) {
+  const issuer = shopMembershipsFor(store, invite.createdBy).find(m => m.shopId === invite.shopId && m.status === 'active');
+  const issuerUser = store.users.find(u => u.id === invite.createdBy);
+  const shop = store.users.find(u => u.id === invite.shopId);
+  const role = issuer && effectiveShopRole(store, issuer);
+  if (!issuerUser || (issuerUser.accountStatus || 'active') !== 'active' || !shop || (shop.accountStatus || 'active') !== 'active'
+    || !['owner','manager'].includes(role) || (invite.joinRole === 'manager' && role !== 'owner')) shopTeamError(403, 'shop_invite_issuer_unavailable');
+}
+/** Signed-in scan preview; never consumes the code or exposes account details. */
+export function previewShopInvite(store, token, at = isoNow()) {
+  const invite = typeof token === 'string' && /^[A-Za-z0-9_-]{43}$/.test(token)
+    ? (store.shopInvites || []).find(row => row.tokenHash === inviteHash(token) && row.joinRole) : null;
+  inviteAvailable(invite, at);
+  assertRoleInviteIssuer(store, invite);
+  const shop = shopSummary(store, { shopId: invite.shopId, role: 'staff', status: 'active' });
+  return { invite: publicInvite(invite, at), shop: { id: shop.id, name: shop.name } };
 }
 export function claimShopInvite({ store, claims, clerkUser, body, id, at, audit }) {
   if (!claims?.sub) shopTeamError(401, 'unauthorized');
@@ -162,6 +185,10 @@ export function claimShopInvite({ store, claims, clerkUser, body, id, at, audit 
     ? store.shopInvites.find(row => row.tokenHash === inviteHash(body.token))
     : typeof body.inviteId === 'string' ? store.shopInvites.find(row => row.id === body.inviteId && ['email', 'phone','owner'].includes(row.kind)) : null;
   inviteAvailable(invite, at);
+  if (invite.joinRole) {
+    assertRoleInviteIssuer(store, invite);
+    if (Object.keys(body).some(key => !['token','name'].includes(key))) shopTeamError(400, 'invalid_shop_invite_claim');
+  }
   if (['email', 'phone','owner'].includes(invite.kind) && !verifiedIdentities(clerkUser)[invite.kind==='owner'?'phone':invite.kind].includes(invite.identity)) shopTeamError(403, 'shop_invite_identity_mismatch');
   let user = store.users.find(row => row.clerkUserId === claims.sub);
   if (user && (user.accountStatus || 'active') !== 'active') shopTeamError(403, 'forbidden');
@@ -185,7 +212,7 @@ export function claimShopInvite({ store, claims, clerkUser, body, id, at, audit 
     }
   }
   if (!user) {
-    if (['link','qr'].includes(invite.kind) && !verifiedIdentities(clerkUser).phone.length) shopTeamError(403,'shop_mobile_verification_required');
+    if (!invite.joinRole && ['link','qr'].includes(invite.kind) && !verifiedIdentities(clerkUser).phone.length) shopTeamError(403,'shop_mobile_verification_required');
     if (body.name !== undefined && (typeof body.name!=='string' || !body.name.trim() || body.name.trim().length>100)) shopTeamError(400,'invalid_shop_member_name');
     const profile = clerkClientProfile(clerkUser);
     // Phone-only Clerk accounts have no email. This private sentinel is never
@@ -200,9 +227,9 @@ export function claimShopInvite({ store, claims, clerkUser, body, id, at, audit 
   const existing = store.shopMemberships.find(row => row.shopId === invite.shopId && row.userId === user.id);
   if (existing && existing.status !== 'removed' && invite.kind!=='owner') shopTeamError(409, 'shop_member_exists');
   const member = existing || { shopId: invite.shopId, userId: user.id, createdAt: at };
-  Object.assign(member, { role: invite.kind==='owner'?'owner':'staff', status: invite.kind==='owner'?'active':'pending', updatedAt: at, decidedBy: null });
+  Object.assign(member, { role: invite.kind==='owner'?'owner':'staff', status: invite.kind==='owner' || invite.joinRole ? 'active':'pending', updatedAt: at, decidedBy: null });
   if (!existing) store.shopMemberships.push(member);
-  const oldPreferences=memberPreferences(store,invite.shopId,user.id);if(oldPreferences) oldPreferences.manager=false;
+  const preferences=memberPreferences(store,invite.shopId,user.id,true);preferences.manager=invite.joinRole==='manager';
   invite.claimedAt = at; invite.claimedBy = user.id;
   if(invite.kind==='owner') {
     const signup=signupForShop(store,invite.shopId);
@@ -217,7 +244,7 @@ export function claimShopInvite({ store, claims, clerkUser, body, id, at, audit 
   ];
   for (const recipient of recipients) store.notifications.push({
     id: id('ntf'), ...recipient, type: 'shop_invite_claimed', shopId: invite.shopId,
-    title: 'Shop invitation claimed', body: invite.kind==='owner'?'The invited owner has claimed the shop. The manager keeps Manager access.':'A teammate is waiting for owner approval in the shop team.',
+    title: 'Shop invitation claimed', body: invite.kind==='owner'?'The invited owner has claimed the shop. The manager keeps Manager access.':invite.joinRole ? 'A teammate joined the shop team.' : 'A teammate is waiting for owner approval in the shop team.',
     occurrenceKey: `shop-invite-claimed:${invite.id}:${recipient.userId}:${recipient.appRole}`, at, read: false,
   });
   queueInvalidate(store, { resource: 'identity', userIds: [invite.shopId, user.id] });
@@ -284,6 +311,9 @@ export async function routeShopTeam({ req, url, store, user, readBody, id, now, 
     const body = await readBody(req);
     if (!body || typeof body !== 'object' || Array.isArray(body)) shopTeamError(400, 'invalid_invite_kind');
     if (!['email', 'phone', 'qr', 'link','owner'].includes(body.kind)) shopTeamError(400, 'invalid_invite_kind');
+    const joinRole = body.role ?? null;
+    if (Object.hasOwn(body, 'role') && (body.kind !== 'qr' || !['staff','manager'].includes(body.role))) shopTeamError(400, 'invalid_invite_role');
+    if (manager && joinRole === 'manager') shopTeamError(403, 'shop_owner_required');
     let identity = null;
     if(body.kind==='owner') {
       const signup=signupForShop(store,shopId);
@@ -301,16 +331,18 @@ export async function routeShopTeam({ req, url, store, user, readBody, id, now, 
       identity = String(body.identity || '').trim();
       if (!/^\+[1-9][0-9]{7,14}$/.test(identity)) shopTeamError(400, 'invalid_invite_identity');
     }
-    return issueShopInvite({ store, user, shopId, kind: body.kind, identity, at, id, audit });
+    return issueShopInvite({ store, user, shopId, kind: body.kind, identity, joinRole, at, id, audit });
   }
   if (!operations && own?.[1] === 'invites' && own[2]
     && ((!own[3] && req.method === 'DELETE') || (own[3] === 'replace' && req.method === 'POST'))) {
     const invite = store.shopInvites.find(row => row.id === own[2] && row.shopId === shopId);
-    inviteAvailable(invite, at); invite.revokedAt = at;
+    inviteAvailable(invite, at);
+    if (manager && (invite.joinRole === 'manager' || invite.kind === 'owner')) shopTeamError(403, 'shop_owner_required');
+    invite.revokedAt = at;
     audit(store, { actor: user, action: 'shop_team.invite_revoked', entityType: 'shop_invite', entityId: invite.id, detail: { shopId } });
     // Both rows and their audit entries persist through the existing locked
     // HTTP transaction, shared with claims. Failed issuance rolls back revocation.
-    if (own[3] === 'replace') return issueShopInvite({ store, user, shopId, kind: invite.kind, identity: invite.identity, at, id, audit });
+    if (own[3] === 'replace') return issueShopInvite({ store, user, shopId, kind: invite.kind, identity: invite.identity, joinRole: invite.joinRole, at, id, audit });
     return { status: 200, mutated: true, body: { invite: publicInvite(invite, at) } };
   }
   if (memberId && (req.method === 'DELETE' || (!operations && req.method === 'PATCH'))) {
@@ -337,8 +369,16 @@ export async function routeShopTeam({ req, url, store, user, readBody, id, now, 
       preferences.photoFileId=body.photoFileId;bindTeamPhoto(store,body.photoFileId,shopId,target.userId);
     }
     Object.assign(target, { status, role: role==='manager'?'staff':role, updatedAt: at, decidedBy: user.id });
+    // Removal must require a code issued afterwards, even if the person retained
+    // an unused QR from before removal. Existing joined sessions are untouched.
+    const revokedInviteIds = [];
+    if (status === 'removed') for (const invite of store.shopInvites || []) {
+      if (invite.shopId === shopId && invite.joinRole && !invite.claimedAt && !invite.revokedAt) {
+        invite.revokedAt = at; revokedInviteIds.push(invite.id);
+      }
+    }
     audit(store, { actor: user, action: 'shop_team.member_updated', entityType: 'shop_membership', entityId: target.userId,
-      detail: { shopId }, before, after: { role, status } });
+      detail: { shopId, ...(revokedInviteIds.length ? { revokedInviteIds } : {}) }, before, after: { role, status } });
     queueInvalidate(store, { resource: 'identity', userIds: [target.userId, shopId] });
     return { status: 200, mutated: true, body: { member: publicMember(store, target) } };
   }

@@ -9,6 +9,7 @@ import { apiForTest } from './fixtures/reschedule-http.js';
 import { OWNER_ROUTES, STAFF_ROUTES } from './fixtures/shop-team-routes.js';
 import { PICKUP_CHECK_CODES } from '../src/operational-model.js';
 import { up } from '../migrations/1794192200000_shop_teams.js';
+import { up as roleQrMigration } from '../migrations/1795801200000_shop_team_role_qr.js';
 import { up as selectionMigration } from '../migrations/1795272000000_shop_selection_and_invite_lifetime.js';
 import { notificationVisible } from '../src/notifications.js';
 import { defaultShopSchedule } from '../src/availability.js';
@@ -491,6 +492,20 @@ test('additive migration backfills every existing supplier owner and retains Cle
       await db.query('SAVEPOINT immutable_invite');
       await assert.rejects(db.query("UPDATE shop_invites SET lifetime_hours=24,expires_at=created_at+interval '24 hours' WHERE id='old'"),/immutable/);
       await db.query('ROLLBACK TO SAVEPOINT immutable_invite');
+      const issuedBefore=(await db.query('SELECT * FROM shop_invites ORDER BY id')).rows;
+      await roleQrMigration({sql:sql=>db.query(sql)});
+      assert.deepEqual((await db.query('SELECT * FROM shop_invites ORDER BY id')).rows,issuedBefore.map(row=>({...row,join_role:null,refresh_seconds:null})));
+      await db.query(`INSERT INTO shop_invites(id,shop_id,kind,token_hash,created_by,created_at,expires_at)
+        VALUES ('old_overlap','owner','qr',$1,'owner',now(),now()+interval '48 hours')`,[inviteHash('x'.repeat(43))]);
+      await db.query(`INSERT INTO shop_invites(id,shop_id,kind,token_hash,created_by,created_at,expires_at,lifetime_hours,join_role,refresh_seconds)
+        VALUES ('role_qr','owner','qr',$1,'owner',now(),now()+interval '60 seconds',24,'staff',60)`,[inviteHash('r'.repeat(43))]);
+      for(const [role,seconds,kind] of [[null,60,'qr'],['owner',60,'qr'],['staff',null,'qr'],['staff',301,'qr'],['staff',60,'link']]) {
+        await db.query('SAVEPOINT invalid_role_qr');
+        await assert.rejects(db.query(`INSERT INTO shop_invites(id,shop_id,kind,token_hash,created_by,created_at,expires_at,lifetime_hours,join_role,refresh_seconds)
+          VALUES ('bad','owner',$1,$2,'owner',now(),now()+interval '60 seconds',24,$3,$4)`,[kind,inviteHash('q'.repeat(43)),role,seconds]),/check constraint/);
+        await db.query('ROLLBACK TO SAVEPOINT invalid_role_qr');
+      }
+
     } catch (error) {
       await db.query('ROLLBACK TO SAVEPOINT migration_fixture');
       throw error;
@@ -764,7 +779,9 @@ test('PIN route boundary protects every early personal/auth handler with selecte
   worker={headers:{...supplier.headers,'X-GRIDGO-Worker-Token':selection.body.token}};
   assert.equal((await api('supplier','DELETE',`/me/shop-team/pin-staff/${pin.id}`,null,ownerDevice)).status,200);
   await refused('removed');
-  pin=(await api('supplier','POST','/me/shop-team/pin-staff',{name:'Manager',pin:'8901',role:'manager'},ownerDevice)).body.member;
+  pin=(await api('supplier','POST','/me/shop-team/pin-staff',{name:'Worker',pin:'8901'},ownerDevice)).body.member;
+  // A pre-rollout PIN Manager keeps working until joining on their own phone.
+  await db.query("UPDATE shop_pin_staff SET role='manager' WHERE id=$1",[pin.id]);
   selection=await api('supplier','POST','/me/shop-team/working/select',{pinStaffId:pin.id,pin:'8901'},supplier);
   worker={headers:{...supplier.headers,'X-GRIDGO-Worker-Token':selection.body.token}};
   assert.equal((await api('supplier','GET','/me/shop-hours',null,worker)).status,200,'PIN Manager keeps hours access');
@@ -777,4 +794,84 @@ test('PIN route boundary protects every early personal/auth handler with selecte
   assert.equal((await api('supplier','GET','/me/privacy-requests',null,ownerDevice)).status,200,'owner separate session remains usable');
   assert.equal((await api('other','GET','/me/privacy-requests',null,supplier)).status,200,'independent staff identity keeps personal rights');
   assert.equal((await api('supplier','POST','/auth/logout',{},supplier)).status,200,'logout remains available while locked');
+});
+
+test('HTTP role QR joins an existing client immediately with private team access, removal and fresh rejoin', {skip}, async t => {
+  const {db,api}=await setup(t);
+  const before=(await loadStore(db)).users.find(u=>u.id==='client');
+  const issued=await api('supplier','POST','/me/shop-team/invites',{kind:'qr',role:'manager'},supplier);
+  assert.equal(issued.status,201,bodyOf(issued));
+  assert.equal(issued.body.invite.role,'manager');assert.equal(issued.body.refreshSeconds,60);
+  const preview=await api('client','POST','/auth/shop-invites',{token:issued.body.token});
+  assert.equal(preview.status,200,bodyOf(preview));assert.equal(preview.body.invite.role,'manager');
+  assert.equal(preview.body.shop.id,'supplier');
+  assert.equal(preview.body.invite.claimedBy,null);
+  assert.equal((await api(null,'POST','/auth/shop-invites',{token:issued.body.token})).status,401);
+  assert.equal((await api('client','POST','/auth/shop-invites',[])).body.error,'invalid_shop_invite_claim');
+  const claimed=await api('client','POST','/auth/shop-invites/claim',{token:issued.body.token});
+  assert.equal(claimed.status,200,bodyOf(claimed));assert.equal(claimed.body.member.status,'active');assert.equal(claimed.body.member.userId,'client');
+  const manager={headers:{'X-GRIDGO-Role':'supplier','X-GRIDGO-Shop-Id':'supplier'}};
+  assert.equal((await api('client','GET','/auth/me/supplier',null,manager)).body.shop.role,'manager');
+  assert.equal((await api('client','GET','/jobs',null,manager)).status,200);
+  for(const path of ['/me/shop-money','/me/payout-account','/me/earnings','/me/supplier-profile']) assert.equal((await api('client','GET',path,null,manager)).status,403,path);
+  const roster=await api('client','GET','/me/shop-team',null,manager);
+  assert.equal(roster.status,200,bodyOf(roster));
+  for(const field of ['clerkUserId','email','phone','tokenHash','pinHash'])assert.equal(JSON.stringify(roster.body).includes(`"${field}"`),false,field);
+  assert.equal((await api('client','POST','/me/shop-team/invites',{kind:'qr',role:'manager'},manager)).body.error,'shop_owner_required');
+  assert.equal((await api('client','POST',`/me/shop-team/invites/${issued.body.invite.id}/replace`,{},manager)).status,409);
+  const staffQr=await api('client','POST','/me/shop-team/invites',{kind:'qr',role:'staff'},manager);
+  assert.equal(staffQr.status,201,bodyOf(staffQr));
+  assert.equal((await api('new','POST','/auth/shop-invites/claim',{token:staffQr.body.token})).body.member.role,'staff');
+  const beforeRemoval=await api('supplier','POST','/me/shop-team/invites',{kind:'qr',role:'manager'},supplier);
+  assert.equal((await api('supplier','DELETE','/me/shop-team/members/client',null,supplier)).status,200);
+  assert.equal((await api('client','POST','/auth/shop-invites/claim',{token:beforeRemoval.body.token})).body.error,'shop_invite_revoked');
+  assert.equal((await api('client','GET','/jobs',null,manager)).body.error,'shop_access_removed');
+  assert.equal((await api('client','GET','/auth/me/client')).status,200);
+  assert.equal((await api('client','POST','/auth/shop-invites/claim',{token:issued.body.token})).body.error,'shop_invite_used');
+  const rejoin=await api('supplier','POST','/me/shop-team/invites',{kind:'qr',role:'staff'},supplier);
+  assert.equal((await api('client','POST','/auth/shop-invites/claim',{token:rejoin.body.token})).body.member.role,'staff');
+  const after=await loadStore(db);
+  const {lastAuthenticatedAt,...identityAfter}=after.users.find(u=>u.id==='client');
+  assert.ok(lastAuthenticatedAt);assert.deepEqual(identityAfter,before);
+  assert.equal(after.users.filter(u=>u.clerkUserId===before.clerkUserId).length,1);
+  assert.equal(after.shopInvites.find(i=>i.id===issued.body.invite.id).joinRole,'manager');
+});
+
+test('HTTP role QR is single use across processes; refresh and expiry refuse old codes', {skip}, async t => {
+  const {db,api,env}=await setup(t);
+  const second=await apiForTest(t,env);
+  const issued=await api('supplier','POST','/me/shop-team/invites',{kind:'qr',role:'staff'},supplier);
+  const results=await Promise.all([api('client','POST','/auth/shop-invites/claim',{token:issued.body.token}),second('new','POST','/auth/shop-invites/claim',{token:issued.body.token})]);
+  assert.deepEqual(results.map(r=>r.status).sort(),[200,409]);
+  assert.equal(results.find(r=>r.status===409).body.error,'shop_invite_used');
+  assert.equal((await db.query('SELECT count(*)::int AS n FROM shop_invites WHERE claimed_at IS NOT NULL')).rows[0].n,1);
+  const original=await api('supplier','POST','/me/shop-team/invites',{kind:'qr',role:'manager'},supplier);
+  const next=await second('supplier','POST','/me/shop-team/invites',{kind:'qr',role:'manager'},supplier);
+  assert.equal((await api('phone','POST','/auth/shop-invites/claim',{token:original.body.token})).body.error,'shop_invite_revoked');
+  assert.notEqual(next.body.token,original.body.token);
+  const token='e'.repeat(43);
+  await db.query(`INSERT INTO shop_invites(id,shop_id,kind,token_hash,created_by,created_at,expires_at,lifetime_hours,join_role,refresh_seconds)
+    VALUES ('expired_role','supplier','qr',$1,'supplier',now()-interval '61 seconds',now()-interval '1 second',24,'staff',60)`,[inviteHash(token)]);
+  assert.equal((await second('phone','POST','/auth/shop-invites/claim',{token})).body.error,'shop_invite_expired');
+  await assert.rejects(db.query("UPDATE shop_invites SET join_role='staff' WHERE id=$1",[next.body.invite.id]),/immutable/);
+  await assert.rejects(db.query("UPDATE shop_invites SET refresh_seconds=90,expires_at=created_at+interval '90 seconds' WHERE id=$1",[next.body.invite.id]),/immutable/);
+});
+
+test('HTTP join QR refresh setting is versioned, audited, validated and Super Admin only', {skip}, async t => {
+  const {db,api}=await setup(t);
+  const admin={headers:{'X-GRIDGO-Role':'super_admin'}};
+  const current=await api('admin','GET','/settings',null,admin);
+  assert.equal(current.status,200,bodyOf(current));
+  const patch={expectedVersion:current.body.version,reason:'Adjust team join countdown',shopTeamJoinQrRefreshSeconds:90};
+  assert.equal((await api('supplier','PATCH','/settings',patch,supplier)).status,403);
+  assert.equal((await api('admin','PATCH','/settings',{...patch,shopTeamJoinQrRefreshSeconds:0},admin)).body.error,'invalid_shop_join_qr_refresh');
+  const saved=await api('admin','PATCH','/settings',patch,admin);
+  assert.equal(saved.status,200,bodyOf(saved));
+  assert.equal((await api('admin','PATCH','/settings',patch,admin)).body.error,'settings_version_conflict');
+  const invite=await api('supplier','POST','/me/shop-team/invites',{kind:'qr',role:'staff'},supplier);
+  assert.equal(invite.body.refreshSeconds,90);
+  assert.equal(Date.parse(invite.body.invite.expiresAt)-Date.parse(invite.body.invite.createdAt),90000);
+  const persisted=await loadStore(db);assert.equal(persisted.settings.shopTeamJoinQrRefreshSeconds,90);
+  const event=persisted.auditLog.find(row=>row.action==='settings.operational_update');
+  assert.equal(event.detail.current.shopTeamJoinQrRefreshSeconds,90);assert.equal(event.actorId,'admin');
 });

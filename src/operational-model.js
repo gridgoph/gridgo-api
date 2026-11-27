@@ -291,6 +291,7 @@ export function defaultOperationalSettings() {
     riderCommissionBps: 8_000,
     shopMoney: {...shopMoneySettings(),launchedAt:new Date().toISOString()},
     riderOfferTimeoutSeconds: 30,
+    shopTeamJoinQrRefreshSeconds: 60,
     cash: { enabled: false, limitMinor: 150000, noShowWaitSeconds: 600 },
     clientRiderLocationRevealDistanceMeters: 1_000, // Deprecated; no longer controls visibility.
     riderLocationRefreshIntervalSeconds: 20,
@@ -358,6 +359,10 @@ export function validateOperationalSettings(settings) {
   if (settings?.orderChatCloseAfterPickupHours !== undefined && (!Number.isInteger(settings.orderChatCloseAfterPickupHours) || settings.orderChatCloseAfterPickupHours < 1 || settings.orderChatCloseAfterPickupHours > 168)) fail(400, 'invalid_order_chat_lifetime', 'Choose 1 to 168 hours.');
   validateExpressRates(Object.hasOwn(settings || {}, 'expressRates') ? settings.expressRates : expressRates());
   validateCashSettings(settings);
+  if (settings.shopTeamJoinQrRefreshSeconds !== undefined && (!Number.isInteger(settings.shopTeamJoinQrRefreshSeconds)
+      || settings.shopTeamJoinQrRefreshSeconds < 15 || settings.shopTeamJoinQrRefreshSeconds > 300)) {
+    fail(400, 'invalid_shop_join_qr_refresh', 'Choose an integer from 15 to 300 seconds.');
+  }
   if (settings.riderOfferTimeoutSeconds !== undefined && (!Number.isInteger(settings.riderOfferTimeoutSeconds)
       || settings.riderOfferTimeoutSeconds < 10 || settings.riderOfferTimeoutSeconds > 120)) {
     fail(400, 'invalid_rider_offer_timeout', 'Set the rider offer countdown to an integer from 10 to 120 seconds.');
