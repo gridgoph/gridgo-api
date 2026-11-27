@@ -44,6 +44,10 @@ export function catalogItemsWithPhotos(body) {
   if (Array.isArray(body?.shops)) {
     for (const shop of body.shops) collectShopItems(shop, items);
   }
+  // Express printer cards carry the shop logo in the same photo stub shape.
+  for (const shop of [body?.shop, ...(Array.isArray(body?.shops) ? body.shops : [])]) {
+    if (shop?.logo?.fileId) items.push({ photos: [shop.logo] });
+  }
   return items;
 }
 
