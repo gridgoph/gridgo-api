@@ -1,3 +1,6 @@
+import { leaderboardSettings, nextLeaderboardSettings } from './shop-leaderboard.js';
+import { closeLeaderboardMonth, leaderboardMonthDue } from './shop-leaderboard-months.js';
+import { routeShopLeaderboard } from './shop-leaderboard-routes.js';
 import { riderVerification, requestRiderReupload, notifyRiderReview } from './rider-onboarding.js';
 import { homePrinterResponse, homePrinterStatus, homeSettings, homeProfile, snapshotHomePrinter } from './home-printers.js';
 import { routeHomePrinters } from './home-printer-routes.js';
@@ -994,9 +997,14 @@ function publicOperationalSettings(settings, store = null, user = null) {
   if (!['ops_admin', 'super_admin'].includes(user?.role)) {
     delete rest.expressRates;
     delete rest.expressCheckout;
+    delete rest.shopLeaderboard;
     delete rest.serviceFeeSchedule;
     delete rest.scheduledServiceFee;
-  } else rest.expressCheckout = expressCheckoutSettings(settings);
+  } else {
+    rest.expressCheckout = expressCheckoutSettings(settings);
+    if (user.role === 'super_admin') rest.shopLeaderboard = leaderboardSettings(settings);
+    else delete rest.shopLeaderboard;
+  }
   const paymentQr = { method: "qr_manual", caption: "QR Ph" };
   const file = store ? readyPaymentQrFile(store) : null;
   if (file) paymentQr.imageUrl = `${PAYMENT_QR_PUBLIC_PATH}?v=${encodeURIComponent(file.fileId)}`;
@@ -3336,6 +3344,8 @@ async function handleAuditedRequest(req, res) {
       res.setHeader('Cache-Control','private, no-store');
       return send(res,200,{...(pathname==='/me/supplier-signup'?{signup:signupProjection(store,signupForShop(store,user.id))}:{}),payoutStatus:supplierPayoutStatus(store,user.id,now())});
     }
+    const leaderboardResponse=await routeShopLeaderboard({req,url,store,user,readBody,now,id});
+    if(leaderboardResponse){res.setHeader('Cache-Control','private, no-store');if(leaderboardResponse.mutated)await save(store);return send(res,leaderboardResponse.status,leaderboardResponse.body);}
     const moneyResponse=await routeShopMoney({req,url,store,user,readBody,now,id,database});
     if(moneyResponse){res.setHeader('Cache-Control','private, no-store');if(moneyResponse.mutated)await save(store);return send(res,moneyResponse.status,moneyResponse.body);}
 
@@ -4672,6 +4682,7 @@ async function handleAuditedRequest(req, res) {
       }
       const next = {
         ...store.settings,
+        shopLeaderboard: Object.hasOwn(body,"shopLeaderboard") ? nextLeaderboardSettings(store.settings, body.shopLeaderboard) : leaderboardSettings(store.settings),
         shopMoney: Object.hasOwn(body,"shopMoney") ? {...shopMoneySettings(store.settings),...body.shopMoney,launchedAt:shopMoneySettings(store.settings).launchedAt} : shopMoneySettings(store.settings),
         supplierVerification: Object.hasOwn(body,"supplierVerification") ? body.supplierVerification : verificationSettings(store.settings),
         supplierOnboarding: Object.hasOwn(body,"supplierOnboarding") ? body.supplierOnboarding : supplierOnboardingSettings(store.settings),
@@ -8697,6 +8708,7 @@ async function runLifecycleWork() {
   lifecycleBusy = true;
   try {
     await continueAfterStepFailure([
+      async () => {if(await leaderboardMonthDue(database,now()))await enqueueMutation(async()=>{const s=await load();if(closeLeaderboardMonth(s,{at:now(),id}))await save(s);});},
       () => runPlayOptinReminders({ database, broadcast: broadcastPlayOptin, now }),
       async () => {if(await shopMoneyWorkDue(database,now()))await enqueueMutation(async()=>{const s=await load();if(sweepShopMoney(s,{at:now(),id}))await save(s);});},
       sweepRescheduleRequests,

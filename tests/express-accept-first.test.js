@@ -380,3 +380,14 @@ test('an "I\'m on my way" PIN order keeps its PIN across a move and takes cash a
   assert.equal(ctx.store.shopMoneyEvents.filter(e => e.key === `counter:${order.id}`).length, 1, 'one counter debt, one cash record');
   assert.deepEqual(publicExpress(order, ctx.shop('shop_c')).handedOver, { at: later(600), method: 'pickup_pin', cashReceived: true });
 });
+
+test('accept-first rerouting applies the monthly boost only for the saved Nearest sort',async()=>{
+  for(const [sort,expected] of [['nearest','shop_c'],['nearby','shop_c'],['cheapest','shop_b'],['all_davao','shop_b']]) {
+    const ctx=setup();
+    Object.assign(ctx.store.supplierProfiles.find(row=>row.userId==='shop_b').shop,{lat:7.065,lng:125.6085});
+    ctx.store.shopLeaderboardMonths=[{month:'2026-08',validFrom:'2026-08-31T16:00:00.000Z',validUntil:'2026-09-30T16:00:00.000Z',winners:[{supplierId:'shop_c'}]}];
+    const {order}=await send(ctx,{sort});
+    await ctx.express('decline',ctx.shop('shop_a'),order.id,{reason:'Capacity reached'});
+    assert.equal(current(ctx.store,order).supplierId,expected,sort);
+  }
+});

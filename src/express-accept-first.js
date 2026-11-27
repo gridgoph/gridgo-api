@@ -1,3 +1,4 @@
+import { nearestTopShopOrder } from './shop-leaderboard-months.js';
 import { EXPRESS_ACCEPTED_ORIGINAL } from './express-shop-pricing.js';
 import { expressFail as fail, startExpressAcceptance, onAcceptFirstRefusal, publicExpress, declineExpress } from './express-orders.js';
 import { PICKUP_PIN_VERSION } from './pickup-pin.js';
@@ -101,7 +102,7 @@ function quotedCandidates(store, order, at) {
   const rows = withClientCatalog(store, client, () => quotedExpressPrinters(store, client, { ...draftBody(order), sort: 'all_davao' }, at).shops)
     .filter(row => row.selectable && row.quote?.status === 'priced' && Number.isSafeInteger(row.quote.printingMinor));
   const by = sorters[SORT_BY[order.expressOrder.routing.sort]];
-  return rows.sort((a, b) => (by ? by(a, b) : 0) || (a.distanceMeters ?? Infinity) - (b.distanceMeters ?? Infinity) || a.supplierId.localeCompare(b.supplierId));
+  return rows.sort((a, b) => nearestTopShopOrder(order.expressOrder.routing.sort,a,b) || (by ? by(a, b) : 0) || (a.distanceMeters ?? Infinity) - (b.distanceMeters ?? Infinity) || a.supplierId.localeCompare(b.supplierId));
 }
 function candidateView(row, order) {
   return { supplierId: row.supplierId, name: row.name, printerType: row.printerType, verified: row.verified === true,
