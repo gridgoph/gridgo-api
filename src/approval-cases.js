@@ -1,3 +1,4 @@
+import { notifyRiderReview } from './rider-onboarding.js';
 import { homeVerificationMissing } from './home-printers.js';
 import { currentApplication, decideClientApplication, sentBackNotificationBody } from "./client-applications.js";
 import { resolveCategoryCode } from "./taxonomy.js";
@@ -496,7 +497,7 @@ export function decideApprovalCase({
     restore: "Account restored",
   }[action];
   const lines = `${restoredServiceIds.length} service line${restoredServiceIds.length === 1 ? "" : "s"}`;
-  store.notifications.push({
+  if (approvalCase.kind !== "rider") store.notifications.push({
     id: createId("ntf"),
     userId: approvalCase.userId,
     type: notificationType,
@@ -513,5 +514,6 @@ export function decideApprovalCase({
     at,
   });
 
+  if (approvalCase.kind === "rider") notifyRiderReview(store, approvalCase, approvalCase.status, { createId, at });
   return { approvalCase, event, publishedServiceIds, suspendedServiceIds, restoredServiceIds, replayed: false };
 }

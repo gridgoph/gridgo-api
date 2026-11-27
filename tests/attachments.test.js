@@ -434,7 +434,7 @@ test("rider licence attachment preserves evidence without submitting enrollment"
     id: "rider-document-old",
     field: "fileId",
   }]);
-  assert.deepEqual(RIDER_DOCUMENT_TYPES, ["drivers_license", "or_cr", "selfie"]);
+  assert.deepEqual(RIDER_DOCUMENT_TYPES, ["drivers_license", "drivers_license_back", "or_cr", "selfie", "motorcycle_photo", "resume"]);
 
   const replacement = readyFile("rider_verification_document", {
     fileId: "rider-license-new",
@@ -938,4 +938,37 @@ test('customer acknowledgement signatures are small rider PNGs bound to an arriv
   current.deliveryEvidence = { recordedAt: at };
   for (const user of [client, ops, superAdmin]) assert.doesNotThrow(() => authorizeFileRead(user, store, file));
   for (const user of [rider, supplier, otherClient]) expectError(() => authorizeFileRead(user, store, file), 403, 'forbidden');
+});
+
+test('new rider slots validate descriptions, photos and isolated re-upload replacement', () => {
+  const kinds = ['drivers_license','drivers_license_back','or_cr','motorcycle_photo','resume'];
+  const files = kinds.map(kind => readyFile('rider_verification_document', {fileId:kind,ownerId:rider.id}));
+  const approvalCase={id:'rider-review',userId:rider.id,kind:'rider',status:'pending',version:1};
+  const store={users:[rider],files,riderDocuments:[],approvalCases:[approvalCase]};
+  for(const kind of kinds) {
+    const body={riderDocumentType:kind,...(kind==='drivers_license'?{expiresOn:LICENSE_EXPIRY}:{}),...(kind==='motorcycle_photo'?{description:' Blue motorcycle, side view '}: {})};
+    const file=files.find(f=>f.fileId===kind), target=resolveFileTarget(store,file.purpose,body,rider);
+    authorizeFileAttach(rider,file,target);
+    attachRiderDocument(store,file,target,{documentId:`document_${kind}`,at:'2026-11-27T01:00:00.000Z'});
+  }
+  assert.equal(store.riderDocuments.find(d=>d.kind==='motorcycle_photo').description,'Blue motorcycle, side view');
+  expectError(()=>resolveFileTarget(store,'rider_verification_document',{riderDocumentType:'motorcycle_photo'},rider),400,'invalid_application');
+  expectError(()=>resolveFileTarget(store,'rider_verification_document',{riderDocumentType:'resume',description:'unexpected'},rider),400,'unexpected_target_field');
+  const pdf=readyFile('rider_verification_document',{ownerId:rider.id,detectedContentType:'application/pdf',declaredContentType:'application/pdf'});
+  const resumeTarget=resolveFileTarget(store,pdf.purpose,{riderDocumentType:'resume'},rider);
+  assert.doesNotThrow(()=>authorizeFileAttach(rider,pdf,resumeTarget));
+  const photoTarget=resolveFileTarget(store,pdf.purpose,{riderDocumentType:'motorcycle_photo',description:'Side view'},rider);
+  expectError(()=>authorizeFileAttach(rider,pdf,photoTarget),400,'invalid_document_content_type');
+  approvalCase.submittedAt='2026-11-27T02:00:00.000Z';
+  expectError(()=>resolveFileTarget(store,pdf.purpose,{riderDocumentType:'resume'},rider),409,'approval_state_conflict');
+  approvalCase.riderReview={status:'needs_reupload',requestedKinds:['resume']};
+  const old=store.riderDocuments.find(d=>d.kind==='resume'); old.reuploadReason='Please send a readable copy.';
+  const target=resolveFileTarget(store,pdf.purpose,{riderDocumentType:'resume'},rider);
+  assert.deepEqual(target.replacedDocuments,[old]);
+  const replacement=attachRiderDocument(store,pdf,target,{documentId:'new_resume',at:'2026-11-27T03:00:00.000Z'});
+  assert.equal(old.isCurrent,false); assert.equal(replacement.document.reuploadReason,undefined);
+  assert.equal(store.riderDocuments.filter(d=>d.isCurrent!==false).length,5);
+  assert.equal(approvalCase.version,2);
+  expectError(()=>resolveFileTarget(store,pdf.purpose,{riderDocumentType:'or_cr'},rider),409,'approval_state_conflict');
+  for(const file of files) for(const party of [client,supplier]) expectError(()=>authorizeFileRead(party,store,file),403,'forbidden');
 });

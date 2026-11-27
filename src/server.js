@@ -1,3 +1,4 @@
+import { riderVerification, requestRiderReupload, notifyRiderReview } from './rider-onboarding.js';
 import { homePrinterResponse, homePrinterStatus, homeSettings, homeProfile, snapshotHomePrinter } from './home-printers.js';
 import { routeHomePrinters } from './home-printer-routes.js';
 import { routeExpressGroups } from './express-group-routes.js';
@@ -1494,6 +1495,8 @@ function currentRiderDocuments(store, userId) {
       kind: document.kind,
       fileId: document.fileId,
       expiresOn: document.expiresOn ?? null,
+      description: document.description ?? null,
+      reuploadReason: document.reuploadReason ?? null,
       uploadedAt: document.uploadedAt,
     }));
 }
@@ -1582,6 +1585,7 @@ function approvalCaseDetail(store, approvalCase) {
       ...base,
       riderProfile: riderProfileProjection(store, approvalCase.userId),
       riderDocuments: riderDocumentsForApproval(store, approvalCase.userId),
+      riderVerification: riderVerification(store, approvalCase),
     };
   }
   const services = (store.supplierServices || [])
@@ -1655,6 +1659,7 @@ function approvalQueue(store, url) {
     status: 200,
     approvalCases: page.map((approvalCase) => ({
       ...approvalCaseForApprover(store, approvalCase),
+      ...(approvalCase.kind === "rider" ? { riderVerification: riderVerification(store, approvalCase) } : {}),
       ...(approvalCase.kind === "supplier" ? {verification:verificationSummary(store,approvalCase.userId,now()),verificationDocuments:verificationDocumentsFor(store,store.users.find(u=>u.id===approvalCase.userId))}:{}),
       applicant: publicIdentity(
         (store.users || []).find((candidate) => candidate.id === approvalCase.userId),
@@ -1712,6 +1717,7 @@ function fixedAuthProjection(store, auth, role) {
       approvalCase: approvalCaseSummary(approvalCase),
       onboardingIncomplete: approvalCase?.status === "pending" && approvalCase.submittedAt == null,
       documents,
+      riderVerification: riderVerification(store, approvalCase),
       capabilities: {
         maintainProfile: true,
         uploadDocuments: true,
@@ -3795,23 +3801,26 @@ async function handleAuditedRequest(req, res) {
 
     // ---- Super Admin approval queue ----
     if (req.method === "GET" && pathname === "/approval-cases") {
-      if (!isSuper(user)) return send(res, 403, { error: "forbidden" });
+      if (!isSuper(user) && !(isOps(user) && url.searchParams.get('kind') === 'rider')) return send(res, 403, { error: "forbidden" });
       const result = approvalQueue(store, url);
       const { status: responseStatus, ...body } = result;
       return send(res, responseStatus, body);
     }
 
     if (req.method === "GET" && /^\/approval-cases\/[^/]+$/.test(pathname)) {
-      if (!isSuper(user)) return send(res, 403, { error: "forbidden" });
+      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
       const caseId = pathname.split("/")[2];
       const approvalCase = (store.approvalCases || []).find((candidate) => candidate.id === caseId);
       if (!approvalCase) return send(res, 404, { error: "approval_case_not_found" });
+      if (!isSuper(user) && approvalCase.kind !== 'rider') return send(res, 403, { error: 'forbidden' });
       return send(res, 200, approvalCaseDetail(store, approvalCase));
     }
 
     if (req.method === "POST" && /^\/approval-cases\/[^/]+\/(approve|reject|suspend|restore)$/.test(pathname)) {
-      if (!isSuper(user)) return send(res, 403, { error: "forbidden" });
+      if (!isOps(user)) return send(res, 403, { error: "forbidden" });
       const [, , caseId, action] = pathname.split("/");
+      const targetCase = store.approvalCases.find(c => c.id === caseId);
+      if (!isSuper(user) && (targetCase?.kind !== 'rider' || action !== 'approve')) return send(res, 403, { error: 'forbidden' });
       if (!APPROVAL_DECISIONS.has(action)) return send(res, 404, { error: "not_found", path: pathname });
       const input = approvalDecisionInput(action, await readBody(req));
       if (input.error) {
@@ -3850,6 +3859,15 @@ async function handleAuditedRequest(req, res) {
         restoredServiceIds: outcome.restoredServiceIds,
         replayed: outcome.replayed,
       });
+    }
+
+    if (req.method === 'POST' && /^\/approval-cases\/[^/]+\/needs-reupload$/.test(pathname)) {
+      if (!isOps(user)) return send(res, 403, { error: 'forbidden' });
+      const approvalCase = store.approvalCases.find(c => c.id === pathname.split('/')[2]);
+      const result = requestRiderReupload({ store, approvalCase, body: await readBody(req), actor: user,
+        actorRole: isSuper(user) ? 'super_admin' : 'ops_admin', at: now(), createId: id });
+      if (!result.replayed) await save(store);
+      return send(res, 200, { ...approvalCaseDetail(store, approvalCase), replayed: result.replayed });
     }
 
     if (req.method === "POST" && pathname === "/me/approval-cases/rider/submit") {
@@ -4185,6 +4203,9 @@ async function handleAuditedRequest(req, res) {
             documentId: id("rdoc"),
             at: attachedAt,
           });
+          audit(latestStore, { actor: latestUser, action: 'rider.document_attached', entityType: 'rider_document',
+            entityId: attached.document.id, detail: { kind: attached.document.kind } });
+          queueInvalidate(latestStore, { resource: 'approvals', id: attached.approvalCase?.id });
           await save(latestStore);
           return send(res, 200, {
             file: publicFile(latestFile),
@@ -4193,6 +4214,8 @@ async function handleAuditedRequest(req, res) {
               kind: attached.document.kind,
               fileId: attached.document.fileId,
               expiresOn: attached.document.expiresOn ?? null,
+              description: attached.document.description ?? null,
+              reuploadReason: attached.document.reuploadReason ?? null,
               uploadedAt: attached.document.uploadedAt,
             },
             approvalCase: approvalCaseSummary(attached.approvalCase),
@@ -5215,6 +5238,9 @@ async function handleAuditedRequest(req, res) {
       const approvalCase = syncApprovalCaseWithVerification(
         store, target, body.status, user, body.reason || body.note || null,
       );
+      if (target.role === 'rider' && prev !== body.status) {
+        notifyRiderReview(store, approvalCase, body.status, { createId: id, at: now() });
+      }
       target.verificationStatus = body.status;
       target.verificationNote = body.reason || body.note || null;
       if (body.status === "approved") {
