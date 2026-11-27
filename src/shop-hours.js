@@ -26,7 +26,7 @@ export function shopHoursStatus(profile, settings, at = new Date().toISOString()
   const today = local(at, schedule.utcOffsetMinutes).toISOString().slice(0, 10);
   const todayExtension = schedule.extension?.day === today ? structuredClone(schedule.extension) : null;
   let nextOpeningAt = null;
-  if (!profile?.isClosed) {
+  if (!profile?.isClosed&&!profile?.availability?.missedJobPause?.active&&!(profile?.availability?.openRestoreClosed&&Date.parse(profile.availability.openUntil)<=Date.parse(at))) {
     try { nextOpeningAt = addOpeningMilliseconds(schedule, shopPaused(profile, at) ? profile.availability.pausedUntil : at, 0); }
     catch (error) { if (error.code !== 'shop_never_open') throw error; }
   }

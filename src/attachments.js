@@ -59,6 +59,7 @@ const CONTENT_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "applica
 export const VERIFICATION_DOCUMENT_TYPES = Object.freeze(["business_permit", "valid_id", "id_selfie", "sample_work", "barangay_clearance", "tin"]);
 const VERIFICATION_DOCUMENT_TYPE_SET = new Set(VERIFICATION_DOCUMENT_TYPES);
 export const PURPOSE_POLICIES = Object.freeze({
+  shop_payment_receipt: {roles:['supplier'],maxBytes:15*1024*1024,contentTypes:['image/jpeg','image/png','image/webp']},
   supplier_price_list: {roles:['supplier'],maxBytes:15*1024*1024,contentTypes:['image/jpeg','image/png','image/webp','application/pdf']},
   product_setup: { roles: ['supplier'], maxBytes: 20 * 1024 * 1024, contentTypes: [...CONTENT_TYPES, 'audio/mp4', 'audio/mpeg', 'audio/ogg', 'audio/wav'] },
   cash_topup_proof: { roles: ['rider'], maxBytes: 15*1024*1024, contentTypes: ['image/jpeg','image/png','image/webp'] },
@@ -839,6 +840,7 @@ export function resolveFileTarget(store, purpose, body, user = null) {
       "A payout QR is saved through PATCH /me/payout-account with its fileId. It is not attached to an order.",
     );
   }
+  if (purpose === 'shop_payment_receipt') fail(409,'shop_payment_receipt_route_required','Submit the receipt from Money.');
   if (purpose === "payout_receipt") {
     fail(
       400,
@@ -1531,6 +1533,10 @@ export function authorizeFileRead(user, store, file) {
   }
   if (file.purpose === 'supplier_invoice') {
     if (hasApprovedWorkRole(user, 'supplier', store) && file.ownerId === user.id) return;
+    forbidden();
+  }
+  if (file.purpose === 'shop_payment_receipt') {
+    if(user.role==='supplier'&&file.ownerId===user.id&&!['staff','manager'].includes(user.shopRole))return;
     forbidden();
   }
   if (file.purpose === "payment_proof") {

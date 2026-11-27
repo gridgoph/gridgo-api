@@ -148,7 +148,7 @@ export async function routeExpressOrders({req,url,store,user,readBody,id,now,aud
  }
  if(action==='accept'&&order.shopAcceptance?.status==='accepted')return response();
  if(order.state!=='supplier_assigned')fail(409,'express_acceptance_not_pending');
- if(!order.shopAcceptance)startExpressAcceptance(order,at);
+ if(!order.shopAcceptance)startExpressAcceptance(order,at,store.settings);
  if(Date.parse(at)>=Date.parse(order.shopAcceptance.deadlineAt)) {
    declineExpress(store,order,{at,id,kind:'timed_out',actorId:actorUserId(user)});
    return {status:409,body:{error:'shop_acceptance_expired'},mutated:true};

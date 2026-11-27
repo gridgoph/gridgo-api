@@ -133,6 +133,18 @@ export const CURRENT_PAYOUT_PLAN_VERSION = 2;
 /** An order with no stored version was placed under the four-stage plan. */
 export const LEGACY_PAYOUT_PLAN_VERSION = 1;
 
+/** A published settlement item is already scheduled, even before a transfer is
+ * reserved. Later cash collections must wait for unscheduled payout items. */
+export function scheduledShopPayout(store, supplierId, key) {
+  for (const event of store.shopMoneyEvents || []) {
+    if (event.kind !== 'settlement_run') continue;
+    const shop = event.data.shops.find(row => row.supplierId === supplierId);
+    const item = shop?.items.find(row => row.key === key);
+    if (item) return item;
+  }
+  return null;
+}
+
 export function payoutPlanVersionOf(order) {
   return Object.hasOwn(PAYOUT_PLANS, order?.payoutPlanVersion)
     ? order.payoutPlanVersion

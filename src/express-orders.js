@@ -1,4 +1,6 @@
 import { publicExpressPrint } from './express-shop-pricing.js';
+import {recordMissedOffer} from './shop-job-policy.js';
+import {shopMoneySettings} from './shop-money-settings.js';
 import { homePrinterStatus, recordHomeOffer, snapshotHomePrinter, homeDistance } from './home-printers.js';
 import { groupExpressMoved, cancelGroupExpressOrder } from './group-express-recovery.js';
 import { supplierVerified, rankVerifiedWithinDistance } from "./supplier-verification.js";
@@ -168,9 +170,10 @@ function acceptFirstProjection(order,{own,staff,shop}) {
   }
   return out;
 }
-export function startExpressAcceptance(order,at) {
+export function startExpressAcceptance(order,at,settings) {
   if(order.expressOrder?.acceptFlow===2) {
-    order.shopAcceptance={supplierId:order.supplierId,assignedAt:at,deadlineAt:new Date(Date.parse(at)+EXPRESS_ACCEPT_FIRST_MS).toISOString(),windowSeconds:EXPRESS_ACCEPT_FIRST_MS/1000,status:'pending'};
+    const seconds=shopMoneySettings(settings).acceptanceSeconds;
+    order.shopAcceptance={supplierId:order.supplierId,assignedAt:at,deadlineAt:new Date(Date.parse(at)+seconds*1000).toISOString(),windowSeconds:seconds,status:'pending'};
     return;
   }
   order.shopAcceptance={supplierId:order.supplierId,assignedAt:at,deadlineAt:new Date(Date.parse(order.groupOrder?.shopDecision?.status==='pending'?order.groupOrder.shopDecision.deadlineAt:at)+EXPRESS_ACCEPT_MS).toISOString(),workingMinutes:5,status:'pending'};
@@ -190,11 +193,12 @@ export function declineExpress(store,order,{at,id,kind='declined',actorId=null,r
   if(!e || order.state!=='supplier_assigned'||order.shopAcceptance?.status!=='pending')expressFail(409,'express_acceptance_not_pending');
   if((order.payoutMilestones||[]).some(p=>p.status==='released') || (store.refundSupplierPayouts||[]).some(p=>p.orderId===order.id&&p.status==='released'))expressFail(409,'express_reassignment_payout_released');
   const previous=order.supplierId;
-  recordHomeOffer(store,previous,kind,at);
+  if(e.acceptFlow!==2)recordHomeOffer(store,previous,kind,at);
   e.declines++;e.declinedSupplierIds=[...new Set([...(e.declinedSupplierIds||[]),previous])];
   order.shopAcceptance.status=kind;
-  e.events.push({state:kind,at,supplierId:previous,reason:kind==='timed_out'?(e.acceptFlow===2?'No response within one minute.':'No response within five minutes.'):reason});
-  // Accept-first: no warning to the shop; the outcome only counts in its accept rate.
+  if(kind==='timed_out')recordMissedOffer(store,order,{at,id});
+  e.events.push({state:kind,at,supplierId:previous,reason:kind==='timed_out'?(e.acceptFlow===2?`No response within ${order.shopAcceptance.windowSeconds||60} seconds.`:'No response within five minutes.'):reason});
+  // Declines affect acceptance only; missed offers also drive availability.
   if(e.acceptFlow===2&&['declined','timed_out'].includes(kind)) {
     if(!acceptFirstRefusal)throw new Error('accept-first routing is not loaded');
     return acceptFirstRefusal(store,order,{at,id,kind,actorId,reason});

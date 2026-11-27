@@ -774,3 +774,13 @@ without imposing a flaky shared-runner latency threshold. The existing shop-team
 fallback remains unchanged. Authenticated device **writes** retain their existing
 full-store transaction and `save()` maintenance boundary; they are not covered
 by this read-only optimization.
+
+## Weekly shop settlement release controls
+
+Apply `1795810000000_weekly_shop_settlement` before this API release. It adds
+receipt indexes and a scheduled-payout guard without rewriting orders, payout
+plans, settlement runs or transfers. Existing reserved amounts are retained.
+`shopMoney.weeklyNettingEnabled` and `shopMoney.overduePauseEnabled` default OFF
+in production; activation requires the release decision. Development/test
+NODE_ENV defaults them ON. Review the [API contract](SHOP_WEEKLY_SETTLEMENT_API.md)
+before enabling either control through Super Admin settings.

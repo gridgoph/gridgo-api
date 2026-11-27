@@ -22,9 +22,10 @@ export function deviceAcceptsNotification(store, device, notification, at) {
     const profile = store.supplierProfiles?.find(p => p.userId === shopId);
     const current = profile && expressAvailability(profile, store.settings, instant);
     const members = (store.shopMemberships || []).filter(m => m.shopId === shopId);
-    if (!profile?.availability?.printerDemandPings || !current?.nightWindow
-      || supplierMatchBlockersFor(store, instant)(shopId, profile).length
-      || current.nightWindow.night !== notification.night || Date.parse(notification.expiresAt) <= Date.parse(instant)
+    const modern=notification.demandVersion===2;
+    if (!profile || (modern?profile.availability?.printerDemandPings===false:!profile.availability?.printerDemandPings || !current?.nightWindow)
+      || supplierMatchBlockersFor(store, instant)(shopId, profile).some(code=>!modern||!['shop_closed','shop_missed_jobs','shop_payment_overdue','home_offline'].includes(code))
+      || (!modern&&current?.nightWindow?.night !== notification.night) || Date.parse(notification.expiresAt) <= Date.parse(instant)
       || (members.length && !members.some(m => m.userId === notification.userId && m.role === 'owner' && m.status === 'active'))) return false;
   }
   if (notification.type === 'shop_express_offer') {
@@ -176,7 +177,7 @@ export function createOutboxWorker({
         }
         try {
           let notification = n;
-          if (n.type === 'printer_demand') {
+          if (n.type === 'printer_demand'&&n.demandVersion!==2) {
             const profile = store.supplierProfiles.find(p => p.userId === (n.shopId || n.userId));
             const { nightWindow } = expressAvailability(profile, store.settings, deliveryAt);
             // A retry must honor shortened hours without extending the issued

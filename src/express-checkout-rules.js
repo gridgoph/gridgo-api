@@ -94,21 +94,39 @@ export function expressPaymentOptions(store, order, client, at) {
   return { amountMinor, payBy: order.expressOrder?.payBy ?? null, defaultMethod: preferred, methods };
 }
 
-/**
- * Accept rate over accept-first offers in the last 30 days. Declines and missed
- * one-minute windows both count against it; there is no warning. Offers withdrawn
- * by the client before an answer, and offers still open, are left out.
- */
-export function expressAcceptRate(store, supplierId, at) {
-  const since = Date.parse(at) - 30 * 86400000, row = { windowDays: 30, offered: 0, accepted: 0, declined: 0, timedOut: 0, rate: null };
+/** Canonical resolved accept-first offers shared by rankings and performance.
+ * Periods use assignment time; outcomes must already have happened at the cutoff.
+ * An unswept one-minute expiry is a miss, never an open offer forever. */
+export function expressOfferOutcomes(store, supplierId, at, { since = Date.parse(at) - 30 * 86400000, until = Date.parse(at) + 1 } = {}) {
+  const cutoff = Date.parse(at);
+  const rows = [];
   for (const order of store.orders || []) {
     const offer = order.shopAcceptance;
-    if (!isAcceptFirst(order) || order.reviewData === true || offer?.supplierId !== supplierId) continue;
+    if (!isAcceptFirst(order) || order.reviewData === true || order.removedAt || offer?.supplierId !== supplierId) continue;
     const assigned = Date.parse(offer.assignedAt);
-    if (!(assigned > since && assigned <= Date.parse(at))) continue;
-    const key = { accepted: 'accepted', declined: 'declined', timed_out: 'timedOut' }[offer.status];
-    if (!key) continue;
-    row.offered++; row[key]++;
+    if (!(assigned >= since && assigned < until && assigned <= cutoff)) continue;
+    let status = offer.status;
+    let answerAt = status === 'accepted' ? offer.acceptedAt
+      : order.expressOrder.events?.find(event => event.state === status && event.supplierId === supplierId && Date.parse(event.at) >= assigned)?.at;
+    if (status === 'pending' && order.state === 'supplier_assigned' && Date.parse(offer.deadlineAt) <= cutoff) status = 'timed_out';
+    if (status === 'timed_out') answerAt = offer.deadlineAt;
+    if (!['accepted', 'declined', 'timed_out'].includes(status)) continue;
+    // Historical legacy rows sometimes have no answer timestamp. They still
+    // count in acceptance; missing timing evidence earns no speed credit.
+    if (answerAt && Date.parse(answerAt) > cutoff) continue;
+    const elapsed = Date.parse(answerAt) - assigned;
+    rows.push({ order, status, answerSeconds: elapsed >= 0 ? Math.min(60, elapsed / 1000) : null });
+  }
+  return rows;
+}
+
+/** Same 30-day accept rate for shop summaries, performance and missed-job policy.
+ * An explicit period lets the leaderboard consume the identical offer rules. */
+export function expressAcceptRate(store, supplierId, at, period) {
+  const row = { ...(period ? {} : { windowDays: 30 }), offered: 0, accepted: 0, declined: 0, timedOut: 0, rate: null };
+  for (const offer of expressOfferOutcomes(store, supplierId, at, period)) {
+    row.offered++;
+    row[{ accepted: 'accepted', declined: 'declined', timed_out: 'timedOut' }[offer.status]]++;
   }
   if (row.offered) row.rate = Number((row.accepted / row.offered).toFixed(4));
   return row;

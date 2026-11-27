@@ -7,6 +7,16 @@ import { isTestOperationsUser, reviewSubject } from "./test-operations.js";
 export const NOTIFICATION_LIST_DEFAULT_LIMIT = 40;
 export const NOTIFICATION_LIST_MAX_LIMIT = 100;
 
+/** Availability events reach the current shop owners and every privileged inbox.
+ * Delivery remains at save(), after the domain transaction commits. */
+export function notifyShopAvailability(store,supplierId,draft,{at,id}) {
+  const members=(store.shopMemberships||[]).filter(m=>m.shopId===supplierId);
+  const owners=members.length?members.filter(m=>m.status==='active'&&m.role==='owner').map(m=>m.userId):[supplierId];
+  for(const recipient of [...owners.map(userId=>({userId,role:'supplier'})),...privilegedAdminMemberships(store)])
+    (store.notifications||=[]).push({id:id('ntf'),at,userId:recipient.userId,appRole:recipient.role,...draft,shopId:supplierId,read:false});
+  for(const resource of ['notifications','availability','jobs'])queueInvalidate(store,{resource,supplierId,userIds:owners});
+}
+
 /** Refetch pings that only Operations and Super Admin may receive. */
 export const STAFF_INVALIDATE_RESOURCES = Object.freeze(["issue-reports", "early-access", "chat", "account-deletion-requests", "legal", "privacy-requests"]);
 
@@ -81,6 +91,7 @@ export function publicNotification(notification, order) {
     at: notification.at,
   };
   if (notification.type) item.type = notification.type;
+  if (notification.type === 'printer_demand') {item.shopId=notification.shopId;item.expiresAt=notification.expiresAt;}
   if (notification.groupId) item.groupId = notification.groupId;
   if (notification.type === 'shop_invite_claimed') item.shopId = notification.shopId;
   if (notification.type === "support_message" && notification.threadId) item.threadId = notification.threadId;
