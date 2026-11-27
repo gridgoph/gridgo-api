@@ -39,4 +39,20 @@ test('prepared Express file and mixed page prices survive round trip and cannot 
  assert.equal(line.expressOriginalFileId,'original');assert.equal(line.expressPrint.pagePricing.subtotalMinor,2400);
  await assert.rejects(db.query(`UPDATE order_line_items SET express_print=jsonb_set(express_print,'{orientation}','"portrait"') WHERE id=$1`,[line.id]),/Express line print snapshot is immutable/);
  await assert.rejects(db.query(`UPDATE files SET data=jsonb_set(data,'{expressRendering,key}','"different"') WHERE file_id=$1`,[preparedId]),/Express rendering identity is immutable/);
+ // A new accept-first attempt reuses the immutable rendering and changes only
+ // the next shop's own tier prices; both attempts survive one atomic save.
+ store.catalogItems.find(item=>item.supplierId==='replacement').expressPricing.a4={bw:100,light:200,full:300};
+ const sent=await call('/express/drafts',{acceptFirst:true,supplierId:'supplier',location:{lat:7.06,lng:125.6},fulfillmentMode:'pickup',files:[input]});
+ const sendResult=await call(`/me/carts/${sent.body.cartId}/checkout`,{looksRight:true,expressConfirmation:sent.body.confirmation});
+ const first=store.orders.find(o=>o.id===sendResult.body.order.id);assert.equal(first.totalMinor,2900);
+ store.settings.expressLightColourMaxBps=500;
+ store.settings.colourDetection={minSaturationBps:3000,minLightnessBps:500,maxLightnessBps:8500,a3MonochromeMaxBps:1000};
+ const {routeExpressOrders}=await import('../src/express-routes.js');
+ await routeExpressOrders({req:{method:'POST'},url:new URL(`http://test/orders/${first.id}/express/decline`),store,user:actors.supplier,readBody:async()=>({reason:'Capacity unavailable'}),now:()=>AT,id});
+ const nextId=first.expressOrder.reroute.nextOrderId;assert.ok(nextId);
+ await db.transaction(()=>saveStore(db,store));store=await loadStore(db);
+ const next=store.orders.find(o=>o.id===nextId);assert.equal(next.totalMinor,1700);assert.equal(next.supplierSubtotalMinor,1200);
+ assert.equal(next.expressOrder.printSettings[0].fileId,preparedId);assert.equal(next.expressOrder.printSettings[0].sourceFileId,'original');
+ assert.deepEqual(next.expressOrder.printSettings[0].pagePricing.pages.map(p=>p.priceMinor),[100,200,300]);
+
 });

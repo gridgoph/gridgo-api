@@ -1,3 +1,4 @@
+import { expressAcceptRate } from './express-checkout-rules.js';
 import { staffPageBody, STAFF_LIST_PAGE } from './staff-list-pages.js';
 import { schedulingWarningOnly, tightDeclineExemption } from './scheduling-policy.js';
 import { reportOrderAllowed } from './review-data.js';
@@ -132,6 +133,7 @@ export function supplierPerformance(store, supplierId, at) {
   return { supplierId, asOf: at, policy: 'warnings_only', windowDays: 30, graceMinutes: 60,
     counts, rosterReview: counts.lateFinishes >= 3 || counts.cancellations >= 2,
     topPick: performanceTopPick(store, supplierId, at),
+    expressAcceptance: expressAcceptRate(store, supplierId, at),
     onTime: store[STAFF_LIST_PAGE]?.performanceFacts?.onTime || { completed: finishes.length, onTime, late: finishes.length - onTime,
       rate: finishes.length ? Number((onTime / finishes.length).toFixed(4)) : null },
     warnings: recent.filter(row => row.warningCodes?.length).map(project),

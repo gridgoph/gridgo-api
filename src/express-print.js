@@ -22,7 +22,7 @@ export function normalizeExpressPrint(input,productType='documents') {
  if(!['auto','portrait','landscape'].includes(orientation))fail('invalid_express_orientation');
  if(!PRINT_LAYOUTS.includes(layout))fail('invalid_print_layout');
  if(!['one','two'].includes(input.sides))fail('invalid_express_print');
- const common={productType,paper:input.paper,sides:input.sides,orientation,layout,pageRange:input.pageRange??null};
+ const common={productType,paper:input.paper,sides:input.sides,orientation,layout,pageRange:selectDocumentPages(Number.MAX_SAFE_INTEGER,input.pageRange??null).range};
  if(productType==='plans') {
   if(!EXPRESS_PLAN_SIZES.includes(input.paper)||orientation!=='auto'||input.sides!=='one')fail('invalid_express_plan');
   if(!['whiteprint','blue_ink','blue_paper'].includes(input.planType))fail('invalid_express_plan');
@@ -34,7 +34,7 @@ export function normalizeExpressPrint(input,productType='documents') {
  if(!['auto','all_bw','choose'].includes(colourMode))fail('invalid_express_colour_mode');
  if(colourMode!=='choose'&&input.colourPages!=null)fail('invalid_express_colour_pages');
  if(colourMode==='choose'&&(typeof input.colourPages!=='string'||input.colourPages.length>1000))fail('invalid_express_colour_pages');
- return {...common,colourMode,colourPages:colourMode==='choose'?input.colourPages.trim():null};
+ return {...common,colourMode,colourPages:colourMode==='choose'?(selectDocumentPages(Number.MAX_SAFE_INTEGER,input.colourPages).range||''):null};
 }
 export function priceExpressPages(pages,print,prices,lightMaxBps=EXPRESS_LIGHT_DEFAULT_BPS) {
  if(!Number.isSafeInteger(print.copies)||print.copies<1||!pages.length)fail('invalid_quantity');
@@ -57,6 +57,19 @@ export function expressPrintRequest(settings,input,productType) {
  return {version:2,layout:print.layout,paper:{widthMilli:paper.widthMilli,heightMilli:paper.heightMilli},orientation:print.orientation,
   thresholds:colourSettings(settings),express:{...print,lightMaxBps:settings?.expressLightColourMaxBps??EXPRESS_LIGHT_DEFAULT_BPS}};
 }
+/** An owning-file preview can pin the settings measured before a staff edit.
+ * Rebuild its canonical request, so the key binds every choice after JSONB reads. */
+export function resolveExpressPrintRequest(settings,file,input,productType) {
+ let request=expressPrintRequest(settings,input,productType);
+ if(input.previewKey!=null) {
+  if(typeof input.previewKey!=='string'||!/^[a-f0-9]{64}$/.test(input.previewKey))fail('invalid_express_preview_key');
+  const previous=file.colourAnalyses?.find(row=>row.key===input.previewKey&&row.request?.version===2&&row.request?.express);
+  if(!previous)throw new PricingError(409,'express_preview_required','Review the prepared print settings.');
+  request=expressPrintRequest({colourDetection:previous.request.thresholds,expressLightColourMaxBps:previous.request.express.lightMaxBps},input,productType);
+  if(analysisKey(request)!==input.previewKey)throw new PricingError(409,'express_preview_required','Review the prepared print settings.');
+ }
+ return {request,key:analysisKey(request)};
+}
 export function validateExpressPageSelection(file,print) {
  const total=Number.isSafeInteger(file.detected?.pageCount)&&file.detected.pageCount>0?file.detected.pageCount:Number.MAX_SAFE_INTEGER;
  const printed=selectDocumentPages(total,print.pageRange);
@@ -67,7 +80,7 @@ export function validateExpressPageSelection(file,print) {
  if(intervals(chosen.range).some(([a,b])=>!intervals(printed.range).some(([start,end])=>start<=a&&end>=b)))fail('invalid_express_colour_pages');
 }
 export function ensureExpressPreview(store,file,input,productType,at,{retry=false}={}) {
- const request=expressPrintRequest(store.settings,input,productType),key=analysisKey(request);
+ const {request,key}=resolveExpressPrintRequest(store.settings,file,input,productType);
  validateExpressPageSelection(file,request.express);
  let queued=queueColourRequest(file,request,at,{retry});
  if(!COLOUR_TYPES.includes(file.detectedContentType)&&file.state==='ready'&&!file.colourAnalyses?.some(row=>row.key===key)&&(!file.colourAnalyses||file.colourAnalyses.length<32)) {

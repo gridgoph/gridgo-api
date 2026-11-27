@@ -151,3 +151,40 @@ test('invalid colour-page input is refused before queuing or falling back',async
 test('preview rejects malformed file entries with the API validation error',async()=>{
  const {call}=setup();for(const file of [null,[], 'file'])await assert.rejects(call('POST','/express/preview',{files:[file]}),e=>e.status===400&&e.code==='invalid_request');
 });
+
+for(const [label,rates,expected,status] of [['cheaper',{bw:100,light:300,full:500},1300,'moved'],['pricier',{bw:300,light:700,full:900},2500,'price_check']])test(`accept-first ${label} reroute uses original source and exact mixed page settings at next shop rates`,async()=>{
+ const {store,file,call}=setup();
+ const mix={...input,pageRange:'2 - 3',orientation:'landscape'};
+ const {analysis,key,request}=ensureExpressPreview(store,file,mix,'documents',AT);
+ Object.assign(analysis,{status:'ready',outputFileId:'mixed_prepared',completedAt:AT,pages:[{page:2,strongColourBps:1500,printColour:'colour',outputPage:1},{page:3,strongColourBps:5000,printColour:'bw',outputPage:2}]});
+ store.files.push({...structuredClone(file),fileId:'mixed_prepared',objectKey:'private/mixed.pdf',detected:{pageCount:2},colourAnalyses:[],expressRendering:{key,request,sourceFileId:file.fileId},references:[]});
+ store.catalogItems.find(item=>item.supplierId==='shop_b').expressPricing.a4=rates;
+ const map=await call('GET',`/express/shops?${new URLSearchParams({lat:String(location.lat),lng:String(location.lng),files:JSON.stringify([mix]),acceptFirst:'true',sort:'cheapest'})}`);
+ assert.equal(map.body.shops.find(s=>s.supplierId==='shop_a').price.totalMinor,1700);
+ const draft=await call('POST','/express/drafts',{acceptFirst:true,supplierId:'shop_a',location,fulfillmentMode:'pickup',files:[mix]});
+ const placed=await call('POST',`/me/carts/${draft.body.cartId}/checkout`,{looksRight:true,expressConfirmation:draft.body.confirmation});
+ const order=store.orders.find(o=>o.id===placed.body.order.id);assert.equal(order.totalMinor,1700);
+ store.settings.expressLightColourMaxBps=500;
+ store.settings.colourDetection={minSaturationBps:3000,minLightnessBps:500,maxLightnessBps:8500,a3MonochromeMaxBps:1000};
+ const {routeExpressOrders}=await import('../src/express-routes.js');let n=0;
+ await routeExpressOrders({req:{method:'POST'},url:new URL(`http://test/orders/${order.id}/express/decline`),store,user:{id:'shop_a',role:'supplier'},readBody:async()=>({reason:'Capacity unavailable'}),now:()=>AT,id:prefix=>`${prefix}_mix_move_${++n}`});
+ assert.equal(order.expressOrder.reroute.status,status);
+ if(status==='price_check'){assert.equal(order.expressOrder.reroute.candidate.totalMinor,expected);assert.equal(store.orders.length,1);return;}
+ const next=store.orders.find(o=>o.id===order.expressOrder.reroute.nextOrderId);
+ assert.equal(next.supplierId,'shop_b');assert.equal(next.totalMinor,expected);assert.equal(next.state,'supplier_assigned');assert.equal(next.expressOrder.reroute,undefined);
+ const print=next.expressOrder.printSettings[0];assert.equal(print.fileId,'mixed_prepared');assert.equal(print.sourceFileId,'file_art');
+ assert.equal(print.printVersion,2);assert.equal(print.colourMode,'choose');assert.equal(print.colourPages,'2');assert.equal(print.orientation,'landscape');assert.equal(print.pages.range,'2-3');
+ assert.deepEqual(print.pagePricing.pages.map(p=>[p.page,p.tier,p.priceMinor]),[[2,'light',300],[3,'bw',100]]);
+ assert.equal(next.expressOrder.attempt,2);assert.equal(next.expressOrder.previousOrderId,order.id);
+});
+
+
+test('a preview key freezes measurement thresholds while binding all requested print settings',async()=>{
+ const {store,file,call}=setup();const analysis=complete(store,file);
+ store.settings.expressLightColourMaxBps=500;
+ store.settings.colourDetection={minSaturationBps:3000,minLightnessBps:500,maxLightnessBps:8500,a3MonochromeMaxBps:1000};
+ const draft=await call('POST','/express/drafts',{supplierId:'shop_a',location,fulfillmentMode:'pickup',files:[{...input,previewKey:analysis.key}]});
+ const line=store.cartLines.find(l=>l.cartId===draft.body.cartId);assert.equal(line.expressPrint.pagePricing.pages[1].tier,'light');
+ await assert.rejects(call('POST','/express/drafts',{supplierId:'shop_a',location,fulfillmentMode:'pickup',files:[input]}),e=>e.code==='express_preview_pending');
+ await assert.rejects(call('POST','/express/drafts',{supplierId:'shop_a',location,fulfillmentMode:'pickup',files:[{...input,previewKey:analysis.key,orientation:'landscape'}]}),e=>e.code==='express_preview_required');
+});

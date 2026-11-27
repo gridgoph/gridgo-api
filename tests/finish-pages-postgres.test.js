@@ -133,6 +133,12 @@ test(
           const previous = JSON.parse(a.body);
           previous.orders = previous.orders.filter(order => order.state !== 'ready_for_dispatch' || order.riderId);
           assert.equal(b.body, JSON.stringify(previous), `${who} ${path}`);
+        } else if (new URL(path, 'http://test').pathname === '/ops/shops/supplier/performance' && b.body.includes('"expressAcceptance"')) {
+          // The Express accept rate (issue reports DCF1099B and 1A336F51) postdates this
+          // source. Remove only that additive field; every other byte stays strict.
+          const now = JSON.parse(b.body);
+          delete now.performance.expressAcceptance;
+          assert.equal(JSON.stringify(now), a.body, `${who} ${path}`);
         } else assert.equal(b.body, a.body, `${who} ${path}`);
         comparisons++;
       }

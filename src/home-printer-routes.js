@@ -1,4 +1,4 @@
-import { homeProfile, homePrinterStatus, homePin, homeSettings, homeDocuments, homeDocumentType,
+import { homeProfile, homePrinterStatus, homePin, homePickupPoint, homeSettings, homeDocuments, homeDocumentType,
  HOME_FILE_AGREEMENT, nextHomePinChange, homeVerified, notifyHomeStatus } from './home-printers.js';
 import { queueInvalidate, privilegedAdminMemberships } from './notifications.js';
 import { supplierCanWork } from './supplier-verification.js';
@@ -13,6 +13,7 @@ export async function routeHomePrinters({req,url,store,user,readBody,now,id,audi
  const at=now(),h=profile.homePrinter;
  const projection=()=>({version:profile.version||1,homePrinter:homePrinterStatus(store,profile,at),pin:{point:profile.shop,barangay:h.barangay,street:h.street,
   propertyType:h.propertyType,landmark:h.landmark,nextChangeAt:nextHomePinChange(h.pinChangedAt||h.startedAt)},
+  pickupPoint:h.pickupPoint?{point:{lat:h.pickupPoint.lat,lng:h.pickupPoint.lng},kind:h.pickupPoint.kind,description:h.pickupPoint.description}:null,
   ...(staff?{starterEvidence:h.starterEvidence||null,verificationDocuments:homeDocuments(store,profile.userId).map(f=>({fileId:f.fileId,documentType:homeDocumentType(f)}))}:{})});
  if(req.method==='GET'&&!staff?.[2])return {status:200,body:projection()};
  if(staff?req.method!=='POST'||!staff[2]:req.method!=='PATCH')fail(405,'method_not_allowed');
@@ -29,7 +30,7 @@ export async function routeHomePrinters({req,url,store,user,readBody,now,id,audi
   h.starterApprovedAt=at;delete h.starterRevokedAt;
   h.starterEvidence={dateOfBirth:birth,fileIds:reviewed.filter(fileId=>docs.some(f=>f.fileId===fileId)),reviewedBy:user.id,reviewedAt:at};
  } else {
-  if(Object.keys(body).some(k=>!['expectedVersion','online','location','pin','allowHomePickup','filePrivacyAgreement'].includes(k)))fail(400,'invalid_home_printer');
+  if(Object.keys(body).some(k=>!['expectedVersion','online','location','pin','pickupPoint','allowHomePickup','filePrivacyAgreement'].includes(k)))fail(400,'invalid_home_printer');
   if(body.filePrivacyAgreement!==undefined) {
    if(body.filePrivacyAgreement?.accepted!==true||body.filePrivacyAgreement.wording!==HOME_FILE_AGREEMENT)fail(400,'home_file_privacy_required');
    h.privacyAgreement={accepted:true,wording:HOME_FILE_AGREEMENT,at};
@@ -38,6 +39,10 @@ export async function routeHomePrinters({req,url,store,user,readBody,now,id,audi
    if(h.pinConsent?.accepted&&Date.parse(at)<Date.parse(nextHomePinChange(h.pinChangedAt||h.startedAt)))fail(409,'home_pin_change_limited');
    const pin=homePin(body.pin,at);profile.shop=pin.point;Object.assign(h,pin);profile.barangay=h.barangay;delete h.point;h.pinChangedAt=at;h.online=false;h.location=null;
    const identity=store.users.find(u=>u.id===profile.userId);if(identity)identity.shop=structuredClone(profile.shop);
+  }
+  if(body.pickupPoint!==undefined) {
+   const point=homePickupPoint(body.pickupPoint,at);
+   if(point)h.pickupPoint=point;else delete h.pickupPoint;
   }
   if(body.location!==undefined) {
    const p=body.location;
@@ -61,7 +66,7 @@ export async function routeHomePrinters({req,url,store,user,readBody,now,id,audi
    h.online=body.online;h.consecutiveMisses=0;delete h.offlineReason;
   }
  }
- if(!staff&&(body.pin||body.online!==undefined||body.allowHomePickup!==undefined))notifyHomeStatus(store,profile.userId,at,'Home printer availability or pickup settings changed.');
+ if(!staff&&(body.pin||body.pickupPoint!==undefined||body.online!==undefined||body.allowHomePickup!==undefined))notifyHomeStatus(store,profile.userId,at,'Home printer availability or pickup settings changed.');
  profile.version=(profile.version||1)+1;profile.updatedAt=at;
  audit?.(store,{actor:user,action:staff?'home_printer.starter_reviewed':'home_printer.updated',entityType:'supplier_profile',entityId:profile.userId,detail:{version:profile.version}});
  if(staff)for(const recipient of [{userId:profile.userId,role:'supplier'},...privilegedAdminMemberships(store)])(store.notifications||=[]).push({id:id('ntf'),userId:recipient.userId,appRole:recipient.role,type:'home_printer_level',title:'Home printer level updated',body:'Open verification to review your level.',at,read:false});
