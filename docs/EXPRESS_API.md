@@ -1100,3 +1100,10 @@ accept-first offers whose window started in the last 30 days. Declines and misse
 windows count against it. Offers the client withdrew, and offers still open, are
 left out. There is no warning.
 
+
+
+## Shop rating summaries
+
+[Shop ratings](SHOP_RATINGS_API.md) defines structured review tags, private
+comment display and `GET /shops/:supplierId/ratings` for clients choosing a shop.
+Home printers use the same five-review threshold and summary without addresses.

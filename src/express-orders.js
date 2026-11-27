@@ -8,7 +8,7 @@ import { randomInt } from 'node:crypto';
 import { approvedCatalogView } from './catalog-review-state.js';
 import { publicCatalogItem, catalogGroupsForItem, selectedCatalogPrice } from './supplier-catalog.js';
 import { supplierMatchBlockersFor } from './supplier-eligibility.js';
-import { publicShopRating } from './shop-rating.js';
+import { publicShopRating, shopJobsAhead } from './shop-rating.js';
 import { distanceMetersBetween, distanceZoneForDistance, deliveryFeeForDistance } from './operational-model.js';
 import { sameReviewData } from './review-data.js';
 import { expressAvailability } from './shop-availability.js';
@@ -74,8 +74,7 @@ export function expressShopList(source,user,{location,sort='nearest',fulfillment
         :item.pricingUnit==='per_page' && item.subcategoryCode==='document_printing') && publicCatalogItem(listingStore,item,{at}));
     if(!listings.length) continue;
     if(productType==='plans'&&availability?.nightWindow)continue;
-    const jobsAhead=(store.orders||[]).filter(o=>o.supplierId===supplierId && ['supplier_assigned','payment_authorized','production','supplier_self_qc'].includes(o.state)
-      && !(o.state==='supplier_assigned'&&o.expressOrder?.acceptFlow===2&&o.shopAcceptance?.status!=='pending')).length;
+    const jobsAhead=shopJobsAhead(store,supplierId);
     const hours=Math.min(...listings.map(item=>publicCatalogItem(listingStore,item,{at}).turnaroundHours||1));
     let projection;
     try { projection=availability?(projectExpressNightFinish(store,supplierId,hours,at) || projectShopFinish(store,{supplierId,turnaroundHours:hours,units:1,now:at})).projection:{promiseBy:null}; }
