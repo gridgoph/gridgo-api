@@ -1,5 +1,8 @@
 # GRIDGO API
 
+Gated shop onboarding, own tier prices, required payout QR and finish-to-live:
+[Shop onboarding](docs/SHOP_ONBOARDING_API.md). Production defaults retain review.
+
 Private rider document uploads, consent, Operations review and per-document re-upload: [Rider onboarding](docs/RIDER_ONBOARDING_API.md).
 
 Structured review tags, private comments and client shop summaries: [Shop ratings](docs/SHOP_RATINGS_API.md).

@@ -7,6 +7,7 @@ import { supplierMatchBlockersFor } from "./supplier-eligibility.js";
 import { projectShopFinish } from "./order-match.js";
 import { AvailabilityError, fitsDeadline } from "./availability.js";
 import { listingExpress } from "./express.js";
+import { missingShopName } from './supplier-onboarding.js';
 
 // Stable codes and actions are the app contract; messages are display-ready.
 const STEPS = {
@@ -19,6 +20,17 @@ const STEPS = {
   shop_name: ["Add your shop name.", "edit_profile"],
   contact_name: ["Add your shop contact name.", "edit_profile"],
   shop_location: ["Set your shop pickup location.", "edit_profile"],
+  shop_hours: ["Add your opening hours.", "edit_shop_hours"],
+  shop_payment_overdue: ["Open Money to complete the overdue payment.", "open_money"],
+  home_pin_consent_required: ["Confirm your home location privacy consent.", "edit_home_printer"],
+  home_file_privacy_required: ["Confirm how you will protect client files.", "edit_home_printer"],
+  home_starter_review_required: ["Your home printer needs its initial review.", "view_approval"],
+  home_starter_revoked: ["Contact Operations about your home printer access.", "contact_operations"],
+  home_verification_deadline: ["Complete verification to receive new orders.", "view_approval"],
+  home_weekly_cap: ["Your home printer reached its weekly job limit.", "view_approval"],
+  home_fair_play_hold: ["Your home printer is temporarily paused.", "edit_home_printer"],
+  home_away_from_pin: ["Update your location from your home printer.", "edit_home_printer"],
+  home_offline: ["Go online to receive new jobs.", "edit_home_printer"],
   shop_closed: ["Your shop is marked closed for new work.", "open_shop"],
   supplier_membership: ["This account has no supplier membership.", "contact_operations"],
   supplier_not_approved: ["Your shop needs Operations approval before clients can match with it.", "view_approval"],
@@ -80,7 +92,7 @@ function profileCompletion(store, supplierId, legacy) {
   const profile = (store.supplierProfiles || []).find(row => row.userId === supplierId);
   const missing = [...legacy.missing];
   if (profile) {
-    if (!String(profile.shopName || "").trim()) missing.push("shop_name");
+    if (missingShopName(profile.shopName)) missing.push("shop_name");
     if (!String(profile.contactName || "").trim()) missing.push("contact_name");
     if (!profile.shop || !String(profile.shop.label || "").trim()) missing.push("shop_location");
   }
@@ -103,10 +115,10 @@ export function supplierReadinessDetails(store, supplierId, request = null, now 
   const legacy = supplierCatalogReadiness(store, supplierId);
   store = approvedCatalogView(store);
   const profile = (store.supplierProfiles || []).find(row => row.userId === supplierId);
-  const shopBlockers = supplierMatchBlockersFor(store)(supplierId, profile);
+  const shopBlockers = supplierMatchBlockersFor(store,now)(supplierId, profile);
   const items = (store.catalogItems || []).filter(row => row.supplierId === supplierId && !isQuoteListing(row));
   const listings = items.map(item => {
-    const missing = [...new Set([...catalogItemBlockers(store, item, { publicOnly: true }), ...shopBlockers])].map(step);
+    const missing = [...new Set([...catalogItemBlockers(store, item, { publicOnly: true, at:now }), ...shopBlockers])].map(step);
     return { catalogItemId: item.id, ready: missing.length === 0, missing };
   });
   const ready = listings.some(listing => listing.ready);
@@ -143,6 +155,15 @@ export function supplierReadinessDetails(store, supplierId, request = null, now 
     ...legacy,
     operational: { ready, missing: missing.map(step), listings },
     profileCompletion: profileCompletion(store, supplierId, legacy),
+    onboarding: onboardingNext(profile,missing,listings),
     requestEligibility: { evaluated: request !== null, input: request, listings: requestListings },
   };
+}
+
+function onboardingNext(profile,missing,listings) {
+  const best=[...listings].sort((a,b)=>a.missing.length-b.missing.length)[0];
+  const listingCodes=listings.some(l=>l.ready)?[]:best?best.missing.map(m=>m.code):['no_matchable_listing'];
+  const codes=[...new Set([...(missingShopName(profile?.shopName)?['shop_name']:[]),...missing.filter(c=>c!=='no_matchable_listing'),
+    ...(!profile?.schedule?['shop_hours']:[]),...listingCodes])];
+  return {nextMissing:codes.length?step(codes[0]):null,remainingCount:codes.length};
 }

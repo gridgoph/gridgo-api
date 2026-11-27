@@ -108,7 +108,7 @@ const TABLES = [
   { name: "accepted_file_formats", keys: ["code"], columns: ["code", "display_name", "input_kind", "extensions", "mime_types", "active"] },
   { name: "supplier_service_file_formats", keys: ["supplier_service_id", "format_code"], columns: ["supplier_service_id", "format_code"] },
   ...quoteRequestTables,
-  { name: "supplier_catalog_items", keys: ["id"], columns: ["id", "supplier_id", "supplier_service_id", "subcategory_code", "name", "description", "base_price_minor", "pricing_unit", "package_qty", "measure_unit", "minimum_width_milli", "minimum_height_milli", "minimum_length_milli", "minimum_order_quantity", "printer_max_width_feet", "print_layouts", "priced_by_colour", "one_colour", "express", "sample_available", "sample_price_minor", "production_time_review_reasons", "turnaround_mode", "turnaround_hours", "turnaround_days", "turnaround_minutes", "minimum_turnaround_hours", "minimum_turnaround_days", "minimum_turnaround_minutes", "file_format_mode", "active", "suspend_reason", "suspended_at", "suspended_by", "sort_order", "version", "created_at", "updated_at", "review_status", "review_reason", "reviewed_at", "reviewed_by", "approved_snapshot", "template_data", "quote_request_id", "quote_client_id"] },
+  { name: "supplier_catalog_items", keys: ["id"], columns: ["id", "supplier_id", "supplier_service_id", "subcategory_code", "name", "description", "base_price_minor", "pricing_unit", "package_qty", "measure_unit", "minimum_width_milli", "minimum_height_milli", "minimum_length_milli", "minimum_order_quantity", "printer_max_width_feet", "print_layouts", "priced_by_colour", "one_colour", "express", "sample_available", "sample_price_minor", "production_time_review_reasons", "turnaround_mode", "turnaround_hours", "turnaround_days", "turnaround_minutes", "minimum_turnaround_hours", "minimum_turnaround_days", "minimum_turnaround_minutes", "file_format_mode", "active", "suspend_reason", "suspended_at", "suspended_by", "sort_order", "version", "created_at", "updated_at", "review_status", "review_reason", "reviewed_at", "reviewed_by", "approved_snapshot", "template_data", "signup_document_standard", "quote_request_id", "quote_client_id"] },
   { name: "supplier_catalog_express_prices", keys: ["catalog_item_id", "paper_size", "plan_type", "tier_code"], columns: ["catalog_item_id", "paper_size", "plan_type", "tier_code", "price_minor"] },
   { name: "supplier_catalog_colour_sizes", keys: ["catalog_item_id", "size_key"], columns: ["catalog_item_id", "size_key", "paper_size", "width_milli", "height_milli", "tier_set"] },
   { name: "supplier_catalog_colour_prices", keys: ["catalog_item_id", "size_key", "tier_code"], columns: ["catalog_item_id", "size_key", "tier_code", "price_minor"] },
@@ -501,6 +501,7 @@ function rowsFromStore(store) {
     rows.supplier_catalog_items.push({
       id: item.id, supplier_id: item.supplierId, supplier_service_id: item.supplierServiceId,
       template_data: item.templateData ?? null,
+      signup_document_standard: item.signupDocumentStandard === true,
       review_status: item.reviewStatus || "approved", review_reason: item.reviewReason ?? null,
       reviewed_at: item.reviewedAt ?? null, reviewed_by: item.reviewedBy ?? null, approved_snapshot: item.approvedSnapshot ?? null,
       subcategory_code: item.subcategoryCode, name: item.name, description: item.description || "",
@@ -2622,6 +2623,7 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
       ...(expressPricingFromRows(loaded,row.id) ? {expressPricing:expressPricingFromRows(loaded,row.id)} : {}),
       colourPricing: colourPricingFromRows(loaded,row.id),
       express: row.express === true,
+      ...(row.signup_document_standard ? {signupDocumentStandard:true} : {}),
       sampleAvailable: row.sample_available === true,
       samplePriceMinor: row.sample_price_minor ?? null,
       productionTimeReviewReasons: row.production_time_review_reasons || [],
@@ -3290,6 +3292,7 @@ function catalogItemFromListRow(row) {
     printLayouts: row.print_layouts || [],
     pricedByColour: row.priced_by_colour === true, oneColour: row.one_colour === true,
     express: row.express === true,
+    ...(row.signup_document_standard ? {signupDocumentStandard:true} : {}),
     // Sample First (docs/SAMPLE_FIRST_API.md): the shop's raw offer, same as the single read.
     sampleAvailable: row.sample_available === true,
     samplePriceMinor: row.sample_price_minor ?? null,

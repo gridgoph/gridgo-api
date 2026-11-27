@@ -1,5 +1,6 @@
 import { CatalogError } from './supplier-catalog.js';
 import { expressRates } from './express-orders.js';
+import { parseExpressPricing } from './express-print.js';
 
 const fail = field => { throw new CatalogError(400,'invalid_supplier_signup','Choose valid document capabilities and positive integer prices.',{field}); };
 export function documentCapabilities(value) {
@@ -9,10 +10,17 @@ export function documentCapabilities(value) {
   }
   if (typeof value.duplex!=='boolean') fail('duplex');
   const result={papers:[...new Set(value.papers)],colours:[...new Set(value.colours)],duplex:value.duplex,a3PricesMinor:{},finishing:{}};
+  if(value.pricesMinor!=null) {
+    try { result.pricesMinor=parseExpressPricing(value.pricesMinor); } catch { fail('pricesMinor'); }
+    if(Object.keys(result.pricesMinor).some(p=>!result.papers.includes(p)) || result.papers.some(p=>!result.pricesMinor[p])
+      || !result.papers.includes('long') || !result.papers.some(p=>['a4','short'].includes(p))
+      || !['bw','colour'].every(c=>result.colours.includes(c)))fail('pricesMinor');
+  }
   const price=n=>Number.isSafeInteger(n)&&n>0;
   if (result.papers.includes('a3')) for (const colour of result.colours) {
-    if (!price(value.a3PricesMinor?.[colour])) fail(`a3PricesMinor.${colour}`);
-    result.a3PricesMinor[colour]=value.a3PricesMinor[colour];
+    const amount=result.pricesMinor?.a3?.[colour==='bw'?'bw':'full']??value.a3PricesMinor?.[colour];
+    if (!price(amount)) fail(`a3PricesMinor.${colour}`);
+    result.a3PricesMinor[colour]=amount;
   }
   if (value.finishing!=null && (typeof value.finishing!=='object'||Array.isArray(value.finishing))) fail('finishing');
   for (const [key,amount] of Object.entries(value.finishing||{})) {
@@ -87,7 +95,7 @@ export function supplierSupportsDocumentOrder(store,supplierId,order) {
 export function createSignupDocuments(store,supplierId,capability,{id,at}) {
   const rates=expressRates(store.settings);
   const service={id:id('svc'),supplierId,categoryCode:'document_publication',state:'pending_verification',
-    pricingBasis:'per_page',referenceRateMinor:Math.min(...capability.colours.map(c=>rates[c==='bw'?'bwMinor':'colourMinor'])),
+    pricingBasis:'per_page',referenceRateMinor:Math.min(...(capability.pricesMinor?Object.values(capability.pricesMinor).flatMap(p=>Object.values(p)):capability.colours.map(c=>rates[c==='bw'?'bwMinor':'colourMinor']))),
     turnaroundHours:1,turnaroundMinutes:60,standardTurnaroundHours:1,standardTurnaroundMinutes:60,
     documentCapabilities:structuredClone(capability),version:1,createdAt:at,updatedAt:at};
   (store.supplierServices||=[]).push(service);
@@ -107,8 +115,12 @@ export function createSignupDocuments(store,supplierId,capability,{id,at}) {
       priceModifierMinor:0,specBinding:field?{fieldCode:field,value}:null,active:true,sortOrder,version:1,createdAt:at,updatedAt:at}));
   };
   for (const paper of capability.papers) for (const colour of capability.colours) {
-    const price=paper==='a3'?capability.a3PricesMinor[colour]:rates[colour==='bw'?'bwMinor':'colourMinor'];
+    const price=capability.pricesMinor?.[paper]?.[colour==='bw'?'bw':'full']??(paper==='a3'?capability.a3PricesMinor[colour]:rates[colour==='bw'?'bwMinor':'colourMinor']);
     const item=listing(`${paper.toUpperCase()} ${colour==='bw'?'B&W':'Colour'} documents`,price,'document_printing','per_page');
+    if(capability.pricesMinor) {
+      item.expressPricing={[paper]:structuredClone(capability.pricesMinor[paper])};
+      item.signupDocumentStandard=paper!=='a3';
+    }
     group(item,'Paper size',[paper.toUpperCase()],'size');
     group(item,'Colour',[colour==='bw'?'B&W':'Colour']);
     group(item,'Sides',capability.duplex?['One side','Back-to-back']:['One side']);

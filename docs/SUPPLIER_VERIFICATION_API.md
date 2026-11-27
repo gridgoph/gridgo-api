@@ -1,5 +1,8 @@
 # Shop verification and early online jobs
 
+Tier-price onboarding adds production-off release controls and extends database
+payout guards; see [Shop onboarding](SHOP_ONBOARDING_API.md#verification-and-every-payout-path).
+
 Refs gridgoph/gridgo-api#411; issue report F318781A. API contract for the supplier app and dashboard follow-ups. Home printers retain their separate Starter/Verified policy.
 
 A pending shop can receive new online work after sign-up has a location, a document service and a ready receiving QR. Existing active-account, shop-open, membership, live-service, listing review, production/deadline and file gates remain. Operations may independently verify a submitted service line before the shop identity is verified; identity approval is no longer a prerequisite for that line-review action. Rejected or suspended suppliers do not gain access through this policy.

@@ -1,5 +1,5 @@
 import { publicExpressPrint } from './express-shop-pricing.js';
-import { homePrinterStatus, homeVerified, recordHomeOffer, snapshotHomePrinter, homeDistance } from './home-printers.js';
+import { homePrinterStatus, recordHomeOffer, snapshotHomePrinter, homeDistance } from './home-printers.js';
 import { groupExpressMoved, cancelGroupExpressOrder } from './group-express-recovery.js';
 import { supplierVerified, rankVerifiedWithinDistance } from "./supplier-verification.js";
 import { staffExpressProjection } from './shop-staff-order.js';
@@ -72,7 +72,7 @@ export function expressShopList(source,user,{location,sort='nearest',fulfillment
   for(const profile of store.supplierProfiles||[]) {
     const supplierId=profile.userId, supplier=store.users.find(u=>u.id===supplierId);
     if(profile.homePrinter&&(productType!=='documents'||homePrinterStatus(store,profile,at).newOrdersPaused
-      ||fulfillmentMode==='pickup'&&(!homeVerified(store,profile)||!profile.pickupAvailable)))continue;
+      ||fulfillmentMode==='pickup'&&!homePrinterStatus(store,profile,at).allowHomePickup))continue;
     const availability=expressAvailability(profile,store.settings,at,fulfillmentMode);
     const shopAvailability=profile.homePrinter?availability:expressAvailability(profile,store.settings,at,'pickup');
     if((!availability&&!includeClosed) || !supplier || !sameReviewData(user,supplier)
@@ -350,7 +350,8 @@ export function expressCatalogOptions(store,item,print,{ownPrice=false}={}) {
  }
  if(print.paper==='a3'&&!hasA3)expressFail(409,'express_listing_configuration_required');
  const priced=selectedCatalogPrice(store,item,optionIds);
- const rateMinor=ownPrice||print.paper==='a3'||print.productType==='plans'?priced.effectiveUnitPriceMinor:expressRates(store.settings)[print.colour==='bw'?'bwMinor':'colourMinor'];
+ const ownTier=item.expressPricing?.[print.paper]?.[print.colour==='bw'?'bw':'full'];
+ const rateMinor=ownTier??(ownPrice||print.paper==='a3'||print.productType==='plans'?priced.effectiveUnitPriceMinor:expressRates(store.settings)[print.colour==='bw'?'bwMinor':'colourMinor']);
  if(!Number.isSafeInteger(rateMinor)||rateMinor<=0)expressFail(409,'express_listing_configuration_required');
  return {optionIds,paperStock,rateMinor};
 }
