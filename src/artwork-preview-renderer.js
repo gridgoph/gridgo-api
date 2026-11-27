@@ -36,7 +36,7 @@ function run(command, args, directory, stage) {
   });
 }
 
-export async function renderArtworkPreview(source, type) {
+export async function renderArtworkPreview(source, type, {paperColour='white'} = {}) {
   // Refuse Word before reading bytes or launching any interpreter, including
   // when this renderer is called directly rather than through the resolver.
   if (type === DOCX_CONTENT_TYPE) throw previewError('preview_word_not_available', 422);
@@ -47,7 +47,11 @@ export async function renderArtworkPreview(source, type) {
     if (!size || size > PREVIEW_MAX_SOURCE) throw previewError('preview_source_too_large', 422);
     const pdf = path.join(directory, 'source.pdf');
     await fs.copyFile(source, pdf);
-    await run('pdftoppm', ['-f', '1', '-l', '1', '-singlefile', '-scale-to', '1600', '-png', pdf, path.join(directory, 'page')], directory, 'rasterization');
+    if(paperColour==='blue') {
+      await run('pdftocairo',['-f','1','-l','1','-singlefile','-scale-to','1600','-png','-transp',pdf,path.join(directory,'transparent')],directory,'rasterization');
+      // ImageMagick 7 HDRI needs this bounded cache for a 1600px RGBA preview.
+      await run('convert',['-limit','memory','128MiB','-limit','map','128MiB','-limit','disk','0','-limit','thread','1',path.join(directory,'transparent.png'),'-background','#82b5e6','-alpha','remove','-alpha','off',path.join(directory,'page.png')],directory,'paper_preview');
+    } else await run('pdftoppm', ['-f', '1', '-l', '1', '-singlefile', '-scale-to', '1600', '-png', pdf, path.join(directory, 'page')], directory, 'rasterization');
     const output = path.join(directory, 'page.png');
     const result = await fs.stat(output).catch(() => null);
     if (!result?.size || result.size > MAX_OUTPUT) throw previewError('preview_output_invalid');

@@ -283,6 +283,7 @@ export function defaultOperationalSettings() {
     testerSignupFormUrlTemplate: null,
     operatingHours: defaultOperatingHours(),
     expressRates: expressRates(),
+    expressLightColourMaxBps: 2500,
     groupPaymentTimeoutMinutes: 10,
     serviceFeeRateBps: 1_000,
     organizationDiscountRateBps: 500,
@@ -363,6 +364,7 @@ export function validateOperationalSettings(settings) {
   if (settings?.clientShopChatContactThreshold !== undefined && (!Number.isSafeInteger(settings.clientShopChatContactThreshold) || settings.clientShopChatContactThreshold < 1 || settings.clientShopChatContactThreshold > 20)) {
     fail(400, 'invalid_chat_contact_threshold', 'Choose an integer between 1 and 20.');
   }
+  if (settings?.expressLightColourMaxBps !== undefined && (!Number.isSafeInteger(settings.expressLightColourMaxBps) || settings.expressLightColourMaxBps<0 || settings.expressLightColourMaxBps>10000)) fail(400,'invalid_express_light_colour_threshold','Choose a Light colour threshold from 0 to 10000 basis points.');
   if (settings?.colourDetection !== undefined) validateColourSettings(settings.colourDetection);
   if (settings.serviceFeeSchedule) validateFeeSchedule(settings.serviceFeeSchedule);
   if (settings.scheduledServiceFee) {

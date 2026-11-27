@@ -857,6 +857,177 @@ Express uses artwork review, then shop acceptance, then client QR payment before
 work starts. Standard Express retains checkout payment. See the exact calls in
 [Supplier sign-up](SUPPLIER_SIGNUP_API.md#capability-aware-matching-and-a3-express).
 
+## Per-page preview, orientation and Plans (CEB14BA0)
+
+Apply forward migrations `1795788000000_express_print_pricing` and
+`1795788001000_express_print_sources` before this API release. Existing orders,
+legacy `colour:"bw"|"colour"` requests and their prices remain unchanged. New
+clients opt into this contract with `printVersion:2`, `colourMode`, `orientation`
+or `planType`; omitting the legacy `colour` also selects the new contract.
+
+### Prepare the exact print result
+
+Signed-in clients call `POST /express/preview` with one to twenty owned, ready
+artwork uploads and their settings. This queues bounded asynchronous work on the
+existing colour worker. It returns `202 {files:[{fileId,analysisKey,status}]}` while
+pending; repeat the same POST to read the result without adding another job.
+A failed job may be retried with top-level `retry:true` after 30 seconds. No
+renderer runs inside the HTTP mutation transaction.
+
+```json
+{
+  "productType":"documents",
+  "files":[{
+    "fileId":"file_document",
+    "printVersion":2,
+    "paper":"a4",
+    "colourMode":"choose",
+    "colourPages":"2, 8-9",
+    "orientation":"portrait",
+    "layout":"fit_to_paper",
+    "sides":"one",
+    "copies":2,
+    "acceptedWarnings":[]
+  }]
+}
+```
+
+Document paper is `a4 | short | long | a3`. `colourMode` is `auto` (default),
+`all_bw`, or `choose`. Choose sends `colourPages`, a range in original one-based
+page numbers; an empty string selects no colour pages. `pageRange` independently
+selects the pages to print; every chosen colour page must belong to that range.
+Copies multiply the selected-page subtotal exactly once. No duplex discount or
+extra page multiplier is applied.
+
+Every selected page is measured on the selected paper with the selected layout
+and orientation, using the existing strong-colour saturation/lightness rules.
+Zero strong colour is B&W; positive coverage up to the inclusive Light threshold
+is Light; coverage above it is Full. `settings.expressLightColourMaxBps` defaults
+to 2500 (25%) and accepts integer 0–10000. Only Super Admin may change it through
+`PATCH /settings` with `expectedVersion` and a reason; the existing audit applies.
+The threshold and colour-detection settings are frozen in each rendering request.
+New settings never rewrite accepted evidence.
+Carry the returned `analysisKey` as `files[].previewKey` on map/draft calls to
+pin that prepared specification across later settings edits. The key is resolved
+only under the owning original file and must match every normalized choice;
+changing paper, orientation, layout or page selection requires a new preview.
+Accept-first reroutes carry this key automatically.
+
+Auto uses the measured tier. All B&W converts every selected page to grayscale.
+Choose converts unselected colour pages to grayscale; selected pages use their
+measured tier. A zero-strong-colour page is converted to grayscale even if its
+original contains pale colours. Ready results include `pages` with original
+`page`, `outputPage`, `strongColourBps` and `printColour`. Draft `printPreview` and
+cart `expressPrint` additionally expose measured/applied tiers, `youSet` and counts
+without shop page prices.
+
+Document orientation is `auto | portrait | landscape`; Auto follows each source
+page independently. Layout is `fit_to_paper | actual_size_centered |
+actual_size_original_position` (Fit to page, Centred, Top-left). Measurement and
+production share the same placement calculation, including margins and clipping.
+The ready `outputFileId` is a private PDF containing exactly the selected pages
+with colour conversion and placement already applied. The client can use its
+normal authorized download and preview endpoints; the PDF contains every output
+page for the viewer. Originals remain separate.
+
+### Shop rates and exact map totals
+
+Shop owners set `expressPricing` on the existing catalogue create/PATCH routes.
+It is reviewed with the other sensitive listing prices, and pending revisions
+never change client quotes. Prices are positive safe integer PHP minor units in
+whole pesos (multiples of 100). Each configured document size has all three rates:
+
+```json
+{"expressPricing":{
+  "a4":{"bw":200,"light":400,"full":600},
+  "long":{"bw":300,"light":500,"full":700},
+  "plans":{
+    "whiteprint":{"20x30":{"bw":3000,"colour":5000}},
+    "blue_ink":{"24x36":{"blue":4500}},
+    "blue_paper":{"24x36":{"blue":5000}}
+  }
+}}
+```
+
+Until a shop configures document tiers, B&W uses its approved B&W catalogue
+selection price and Full uses its approved colour selection price; Light defaults
+to Full. Compatible fixed-colour variants under the same shop service may supply
+those two prices. There is no substitution from platform rates or area guides.
+A shop missing a required compatible rate is omitted from the priced map choices.
+Legacy requests and existing order snapshots keep their previous pricing.
+
+Use the same `files` array for preview, map and draft. Both `POST /express/shops`
+and `GET /express/shops?lat=...&lng=...&files=<URL-encoded JSON array>` quote through
+the same draft/pricing function used by checkout. GET also accepts
+`productType=documents|plans` and `acceptFirst=true|false`; for delivery, lat/lng identify the destination.
+POST continues to accept the labelled `dropoff`. `cheapest` sorts by the complete
+client total. Pins use `price.totalMinor`, which equals `quote.totalMinor` and the
+subsequent checkout total for unchanged inputs. Mixed page rates set
+`price.perPageMixed:true`; its displayed per-page rate is the rounded-up average.
+Never rebuild the total from that display rate. Legacy GET without files retains
+its released response and cannot quote a cheapest total.
+
+### Plans
+
+New Plans requests use `productType:"plans"`, `planType:"whiteprint"|"blue_ink"|
+"blue_paper"`, and exact paper `20x30 | 24x36 | 30x40 | a2 | a1 | a0`.
+Orientation must be Auto and sides must be One. Whiteprint accepts
+`colour:"bw"|"colour"`; Blue ink and Blue paper require `colour:"blue"` and convert
+all marks to blue ink. Blue paper uses a blue viewer backdrop; unmarked areas in
+the production PDF remain transparent so the printer adds no background ink.
+Signed PNG previews already simulate the paper colour. A PDF viewer should use
+the returned `paperColour` as its canvas backdrop, without adding that backdrop
+to the production document. They use the
+shop's explicit price for that exact type, dimensions and ink; A2/A1 are never
+aliases for 20×30/24×36. Unconfigured types/sizes are unavailable rather than
+receiving an invented price. Plan prices are fixed per printed page, not the
+three document tiers. Home printers continue to offer documents only.
+
+### Bounds, fallback and production privacy
+
+Preparation accepts PDF, PNG, JPEG and WebP, up to 64 MiB and 200 PDF pages.
+PDF rasterization preserves at least 300 dpi at the final placement (rather
+than stretching a small source raster), with a 10000-pixel long-side cap and
+100 MiB decoded-page limit; oversized pages fail explicitly rather than silently
+lowering resolution. The complete private PDF is capped at 64 MiB. Jobs run in a bounded worker thread, off the HTTP event loop, with the
+existing single renderer lock, restricted subprocess environment, per-command
+25-second timeout, roughly 90-second overall budget and temporary-file cleanup.
+At most 32 immutable analysis/render variants are retained per upload.
+
+Pending preparation returns `409 express_preview_pending` from draft/map quoting;
+clients poll preview before choosing a shop. On render failure, unsupported input
+or exhausted variant capacity, preview exposes an explicit original-file fallback.
+A draft can proceed using one whole-file colour mode: B&W for All B&W, colour for
+Auto/Choose, or the selected plan ink. It retains the selected page range and
+charges the shop's whole-file B&W/Full or plan rate for every selected page.
+`printPreview[].renderStatus:"fallback"` and `fallback` identify the reason,
+original-file use and applied colour mode. Orientation/layout/colour conversion
+are not baked into fallback originals; show this limitation before the client
+accepts `looksRight` and the settings-bound `expressConfirmation`.
+
+A ready order gives the shop only its prepared production PDF. Its print settings
+include `outputAlreadyApplied:true` and `productionPrint` (all output pages,
+actual size, Auto orientation, colours as prepared). Do not apply the original
+page range, fit or grayscale conversion a second time. The original upload and
+original guidance are retained as immutable Operations evidence; supplier file
+reads cannot follow that original reference. Existing job/privacy gates still
+apply. Per-page shop prices remain private from clients.
+
+The accepted render identity, file choice, page prices and fallback are immutable.
+Later worker completion, threshold edits or shop price changes cannot silently
+switch an accepted fallback to another file or change its total. Automatic
+reroutes also retain the accepted whole-file fallback mode, even when a render
+has since succeeded, while using the next shop’s own whole-file rate. A fresh draft
+and preview confirmation are required to adopt a later successful render.
+
+Legacy automatic reassignment cannot transfer a version-2 shop-priced mix to a
+different shop at the first shop's rates: it requires a new shop choice/quote.
+Accept-first automatic reroutes reconstruct from the staff-private
+`sourceFileId` (or `fileId` on original-file fallback) and preserve `printVersion`,
+`colourMode`, `colourPages`, `orientation`, `planType`, the frozen preview key, paper, layout and page range.
+The shop-facing `fileId` is the prepared PDF and must not be used as a new source
+with the original page range or layout reapplied.
+
 ## Accept-first Express: send, accept, then pay
 
 Accept-first is the Express flow for issue reports DCF1099B and 1A336F51. The
@@ -1099,7 +1270,6 @@ Supplier Performance adds `expressAcceptance`:
 accept-first offers whose window started in the last 30 days. Declines and missed
 windows count against it. Offers the client withdrew, and offers still open, are
 left out. There is no warning.
-
 
 
 ## Shop rating summaries

@@ -1341,6 +1341,7 @@ export function privateCatalogItem(store, item) {
     pricedByColour: item.pricedByColour === true,
     oneColour: item.oneColour === true,
     colourPricing: canonicalColourPricing(item.colourPricing),
+    ...(item.expressPricing == null ? {} : {expressPricing:structuredClone(item.expressPricing)}),
     ...(item.pricingUnit === "per_page" ? { prepareFile: { recommendedDpi: { min: 300, max: 600 }, resolutionAffectsPrice: false } } : {}),
     express: listingExpress(item),
     sampleAvailable: item.sampleAvailable === true,

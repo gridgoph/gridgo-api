@@ -81,15 +81,20 @@ export function strongPixel(r,g,b,settings) {
 
 // Sample a bounded, uniformly spaced paper grid. White paper outside the file
 // is part of the denominator. Actual-size placements clip at the paper edges.
-export function measurePrintedColour(page, paper, layout, settings) {
+export function printedPlacement(page, paper, layout, orientation = 'auto') {
+  if (!['auto','portrait','landscape'].includes(orientation)) fail('invalid_express_orientation');
   if (paper && layout !== 'fit_to_paper' && !(page.widthMilli > 0 && page.heightMilli > 0)) fail('colour_physical_size_unknown', {}, 422);
   const sourceW = page.widthMilli || page.width, sourceH = page.heightMilli || page.height;
   let targetW = paper?.widthMilli || sourceW, targetH = paper?.heightMilli || sourceH;
-  // Same automatic feed orientation as the print-layout contract.
-  if (paper && sourceW !== sourceH && targetW !== targetH && (sourceW > sourceH) !== (targetW > targetH)) [targetW,targetH] = [targetH,targetW];
+  const landscape = orientation === 'auto' ? (sourceW === sourceH ? targetW > targetH : sourceW > sourceH) : orientation === 'landscape';
+  if (targetW !== targetH && (targetW > targetH) !== landscape) [targetW,targetH] = [targetH,targetW];
   const scale = layout === 'fit_to_paper' ? Math.min(targetW/sourceW,targetH/sourceH) : 1;
   const offsetX = layout === 'actual_size_original_position' ? 0 : (targetW-sourceW*scale)/2;
   const offsetY = layout === 'actual_size_original_position' ? 0 : (targetH-sourceH*scale)/2;
+  return {sourceW,sourceH,targetW,targetH,scale,offsetX,offsetY};
+}
+export function measurePrintedColour(page, paper, layout, settings, orientation = 'auto') {
+  const {sourceW,sourceH,targetW,targetH,scale,offsetX,offsetY} = printedPlacement(page,paper,layout,orientation);
   const width = Math.max(1,Math.round(800*targetW/Math.max(targetW,targetH)));
   const height = Math.max(1,Math.round(800*targetH/Math.max(targetW,targetH)));
   let strong = 0;

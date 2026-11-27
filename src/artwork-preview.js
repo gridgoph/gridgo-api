@@ -16,6 +16,7 @@ export function publicArtworkPreview(file) {
   const supported = DOCUMENTS.includes(file.detectedContentType) || IMAGES.includes(file.detectedContentType);
   const word = file.detectedContentType === DOCX_CONTENT_TYPE;
   return {
+    ...(file.expressRendering?.request?.express?.paperColour==='blue'?{paperColour:'blue'}:{}),
     status: !supported ? 'unsupported' : IMAGES.includes(file.detectedContentType) ? 'ready' : file.preview?.status || 'pending',
     downloadUrlPath: `/files/${file.fileId}/preview-url`, retryPath: `/files/${file.fileId}/preview`,
     ...(word ? { error: 'preview_word_not_available' } : file.preview?.error ? { error: file.preview.error } : {}),
@@ -64,7 +65,7 @@ export function createArtworkPreviews({ database, load, save, storage, render = 
             await pipeline(await storage.getObject(file.objectKey), limit, fs.createWriteStream(input, { mode: 0o600 }), { signal: AbortSignal.timeout(30_000) });
             if (size !== file.size) throw previewError('preview_source_mismatch', 409);
           }
-          const bytes = await render(input, file.detectedContentType);
+          const bytes = await render(input, file.detectedContentType, {paperColour:file.expressRendering?.request?.express?.paperColour||'white'});
           const originalKey = file.objectKey;
           await database.query('SELECT pg_advisory_xact_lock(hashtext($1))', [DOMAIN_MUTATION_LOCK]);
           store = await load(); file = store.files.find(row => row.fileId === fileId);

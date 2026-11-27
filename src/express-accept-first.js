@@ -1,3 +1,4 @@
+import { EXPRESS_ACCEPTED_ORIGINAL } from './express-shop-pricing.js';
 import { expressFail as fail, startExpressAcceptance, onAcceptFirstRefusal, publicExpress, declineExpress } from './express-orders.js';
 import { PICKUP_PIN_VERSION } from './pickup-pin.js';
 import { createExpressDraft, checkoutBasket, quotedExpressPrinters, withClientCatalog } from './order-match-routes.js';
@@ -75,7 +76,11 @@ function draftBody(order) {
     acceptFirst: true, fulfillmentMode: order.fulfillmentMode, location: { lat: e.location.lat, lng: e.location.lng },
     ...(order.fulfillmentMode === 'delivery' ? { dropoff: { lat: order.dropoff.lat, lng: order.dropoff.lng, label: order.dropoff.label } } : {}),
     productType: r.productType || 'documents', sort: r.sort, shopsOnly: r.shopsOnly === true, verifiedOnly: r.verifiedOnly === true,
-    files: e.printSettings.map(print => ({ fileId: print.fileId, copies: print.copies, colour: print.colour, paper: print.paper, sides: print.sides,
+    files: e.printSettings.map(print => ({ fileId: print.sourceFileId || print.fileId, copies: print.copies, colour: print.colour, paper: print.paper, sides: print.sides,
+      // The shop receives a prepared PDF; re-price from its private original so
+      // selected pages and layout are applied exactly once at every attempt.
+      ...(print.printVersion === 2 ? { printVersion:2, previewKey:print.analysisKey, [EXPRESS_ACCEPTED_ORIGINAL]:print.renderStatus==='fallback', colourMode:print.colourMode, colourPages:print.colourPages,
+        orientation:print.orientation, planType:print.planType } : {}),
       layout: print.layout, note: print.note || undefined, acceptedWarnings: print.acceptedWarnings || [], pageRange: print.pages?.range ?? null })),
   };
 }

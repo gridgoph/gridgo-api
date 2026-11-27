@@ -7,6 +7,7 @@ import path from 'node:path';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { DOMAIN_MUTATION_LOCK } from './database.js';
+import { renderExpressPrintInWorker } from './express-print-worker.js';
 import { renderColourAnalysis, COLOUR_MAX_SOURCE } from './colour-renderer.js';
 import { colourPriceChecks } from './colour-analysis.js';
 import { privilegedAdminMemberships, queueInvalidate } from './notifications.js';
@@ -14,7 +15,7 @@ import { privilegedAdminMemberships, queueInvalidate } from './notifications.js'
 // One bounded job at a time across replicas; renderer lock is independent of
 // the domain lock, so uploads, orders and payments proceed during conversion.
 // Pending records survive crashes and are picked up at startup/lifecycle tick.
-export function createColourWorker({database,load,loadSource,loadForSave,save,storage,render=renderColourAnalysis,now=()=>new Date().toISOString(),id=()=>crypto.randomUUID()}) {
+export function createColourWorker({database,load,loadSource,loadForSave,save,storage,render=renderColourAnalysis,renderExpress=renderExpressPrintInWorker,now=()=>new Date().toISOString(),id=()=>crypto.randomUUID()}) {
   let busy = false;
   return async function drain() {
     if (busy) return;
@@ -31,7 +32,7 @@ export function createColourWorker({database,load,loadSource,loadForSave,save,st
         const job = file?.colourAnalyses.find(job => job.status === 'pending');
         if (!job) return;
         const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(),'gridgo-colour-source-'));
-        let pages, errorCode;
+        let pages, errorCode, production;
         try {
           if (file.size > COLOUR_MAX_SOURCE) throw Object.assign(new Error(),{code:'colour_source_too_large'});
           if ((await storage.statObject(file.objectKey)).size !== file.size) throw Object.assign(new Error(),{code:'colour_source_mismatch'});
@@ -40,7 +41,8 @@ export function createColourWorker({database,load,loadSource,loadForSave,save,st
           const limit = new Transform({transform(chunk,encoding,callback) {size+=chunk.length;callback(size > file.size || size > COLOUR_MAX_SOURCE ? new Error('source_limit') : null,chunk);}});
           await pipeline(await storage.getObject(file.objectKey),limit,fs.createWriteStream(input,{mode:0o600}),{signal:AbortSignal.timeout(30000)});
           if (size !== file.size) throw Object.assign(new Error(),{code:'colour_source_mismatch'});
-          pages = await render(input,file,job.request);
+          if (job.request.express) { production = await renderExpress(input,file,job.request); pages = production.pages; }
+          else pages = await render(input,file,job.request);
         } catch (error) {errorCode = /^colour_[a-z_]+$/.test(error.code || '') ? error.code : 'colour_detection_failed';}
         finally {await fs.promises.rm(directory,{recursive:true,force:true});}
         await database.query('SELECT pg_advisory_xact_lock(hashtext($1))',[DOMAIN_MUTATION_LOCK]);
@@ -48,6 +50,17 @@ export function createColourWorker({database,load,loadSource,loadForSave,save,st
         const current = latest.files.find(row => row.fileId === file.fileId && row.state === 'ready' && !row.deleteRequestedAt && row.objectKey === file.objectKey);
         const pending = current?.colourAnalyses.find(row => row.key === job.key && row.status === 'pending');
         if (!pending) return;
+        if (production && !errorCode) {
+          const outputFileId=id('file'), objectKey=`artwork/express/${outputFileId}.pdf`;
+          try {
+            await storage.putObject({key:objectKey,body:production.bytes,size:production.bytes.length,contentType:'application/pdf',privateFinancial:true});
+            latest.files.push({fileId:outputFileId,objectKey,ownerId:current.ownerId,purpose:'artwork',originalFilename:'print-ready.pdf',
+              declaredContentType:'application/pdf',detectedContentType:'application/pdf',state:'ready',size:production.bytes.length,
+              detected:{pageCount:pages.length},artworkCheck:{status:'passed',checkedAt:now()},createdAt:now(),readyAt:now(),references:[],
+              expressRendering:{key:job.key,request:structuredClone(job.request),sourceFileId:current.fileId}});
+            pending.outputFileId=outputFileId;
+          } catch {errorCode='colour_print_storage_failed';}
+        }
         Object.assign(pending,{status:errorCode?'failed':'ready',completedAt:now(),...(errorCode?{error:errorCode}:{pages})});
         if (!errorCode && current.detected && job.request.layout === 'source') current.detected.pageCount = pages.length;
         const checks = colourPriceChecks(latest).filter(check => check.colourPricing.pages.some(page => page.fileId === current.fileId && page.analysisKey === job.key));

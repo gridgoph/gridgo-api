@@ -1,3 +1,4 @@
+import { parseExpressPricing } from './express-print.js';
 import { routeProductTemplates } from './product-templates.js';
 import { expandProductionTimeBody, clearProductionTimeReview, productionTimeFields, productionTimeAudit } from './production-time.js';
 import { isQuoteListing } from "./quote-listings.js";
@@ -1077,6 +1078,7 @@ async function routeSupplierCatalogExisting({ req, url, store, user, readBody, i
       updatedAt: at,
     };
     Object.assign(item, parseColourListing(body, item));
+    if (Object.hasOwn(body,'expressPricing')) item.expressPricing=parseExpressPricing(body.expressPricing);
     Object.assign(item, parseSampleListing(body, item, fail));
     if (!Array.isArray(store.catalogItems)) store.catalogItems = [];
     if (!Array.isArray(store.catalogOptionGroups)) store.catalogOptionGroups = [];
@@ -1131,6 +1133,7 @@ async function routeSupplierCatalogExisting({ req, url, store, user, readBody, i
     // Which layouts the shop prints, replaced as a set like the tiers below.
     if (Object.hasOwn(body, "printLayouts")) item.printLayouts = parsePrintLayouts(body.printLayouts, fail);
     Object.assign(item, parseColourListing(body, item));
+    if (Object.hasOwn(body,'expressPricing')) item.expressPricing=parseExpressPricing(body.expressPricing);
     // Tiers are small ordered sets a shop edits as a whole -- add a break,
     // change a price, drop a speed -- so they are replaced wholesale rather
     // than through six more routes each with its own version check.
