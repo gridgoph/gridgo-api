@@ -5,7 +5,122 @@ The supplier app and supplier web use the same Clerk accounts and routes. Shop
 membership is separate from GRIDGO's platform `staff` (hub) role; joining a shop
 never grants a supplier business, hub, Operations, or Super Admin membership.
 
-## Identity and launch compatibility
+## Role QR joins (report 628471C9)
+
+Use this contract for new personal-phone joins. Owner, Manager and Staff are
+shop roles, separate from the person's client or other GRIDGO memberships.
+
+| Access | Owner | Manager | Staff |
+| --- | --- | --- | --- |
+| Accept and print jobs | Yes | Yes | Yes |
+| Chat with clients | Yes | Yes | Yes |
+| Change prices and hours | Yes | Yes | No |
+| Add or remove Staff | Yes | Yes | No |
+| Add, change or remove Managers | Yes | No | No |
+| See Money, weekly settlement and pay GRIDGO | Yes | No | No |
+
+Navigation: Staff use Jobs · Messages · Team; Managers add Leaderboards; Owners
+also have Money. Hiding tabs complements the server's existing route and
+projection checks; it never grants access.
+
+### Issue, preview and join
+
+`POST /me/shop-team/invites` with `{"kind":"qr","role":"manager"}` or
+`{"kind":"qr","role":"staff"}` returns `201`:
+
+```json
+{"invite":{"id":"invite_123","shopId":"shop_123","kind":"qr","identity":null,"role":"staff","refreshSeconds":60,"createdAt":"2026-11-28T00:00:00.000Z","expiresAt":"2026-11-28T00:01:00.000Z","claimedBy":null,"status":"open"},"token":"<opaque token>","delivery":"scan_qr","refreshSeconds":60}
+```
+
+Only an Owner issues Manager QR codes. Managers issue Staff QR codes only and
+cannot replace or revoke Manager codes. Role is immutable on the issued code;
+claim JSON cannot change it or request Owner. The token is returned only at
+issuance and is hashed in PostgreSQL. Encode it in the existing fragment-based
+join URL; never put it in query strings, logs or notification bodies.
+
+The app displays a countdown to `expiresAt`, requests a fresh code when it
+expires and replaces the visible QR. Creating a new QR invalidates every open
+code for that shop and role; the other role's code remains usable.
+`POST /me/shop-team/invites/:id/replace` also preserves the stored role and
+revokes the old token atomically. For an expired/used code, issue a new role QR
+rather than replacing it. No background rotation or reusable token is required.
+
+After obtaining their **own Clerk session**, the joining person calls
+`POST /auth/shop-invites` with `{"token":"<opaque token>"}`. It returns
+`{invite,shop:{id,name}}` for a valid role QR without consuming it, exposing
+account details or creating a person. An empty body retains the legacy verified
+email/phone invite discovery response. Invalid, used, revoked and expired codes
+have the same refusal codes as claims. Sign-in is required for preview.
+
+`POST /auth/shop-invites/claim` with `{"token":"<opaque token>","name":"Alex"}`
+returns `{member,shop}`. Name is optional and initializes only a new GRIDGO
+person. It reuses the user mapped to the signed-in Clerk subject, including an
+existing client; otherwise it creates that subject's separate user. It never
+links by email, changes an existing person's profile, or creates a shop/platform
+supplier membership. A role QR does not require an additional mobile check;
+Clerk remains the sole session provider. The API neither issues a session nor
+signs the person in as the shop owner. Clerk persists the person's session on
+their phone.
+
+The membership is immediately **active**, with exactly the stored Manager or
+Staff role. No second owner-approval step is needed for an explicitly chosen
+role QR. The issuer's current active membership and account/shop standing are
+checked again at claim time; a removed, suspended or demoted issuer cannot
+leave an unauthorized grant. A code works once across all API processes. The
+deadline is exclusive: a claim at `expiresAt` is expired.
+
+Read `/auth/me/supplier` and send `X-GRIDGO-Shop-Id` for subsequent shop calls.
+Team reads expose bounded roster fields, never another person's account,
+private contact details, credentials or finance. Upload an optional team photo
+through the existing private photo path **after** joining.
+
+### Refresh setting and removal
+
+Super Admin updates `shopTeamJoinQrRefreshSeconds` using the existing
+`PATCH /settings` with `expectedVersion` and `reason`; it defaults to **60** and
+accepts integer seconds from **15 to 300**. Operations and shop roles cannot
+edit it. Existing settings audit records capture the change. Each QR snapshots
+its duration/deadline; later setting edits affect newly issued codes only.
+
+The Owner removes a person with `DELETE /me/shop-team/members/:userId` (Managers
+can remove Staff only). Access ends at commit through the existing membership,
+notification and SSE checks. Their own Clerk account and client role remain.
+For a lost/new phone, remove first, then have the person sign in to their own
+account and claim a **new** QR; rejoining reuses the membership and grants only
+the new code's role. Removal revokes outstanding role QR codes for both roles
+in that shop, so a retained unused code cannot restore removed access. Refresh
+the visible QR after removal. Existing joined teammates keep their access.
+
+Additional errors: `400 invalid_invite_role`, `invalid_shop_join_qr_refresh`,
+`invalid_shop_invite_claim`; `403 shop_invite_issuer_unavailable`.
+
+### Additive rollout and shared-login transition
+
+Apply forward migration `1795801200000` before this API. It adds nullable invite
+role/duration columns and extends immutable deadline validation. Existing
+24/48-hour invitations, memberships, assignments, Clerk sessions and shared
+shop devices remain intact. Requests without an explicit QR `role` retain the
+legacy invite/approval contract below. Existing shared-login and selected PIN
+workers can continue working while the new app rolls out; this release forces
+no logout, enrollment or session conversion.
+
+The companion app switches each personal phone individually: retain access
+until the worker can sign in to their own Clerk account, scan/claim a role QR,
+then refresh the bounded supplier bootstrap and clear cached owner data. Stop
+using the shared owner login on that phone after successful joining. Releasing
+this API alone cannot identify or revoke individual people who still share an
+owner's Clerk session; owners must complete that app transition before treating
+those devices as separately controlled people.
+
+New phone-free PIN records and role updates accept `role:"staff"` only. Existing
+PIN Managers keep working until they join with their own account; no migration
+downgrades or removes them. PINs never sign a personal phone into another
+account. Do not collect a shared-device PIN when claiming a role QR. Keep the
+PIN selector only for Staff without a phone on the shared shop device. Enable
+new role QR screens after every API process serves this release; older binaries
+know only the legacy pending Staff interpretation.
+
+## Legacy identity and launch compatibility
 
 A shop ID is its existing supplier user ID. Migration `1794192200000` adds shop
 memberships and backfills every supplier membership as that shop's active
@@ -380,7 +495,7 @@ claim, revoke or replace existing 24-hour invitations despite omitting the new
 column. The 24/48-hour check and update immutability/consumption guards remain
 in force; this migration does not rewrite existing invitations.
 Manager registration while the owner is away and owner SMS confirmation/dispute
-remain separate product work. Manager/PIN extensions below retain invite approval.
+remain separate product work. Legacy Manager/PIN extensions below retain invite approval; explicit role QR joins use the immediate-access contract above.
 
 Companion releases must make these changes:
 
@@ -416,7 +531,7 @@ existing Clerk bearer, `X-GRIDGO-Role: supplier` and explicit
 `PATCH /me/shop-team/members/:userId` now accepts `role: manager` in addition
 to Owner/Staff, plus `jobAlerts: boolean` and `photoFileId: string | null`.
 Approval/removal and the last-owner guard remain unchanged. Only Owners may
-promote/demote Owners or Managers. Managers may invite, replace/revoke invites,
+promote/demote Owners or Managers. Managers may invite Staff, replace/revoke Staff invites,
 approve/remove Staff and edit Staff alerts/photos. They cannot modify themselves
 or other Managers, promote anyone, or change the shop's team settings.
 
@@ -469,8 +584,9 @@ platform memberships. They cannot sign in or work remotely using a PIN.
 | `POST /me/shop-team/working/lock` | `{}` | `{locked:true}` |
 
 A PIN is exactly four decimal digits sent as a **string**, preserving leading
-zeroes. Names are 1–100 trimmed characters. PIN member role is `staff` (default)
-or `manager`; only an Owner may create/promote a Manager or edit a Manager.
+zeroes. Names are 1–100 trimmed characters. New PIN members and role updates
+accept only `staff` (default). Existing PIN Managers remain usable during the
+transition; only an Owner may edit or remove them.
 `jobAlerts` defaults true. `member` contains `id,shopId,kind:"pin",name,role,status,
 jobAlerts,photoFileId,createdAt,updatedAt`; no hash, version or attempt counters.
 Removed records cannot be revived; add a new record when needed. PIN hashes use

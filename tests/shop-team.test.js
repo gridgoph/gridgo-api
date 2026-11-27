@@ -78,3 +78,77 @@ test('action capture retains system authors and never attributes unrelated maint
   assert.equal(store.orderActions[0].actorRole,'staff');
   assert.deepEqual(store.auditLog,[], 'capturing actor history does not create incidental shared audit rows');
 });
+
+const teamRequest = (store, body, { userId='supplier', path='/me/shop-team/invites', method='POST', at=AT }={}) => routeShopTeam({
+  req:{method,headers:{'x-gridgo-shop-id':'supplier'}},url:new URL(`http://local${path}`),store,
+  user:store.users.find(u=>u.id===userId),readBody:async()=>body,id,now:()=>at,audit,
+});
+const qrClaim = (store, token, subject='clerk_other', at=AT) => claimShopInvite({store,claims:{sub:subject},
+  clerkUser:{id:subject,emailAddresses:[{emailAddress:`${subject}@example.invalid`,verification:{status:'verified'}}]},body:{token},id,at,audit});
+
+test('role QR grants exactly its role immediately on the existing account, once, with a 60-second deadline', async () => {
+  for(const role of ['staff','manager']) {
+    const store=fixture(), before=structuredClone(store.users);
+    const result=await teamRequest(store,{kind:'qr',role});
+    assert.equal(result.body.invite.role,role);
+    assert.equal(result.body.delivery,'scan_qr');
+    assert.equal(result.body.refreshSeconds,60);
+    assert.equal(Date.parse(result.body.invite.expiresAt)-Date.parse(AT),60000);
+    const claim=qrClaim(store,result.body.token);
+    assert.equal(claim.member.role,role);assert.equal(claim.member.status,'active');assert.equal(claim.member.userId,'other');
+    assert.deepEqual(store.users,before);
+    assert.throws(()=>qrClaim(store,result.body.token),{code:'shop_invite_used'});
+    assert.equal(JSON.stringify(claim).includes('clerk_'),false);
+  }
+});
+test('role QR refresh replaces only its role, settings snapshot expiry, and deadline is exclusive', async () => {
+  const store=fixture();
+  const manager=await teamRequest(store,{kind:'qr',role:'manager'});
+  const first=await teamRequest(store,{kind:'qr',role:'staff'});
+  store.settings.shopTeamJoinQrRefreshSeconds=90;
+  const next=await teamRequest(store,{kind:'qr',role:'staff'});
+  assert.equal(next.body.refreshSeconds,90);
+  assert.equal(store.shopInvites.find(i=>i.id===first.body.invite.id).revokedAt,AT);
+  assert.equal(store.shopInvites.find(i=>i.id===manager.body.invite.id).revokedAt,undefined);
+  assert.throws(()=>qrClaim(store,first.body.token),{code:'shop_invite_revoked'});
+  assert.throws(()=>qrClaim(store,manager.body.token,'clerk_other',new Date(Date.parse(AT)+60000).toISOString()),{code:'shop_invite_expired'});
+  assert.equal(qrClaim(store,next.body.token,'clerk_other',new Date(Date.parse(AT)+89000).toISOString()).member.status,'active');
+});
+test('manager QR creation and replacement require owner; issuer removal or demotion prevents claims', async () => {
+  const store=fixture();store.shopMemberships.push({shopId:'supplier',userId:'other',role:'staff',status:'active',createdAt:AT,updatedAt:AT});
+  store.shopTeamMemberSettings=[{shopId:'supplier',userId:'other',manager:true}];
+  const managerQr=await teamRequest(store,{kind:'qr',role:'manager'});
+  for(const body of [{kind:'qr',role:'manager'},{kind:'link',role:'manager'}]) await assert.rejects(teamRequest(store,body,{userId:'other'}),{code:body.kind==='qr'?'shop_owner_required':'invalid_invite_role'});
+  await assert.rejects(teamRequest(store,{}, {userId:'other',path:`/me/shop-team/invites/${managerQr.body.invite.id}/replace`}),{code:'shop_owner_required'});
+  const staff=await teamRequest(store,{kind:'qr',role:'staff'},{userId:'other'});
+  store.shopTeamMemberSettings[0].manager=false;
+  assert.throws(()=>qrClaim(store,staff.body.token,'clerk_client'),{code:'shop_invite_issuer_unavailable'});
+  store.shopMemberships.find(m=>m.userId==='supplier').status='removed';
+  assert.throws(()=>qrClaim(store,managerQr.body.token,'clerk_client'),{code:'shop_invite_issuer_unavailable'});
+});
+test('removed people rejoin on a fresh QR with a fresh role; a new person gets a separate Clerk-mapped identity', async () => {
+  const store=fixture();
+  const first=await teamRequest(store,{kind:'qr',role:'manager'});
+  qrClaim(store,first.body.token);
+  const beforeRemoval=await teamRequest(store,{kind:'qr',role:'staff'});
+  await teamRequest(store,null,{method:'DELETE',path:'/me/shop-team/members/other'});
+  assert.throws(()=>qrClaim(store,beforeRemoval.body.token),{code:'shop_invite_revoked'});
+  assert.throws(()=>supplierShopActor(store,store.users.find(u=>u.id==='other'),store.shopMemberships.find(m=>m.userId==='other')),{code:'shop_access_removed'});
+  const rejoin=await teamRequest(store,{kind:'qr',role:'staff'});
+  assert.equal(qrClaim(store,rejoin.body.token).member.role,'staff');
+  const count=store.users.length, fresh=await teamRequest(store,{kind:'qr',role:'staff'});
+  const result=qrClaim(store,fresh.body.token,'clerk_fresh');
+  assert.equal(store.users.length,count+1);assert.equal(result.member.status,'active');
+  assert.equal(store.users.find(u=>u.id===result.member.userId).clerkUserId,'clerk_fresh');
+});
+
+test('role QR rejects requested owner grants and claim-side roles or PINs without consuming the code', async () => {
+  const store=fixture();
+  for(const role of ['owner','super_admin','',null,{},1]) await assert.rejects(teamRequest(store,{kind:'qr',role}),{code:'invalid_invite_role'});
+  const issued=await teamRequest(store,{kind:'qr',role:'staff'});
+  for(const field of [{role:'manager'},{pin:'1234'},{shopId:'replacement'}]) {
+    assert.throws(()=>claimShopInvite({store,claims:{sub:'clerk_other'},clerkUser:{id:'clerk_other'},body:{token:issued.body.token,...field},id,at:AT,audit}),{code:'invalid_shop_invite_claim'});
+    assert.equal(store.shopInvites.find(i=>i.id===issued.body.invite.id).claimedAt,undefined);
+  }
+  assert.equal(qrClaim(store,issued.body.token).member.role,'staff');
+});
