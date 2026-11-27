@@ -1,3 +1,4 @@
+import { publicExpressPrint } from './express-shop-pricing.js';
 import { homePrinterStatus, homeVerified, recordHomeOffer, snapshotHomePrinter } from './home-printers.js';
 import { groupExpressMoved, cancelGroupExpressOrder } from './group-express-recovery.js';
 import { supplierVerified, rankVerifiedWithinDistance } from "./supplier-verification.js";
@@ -28,6 +29,15 @@ export function validateExpressRates(rates) {
   return rates;
 }
 export function expressLinePrice(line) {
+  if(line.expressPrint?.pagePricing) {
+    const {pages}=line.expressPrint.pagePricing,quantity=line.quantity;
+    if(!Number.isSafeInteger(quantity)||quantity<1||pages.length!==line.documentPages?.printed||pages.some(p=>!Number.isSafeInteger(p.priceMinor)||p.priceMinor<0))expressFail(400,'invalid_express_print');
+    const value=pages.reduce((sum,p)=>sum+BigInt(p.priceMinor),0n)*BigInt(quantity),units=BigInt(pages.length)*BigInt(quantity)*1000n;
+    if(value>BigInt(Number.MAX_SAFE_INTEGER)||units>BigInt(Number.MAX_SAFE_INTEGER))expressFail(400,'invalid_money');
+    if(Number(value)!==line.expressPrint.pagePricing.subtotalMinor)expressFail(400,'invalid_express_print');
+    const rates=new Set(pages.map(p=>p.priceMinor));
+    return {unit:'per_page',quantity,unitRateMinor:rates.size===1?pages[0].priceMinor:0,billableMilliUnits:Number(units),lineSubtotalMinor:Number(value)};
+  }
   const rate=line.expressPrint?.rateMinor, pages=line.documentPages?.printed, quantity=line.quantity;
   if (![rate,pages,quantity].every(n=>Number.isSafeInteger(n)&&n>0)) expressFail(400,'invalid_express_print');
   const value=BigInt(rate)*BigInt(pages)*BigInt(quantity), units=BigInt(pages)*BigInt(quantity)*1000n;
@@ -116,8 +126,8 @@ export function publicExpress(order,user) {
     ...(own||staff||shop?{printSettings:structuredClone(e.printSettings||[])}:{})};
   if(own&&!staff&&!shop) {
     if(order.groupOrder)result.printSettings=result.printSettings.filter(p=>p.groupMemberId===user.id);
-    for(const print of result.printSettings||[])delete print.rateMinor;
   }
+  if(result.printSettings)result.printSettings=result.printSettings.map(print=>publicExpressPrint(print,user?.role));
   return ['staff','manager'].includes(user?.shopRole) ? staffExpressProjection(result) : result;
 }
 export function startExpressAcceptance(order,at) {
@@ -143,7 +153,7 @@ export function declineExpress(store,order,{at,id,kind='declined',actorId=null,r
   order.shopAcceptance.status=kind;
   e.events.push({state:kind,at,supplierId:previous,reason:kind==='timed_out'?'No response within five minutes.':reason});
   const client=store.users.find(u=>u.id===order.clientId);
-  const manual=e.paymentTiming==='after_acceptance'||e.printSettings?.some(print=>print.paper==='a3'||print.productType==='plans');
+  const manual=e.paymentTiming==='after_acceptance'||e.printSettings?.some(print=>print.printVersion===2||print.paper==='a3'||print.productType==='plans');
   const originalPickup=order.pickup||store.supplierProfiles.find(p=>p.userId===e.originalSupplierId)?.shop;
   const originalZone=e.printerZone?.key||(order.fulfillmentMode==='delivery'?order.distanceZone?.key:null)
     ||distanceZoneForDistance(distanceMetersBetween(originalPickup,e.location),store.settings).key;
@@ -175,7 +185,7 @@ export function declineExpress(store,order,{at,id,kind='declined',actorId=null,r
 export function createExpressSnapshot(cart,lines,at) {
  return {version:1,originalSupplierId:lines[0].supplierId,location:structuredClone(cart.expressLocation),declines:0,declinedSupplierIds:[],
   pickupCode:String(randomInt(1000000)).padStart(6,'0'),events:[{state:'sending',at,supplierId:lines[0].supplierId}],
-  printSettings:lines.map(line=>({...((line.expressPrint.groupMemberId)?{groupMemberId:line.expressPrint.groupMemberId,groupMemberName:line.expressPrint.groupMemberName}:{}),fileId:line.artworkFileId,pages:structuredClone(line.documentPages),copies:line.quantity,
+  printSettings:lines.map(line=>({...((line.expressPrint.groupMemberId)?{groupMemberId:line.expressPrint.groupMemberId,groupMemberName:line.expressPrint.groupMemberName}:{}),...(line.expressPrint.printVersion===2?structuredClone(line.expressPrint):{}),fileId:line.expressPrint.outputFileId||line.artworkFileId,...(line.expressPrint.outputFileId?{sourceFileId:line.artworkFileId,outputAlreadyApplied:true,productionPrint:{layout:'actual_size_centered',orientation:'auto',colour:'as_prepared',pageRange:null}}:{}),pages:structuredClone(line.documentPages),copies:line.quantity,
     colour:line.expressPrint.colour,paper:line.expressPrint.paper,paperStock:line.expressPrint.paperStock,sides:line.expressPrint.sides,
     ...(line.expressPrint.productType?{productType:line.expressPrint.productType}:{}),
     ...(line.expressPrint.paper==='a3'||line.expressPrint.productType==='plans'?{rateMinor:line.expressPrint.rateMinor}:{}),layout:line.printLayout,note:line.specialInstructions||'',acceptedWarnings:structuredClone(line.expressPrint.acceptedWarnings)}))};
@@ -263,14 +273,20 @@ export function expressCatalogOptions(store,item,print) {
  for(const group of catalogGroupsForItem(store,item.id,{includeInactiveOptions:false})) {
    if(group.kind==='addon') {if(group.required)expressFail(409,'express_listing_configuration_required');continue;}
    const name=normalize(group.name);let chosen;
-   if(/colou?r/.test(name)) {
+   if(print.printVersion===2&&print.productType==='plans'&&/type|process/.test(name)) {
+     chosen=group.options.find(o=>normalize(o.label).replaceAll(' ','_')===print.planType);
+   } else if(/colou?r/.test(name)) {
      chosen=group.options.find(option=>{
        const label=normalize(option.label), bw=/black|b&w|b\/?w|monochrome/.test(label);
-       return print.colour==='bw'?bw:/colou?r/.test(label)&&!bw;
+       return print.colour==='blue'?/blue/.test(label):print.colour==='bw'?bw:/colou?r/.test(label)&&!bw;
      });
    } else if(/size/.test(name)||group.options.some(o=>o.specBinding?.fieldCode==='size')) {
      const pattern={a4:/\ba4\b/,a3:/\ba3\b/,a2:/\ba2\b|20x30/,a1:/\ba1\b|24x36/,a0:/\ba0\b/,'30x40':/30x40/,short:/short|letter|8[.]5.*11/,long:/long|folio|legal|8[.]5.*13/}[print.paper];
-     chosen=group.options.find(o=>pattern?.test(normalize(o.specBinding?.value||o.label)));
+     chosen=group.options.find(o=>{
+       const label=normalize(o.specBinding?.value||o.label);
+       if(print.printVersion===2&&print.productType==='plans')return label.replace(/\s/g,'').replace(/[×]/g,'x').replace(/in(?:ches)?$/,'')===print.paper;
+       return pattern?.test(label);
+     });
      if(print.paper==='a3'&&chosen)hasA3=true;
    } else if(/sides/.test(name)) {
      chosen=group.options.find(o=>print.sides==='two'?/back|two|duplex/.test(normalize(o.label)):/one|single/.test(normalize(o.label)));

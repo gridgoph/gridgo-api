@@ -8,9 +8,9 @@ export const COLOUR_MAX_SOURCE = 64*1024*1024;
 export const COLOUR_MAX_PAGES = 200;
 const MAX_OUTPUT = 6*1024*1024;
 const failure = code => Object.assign(new Error(code),{code,status:422});
-function run(command,args,directory,{capture=false,timeout=25000}={}) {
+export function runColourCommand(command,args,directory,{capture=false,timeout=25000,maxOutput=MAX_OUTPUT}={}) {
   return new Promise((resolve,reject) => {
-    const child = spawn('prlimit',['--as=1073741824','--cpu=20',`--fsize=${MAX_OUTPUT}`,'--nofile=128','--',command,...args],{
+    const child = spawn('prlimit',['--as=1073741824','--cpu=20',`--fsize=${maxOutput}`,'--nofile=128','--',command,...args],{
       cwd:directory,detached:true,stdio:['ignore',capture?'pipe':'ignore','ignore'],
       env:{PATH:'/usr/local/bin:/usr/bin:/bin',HOME:directory,TMPDIR:directory,LANG:'C.UTF-8',MAGICK_CONFIGURE_PATH:directory},
     });
@@ -22,7 +22,7 @@ function run(command,args,directory,{capture=false,timeout=25000}={}) {
     child.once('close',code => {clearTimeout(timer); if (timedOut || code !== 0) reject(failure(timedOut?'colour_render_timeout':'colour_render_failed')); else resolve(output);});
   });
 }
-export function readPpm(bytes) {
+export function readPpm(bytes, maxDimension = 1200) {
   let at = 0;
   function token() {
     while (at < bytes.length) {
@@ -36,7 +36,7 @@ export function readPpm(bytes) {
   }
   if (token() !== 'P6') throw failure('colour_raster_invalid');
   const width = Number(token()), height = Number(token()), max = Number(token());
-  if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 || width > 1200 || height > 1200 || max !== 255) throw failure('colour_raster_invalid');
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 || width > maxDimension || height > maxDimension || max !== 255) throw failure('colour_raster_invalid');
   if (bytes[at] === 13 && bytes[at+1] === 10) at += 2; else at++;
   const pixels = bytes.subarray(at);
   if (pixels.length !== width*height*3) throw failure('colour_raster_invalid');
@@ -53,11 +53,11 @@ export async function renderColourAnalysis(source,file,request) {
     const pdf = file.detectedContentType === 'application/pdf';
     let pageCount = 1, info = '';
     if (pdf) {
-      const summary = await run('pdfinfo',[input],directory,{capture:true});
+      const summary = await runColourCommand('pdfinfo',[input],directory,{capture:true});
       pageCount = Number(/^Pages:\s+(\d+)/m.exec(summary)?.[1]);
       if (!Number.isSafeInteger(pageCount) || pageCount < 1 || pageCount > COLOUR_MAX_PAGES) throw failure('colour_page_limit');
       if (/^Encrypted:\s+yes/m.test(summary)) throw failure('colour_protected_document');
-      info = await run('pdfinfo',['-f','1','-l',String(pageCount),'-box',input],directory,{capture:true});
+      info = await runColourCommand('pdfinfo',['-f','1','-l',String(pageCount),'-box',input],directory,{capture:true});
     }
     const pages = [];
     for (let page=1;page<=pageCount;page++) {
@@ -74,11 +74,11 @@ export async function renderColourAnalysis(source,file,request) {
         const rotation = Number(new RegExp(`^Page\\s+${page}\\s+rot:\\s+(-?\\d+)`,'m').exec(info)?.[1] || 0);
         if (Math.abs(rotation)%180 === 90) [widthMilli,heightMilli] = [heightMilli,widthMilli];
         if (!(widthMilli > 0 && heightMilli > 0)) throw failure('colour_page_size_unknown');
-        await run('pdftoppm',['-f',String(page),'-l',String(page),'-singlefile','-cropbox','-scale-to','1200',input,path.join(directory,'page')],directory);
+        await runColourCommand('pdftoppm',['-f',String(page),'-l',String(page),'-singlefile','-cropbox','-scale-to','1200',input,path.join(directory,'page')],directory);
       } else {
         const coder = {'image/png':'png','image/jpeg':'jpeg','image/webp':'webp'}[file.detectedContentType];
         if (!coder) throw failure('colour_file_unsupported');
-        await run('convert',['-limit','memory','64MiB','-limit','map','64MiB','-limit','disk','0','-limit','thread','1',`${coder}:${input}[0]`,'-auto-orient','-background','white','-alpha','remove','-alpha','off','-resize','1200x1200>','-depth','8',`ppm:${output}`],directory);
+        await runColourCommand('convert',['-limit','memory','64MiB','-limit','map','64MiB','-limit','disk','0','-limit','thread','1',`${coder}:${input}[0]`,'-auto-orient','-background','white','-alpha','remove','-alpha','off','-resize','1200x1200>','-depth','8',`ppm:${output}`],directory);
         widthMilli = file.detected?.widthMilli; heightMilli = file.detected?.heightMilli;
       }
       const stat = await fs.stat(output);

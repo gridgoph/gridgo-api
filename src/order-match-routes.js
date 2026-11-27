@@ -1,3 +1,5 @@
+import { ensureExpressPreview, priceExpressPages } from './express-print.js';
+import { expressV2Selection, expressPreviewState, isExpressPrintV2, publicExpressPrint } from './express-shop-pricing.js';
 import { homeProfile, snapshotHomePrinter, homePrinterResponse } from './home-printers.js';
 import { assertVerifiedCashShop } from "./supplier-verification.js";
 import { shopPaused } from './shop-availability.js';
@@ -940,6 +942,7 @@ function cartInternal(store, cart, at, { compactListings = false } = {}) {
       measurement: item?.pricingUnit === "per_page" ? (documentPages ? { pages: documentPages.printed } : null) : line.measurement ? { ...line.measurement } : null,
       documentPages,
       structuredSpec: structuredClone(line.structuredSpec || {}),
+      ...(line.expressPrint?.printVersion===2?{expressPrint:publicExpressPrint(line.expressPrint)}:{}),
       artworkFileId: line.artworkFileId ?? null,
       artworkLinks: structuredClone(line.artworkLinks || []),
       artworkAttachments: artworkAttachmentsFor(line),
@@ -1362,8 +1365,8 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
       snapshot.lineItem.jobId = jobId;
       if(line.expressPrint) {
         snapshot.lineItem.expressPrint=structuredClone(line.expressPrint);
-        snapshot.lineItem.effectiveUnitPriceMinor=line.expressPrint.rateMinor;
-        snapshot.lineItem.baseUnitPriceMinor=line.expressPrint.rateMinor;
+        snapshot.lineItem.effectiveUnitPriceMinor=expressLinePrice(line).unitRateMinor;
+        snapshot.lineItem.baseUnitPriceMinor=expressLinePrice(line).unitRateMinor;
         // A per-unit plan listing sells sheets. Copies remain on the immutable
         // Express settings; the invoice/counter quantity is the billed sheets.
         if(line.expressPrint.productType==='plans'&&item.pricingUnit==='per_unit') {
@@ -1397,6 +1400,16 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
       if (guidance) snapshot.lineItem.artworkGuidance = guidance;
       if (line.mockupFileId) snapshot.lineItem.mockupFileId = line.mockupFileId;
       if (line.dropoff) snapshot.lineItem.dropoff = { ...line.dropoff };
+      if(line.expressPrint?.outputFileId) {
+        const output=groupFileFor(store,user,cart,line.expressPrint.outputFileId);
+        if(output.expressRendering?.key!==line.expressPrint.analysisKey)fail(409,'express_preview_required');
+        snapshot.lineItem.expressOriginalFileId=line.artworkFileId;
+        snapshot.lineItem.artworkFileId=output.fileId;
+        snapshot.lineItem.artworkAttachments=[{kind:'file',fileId:output.fileId}];
+        snapshot.lineItem.expressOriginalGuidance=snapshot.lineItem.artworkGuidance;
+        snapshot.lineItem.artworkGuidance=artworkGuidanceSnapshot(store,item,{...line,artworkFileId:output.fileId,artworkAttachments:[{kind:'file',fileId:output.fileId}]},[output.fileId],at);
+        snapshot.lineItem.printLayout={version:1,code:'actual_size_centered',check:{prepared:true,outputAlreadyApplied:true}};
+      }
       return { cartLine: line, ...snapshot };
     });
     const supplierSubtotalMinor = addMinor(jobSnapshots.map((row) => row.lineItem.lineSubtotalMinor), "job.supplierSubtotalMinor");
@@ -1569,6 +1582,7 @@ function checkout(store, user, cart, body, createId, at, req, { groupLines = nul
     store.orderLineItems.push(snapshot.lineItem);
     store.orderLineItemOptions.push(...snapshot.options);
     for (const fileId of artworkFileIdsFor(snapshot.lineItem)) attachOrderFile(groupFileFor(store, user, cart, fileId), orderId, `line:${snapshot.lineItem.id}:artwork`);
+    if(snapshot.lineItem.expressOriginalFileId)attachOrderFile(groupFileFor(store,user,cart,snapshot.lineItem.expressOriginalFileId),orderId,`line:${snapshot.lineItem.id}:express_original`);
     if (snapshot.lineItem.mockupFileId) attachOrderFile(fileFor(store, user, snapshot.lineItem.mockupFileId, "mockup", "mockupFileId"), orderId, `line:${snapshot.lineItem.id}:mockup`);
   }
   if (proof) attachOrderFile(proof, orderId, "payment:initial:proof");
@@ -1921,7 +1935,7 @@ export function checkoutBasket(store, user, cart, body, createId, at, req) {
 }
 
 export function isOrderMatchRoute(method, pathname) {
-  if (["/express/drafts", "/express/shops", "/express/demand", "/me/express-guide"].includes(pathname)) return true;
+  if (["/express/preview", "/express/drafts", "/express/shops", "/express/demand", "/me/express-guide"].includes(pathname)) return true;
   if (["/me/preferences", "/me/addresses", "/me/matches", "/me/matches/next", "/me/carts", "/me/deadline-days", "/me/catalog-quotes", "/me/print-layout-check"].includes(pathname)) return true;
   if (method === "DELETE" && /^\/me\/addresses\/[^/]+$/.test(pathname)) return true;
   if (/^\/me\/carts\/[^/]+(?:\/.*)?$/.test(pathname)) return true;
@@ -2038,6 +2052,23 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
     const mutated = pingPrinterDemand(store, user, record(await readBody(req)), { at: now(), id });
     return {status:200,body:{ok:true},mutated};
   }
+  if(pathname==='/express/preview'&&req.method==='POST') {
+    const body=record(await readBody(req));
+    if(!Array.isArray(body.files)||!body.files.length||body.files.length>20)fail(400,'invalid_express_files');
+    let mutated=false;
+    const files=body.files.map(input=>{
+      const file=fileFor(store,user,input.fileId,'artwork','fileId');
+      const result=ensureExpressPreview(store,file,input,body.productType||'documents',now(),{retry:body.retry===true});
+      mutated ||= result.queued;
+      const analysis=result.analysis||{status:'failed',error:'colour_analysis_limit'};
+      const pageMix=analysis?.status==='ready'&&result.request.express.productType==='documents'
+        ?priceExpressPages(analysis.pages,{...result.request.express,copies:1},{bw:0,light:0,full:0},result.request.express.lightMaxBps):null;
+      return {fileId:file.fileId,analysisKey:result.key,status:analysis?.status||'failed',
+        ...(analysis?.status==='ready'?{outputFileId:analysis.outputFileId,pages:pageMix?pageMix.pages.map(({priceMinor,...page})=>page):analysis.pages,...(pageMix?{counts:pageMix.counts}:{}),print:result.request.express}:{}),
+        ...(analysis?.status==='failed'?{fallback:{originalFile:true,reason:analysis.error||'colour_analysis_limit',message:'Print preparation failed. Review original whole-file pricing before sending.'}}:{})};
+    });
+    return {status:files.some(f=>f.status==='pending')?202:200,body:{files},mutated};
+  }
   if (pathname === '/express/shops' && req.method === 'POST') {
     return {status:200,body:quotedExpressPrinters(store,user,record(await readBody(req)),now()),mutated:false};
   }
@@ -2049,6 +2080,12 @@ async function routeOrderMatchApproved({ req, url, store, user, readBody, id, no
       filters[key]=url.searchParams.get(key)==='true';
     }
     const options={location:{lat:Number(url.searchParams.get('lat')),lng:Number(url.searchParams.get('lng'))},sort:url.searchParams.get('sort')||'nearest',fulfillmentMode:url.searchParams.get('fulfillmentMode')||'pickup',...filters};
+    if(url.searchParams.has('files')) {
+      let files;try{files=JSON.parse(url.searchParams.get('files'));}catch{fail(400,'invalid_express_files');}
+      const productType=url.searchParams.get('productType')||'documents';
+      const dropoff=options.fulfillmentMode==='delivery'?{...options.location,label:'Delivery destination'}:undefined;
+      return {status:200,body:quotedExpressPrinters(store,user,{...options,files,productType,dropoff},now()),mutated:false};
+    }
     // Released clients do not understand disabled cards or automatic widening.
     // Keep their three legacy sorts open-only; the file-aware POST opts in.
     const body=['nearest','top_rated','fewest_jobs'].includes(options.sort)
@@ -2796,20 +2833,22 @@ export function createExpressDraft(store,user,body,id,at,selectionPolicy=null,gr
    serviceLevel:'standard',fulfillmentMode:body.fulfillmentMode,defaultDropoff:body.fulfillmentMode==='delivery'?point(body.dropoff,'dropoff',{required:true,requireLabel:true}):null,createdAt:at,updatedAt:at};
  const lines=body.files.map((input,index)=>{
    record(input,'file');
+   const source=fileFor(store,groupOwners?.get(input.fileId)||user,input.fileId,'artwork','fileId');
+   if(isExpressPrintV2(input))expressPreviewState(store,source,input,productType);
    const item=input.catalogItemId?store.catalogItems.find(i=>i.id===input.catalogItemId):shop.catalogItemIds.map(id=>store.catalogItems.find(i=>i.id===id)).find(i=>{
-     try{expressCatalogOptions(store,i,{...input,productType});return true;}catch(error){if(error.status)return false;throw error;}
+     try{if(isExpressPrintV2(input))expressV2Selection(store,i,input,productType,store.files.find(f=>f.fileId===input.fileId),at);else expressCatalogOptions(store,i,{...input,productType});return true;}catch(error){if(error.status)return false;throw error;}
    });
    if(!item||!shop.catalogItemIds.includes(item.id))fail(409,'express_listing_unavailable','Choose an Express document listing.');
    fileFor(store,groupOwners?.get(input.fileId)||user,input.fileId,'artwork','fileId');
-   if(!['bw','colour'].includes(input.colour)||!(productType==='plans'?['a4','a3','a2','a1','a0','30x40']:['a4','short','long','a3']).includes(input.paper)||!['one','two'].includes(input.sides)) fail(400,'invalid_express_print','Choose colour, paper and sides.');
+   if(!isExpressPrintV2(input)&&(!['bw','colour'].includes(input.colour)||!(productType==='plans'?['a4','a3','a2','a1','a0','30x40']:['a4','short','long','a3']).includes(input.paper)||!['one','two'].includes(input.sides))) fail(400,'invalid_express_print','Choose colour, paper and sides.');
    if(!Array.isArray(input.acceptedWarnings)||input.acceptedWarnings.length>20||input.acceptedWarnings.some(w=>!['paper_size_mismatch','rgb_colour'].includes(w))) fail(400,'invalid_express_warnings','Send accepted warning codes.');
    if(input.optionIds != null)fail(400,'express_options_managed','Express selects standard print options from the print settings.');
-   const standard=expressCatalogOptions(store,item,{...input,productType});
+   const standard=isExpressPrintV2(input)?expressV2Selection(store,item,input,productType,store.files.find(f=>f.fileId===input.fileId),at):expressCatalogOptions(store,item,{...input,productType});
    const line={id:id('line'),cartId:cart.id,supplierId:shop.supplierId,catalogItemId:item.id,quantity:positiveInteger(input.copies,'copies'),
      optionIds:standard.optionIds,artworkFileId:input.fileId,printLayout:parseCartPrintLayout(item,input.layout,fail),sortOrder:index,createdAt:at,updatedAt:at,
      specialInstructions:specialInstructions(input.note),
-     expressPrint:{...(selectionPolicy?{selection:structuredClone(selectionPolicy)}:{}),...(productType==='plans'?{productType}:{}),colour:input.colour,paper:input.paper,paperStock:standard.paperStock,sides:input.sides,rateMinor:standard.rateMinor,acceptedWarnings:[...new Set(input.acceptedWarnings)]},
-     structuredSpec:{size:input.paper,colourMode:input.colour,sides:input.sides}};
+     expressPrint:{...(selectionPolicy?{selection:structuredClone(selectionPolicy)}:{}),...(productType==='plans'?{productType}:{}),colour:standard.print?.colour||input.colour,paper:input.paper,...(standard.print||{}),paperStock:standard.paperStock,sides:input.sides,rateMinor:standard.rateMinor,acceptedWarnings:[...new Set(input.acceptedWarnings)]},
+     structuredSpec:{size:input.paper,colourMode:standard.print?.colour||input.colour,sides:input.sides}};
    line.documentPages=documentPagesFor(store,productType==='plans'?{...item,pricingUnit:'per_page'}:item,line,input.pageRange??null,{required:true});line.measurement={pages:line.documentPages.printed};
    expressLinePrice(line);assertListingArtwork(store,item,line);
    return line;
@@ -2823,7 +2862,7 @@ export function createExpressDraft(store,user,body,id,at,selectionPolicy=null,gr
  const quote=clientCartQuote(store,cart,lines,at);
  delete quote.voucherGroups; delete quote.downpaymentPercent;
  shop.readyAt=projectListingGroup(store,lines,{now:at}).projection.promiseBy;
- return {status:201,body:{cartId:cart.id,confirmation:expressConfirmation(cart,lines),paymentTiming:lines.some(l=>l.expressPrint.paper==='a3'||l.expressPrint.productType==='plans')?'after_acceptance':'checkout',quote,shop},mutated:true};
+ return {status:201,body:{cartId:cart.id,confirmation:expressConfirmation(cart,lines),paymentTiming:lines.some(l=>l.expressPrint.paper==='a3'||l.expressPrint.productType==='plans')?'after_acceptance':'checkout',quote,shop,printPreview:lines.map(l=>publicExpressPrint(l.expressPrint))},mutated:true};
 }
 
 /** Preview the same draft builder with isolated draft arrays. No carts, missions,

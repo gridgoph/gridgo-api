@@ -109,6 +109,7 @@ const TABLES = [
   { name: "supplier_service_file_formats", keys: ["supplier_service_id", "format_code"], columns: ["supplier_service_id", "format_code"] },
   ...quoteRequestTables,
   { name: "supplier_catalog_items", keys: ["id"], columns: ["id", "supplier_id", "supplier_service_id", "subcategory_code", "name", "description", "base_price_minor", "pricing_unit", "package_qty", "measure_unit", "minimum_width_milli", "minimum_height_milli", "minimum_length_milli", "minimum_order_quantity", "printer_max_width_feet", "print_layouts", "priced_by_colour", "one_colour", "express", "sample_available", "sample_price_minor", "production_time_review_reasons", "turnaround_mode", "turnaround_hours", "turnaround_days", "turnaround_minutes", "minimum_turnaround_hours", "minimum_turnaround_days", "minimum_turnaround_minutes", "file_format_mode", "active", "suspend_reason", "suspended_at", "suspended_by", "sort_order", "version", "created_at", "updated_at", "review_status", "review_reason", "reviewed_at", "reviewed_by", "approved_snapshot", "template_data", "quote_request_id", "quote_client_id"] },
+  { name: "supplier_catalog_express_prices", keys: ["catalog_item_id", "paper_size", "plan_type", "tier_code"], columns: ["catalog_item_id", "paper_size", "plan_type", "tier_code", "price_minor"] },
   { name: "supplier_catalog_colour_sizes", keys: ["catalog_item_id", "size_key"], columns: ["catalog_item_id", "size_key", "paper_size", "width_milli", "height_milli", "tier_set"] },
   { name: "supplier_catalog_colour_prices", keys: ["catalog_item_id", "size_key", "tier_code"], columns: ["catalog_item_id", "size_key", "tier_code", "price_minor"] },
   { name: "supplier_catalog_option_groups", keys: ["id"], columns: ["id", "catalog_item_id", "name", "kind", "help_text", "required", "selection_mode", "sort_order", "version", "created_at", "updated_at"] },
@@ -130,7 +131,7 @@ const TABLES = [
   { name: "client_carts", keys: ["id"], columns: ["id", "client_id", "state", "version", "service_level", "scheduled_for", "fulfillment_mode", "default_dropoff_lat", "default_dropoff_lng", "default_dropoff_label", "checked_out_order_id", "created_at", "updated_at", "checked_out_at", "deadline", "request_fulfillment", "order_type", "express_location"] },
   { name: "client_cart_lines", keys: ["id"], columns: ["id", "cart_id", "supplier_id", "catalog_item_id", "option_ids", "speed_tier_id", "quantity", "service_fee_snapshot", "structured_spec", "artwork_file_id", "artwork_links", "artwork_attachments", "artwork_warning_acceptances", "express_print", "print_layout", "quantity_mode", "color_targets", "cover_spine", "special_instructions", "document_pages", "match_deadline", "deadline", "delivery_key", "sample", "sample_batch_draft_id", "sample_batch_pricing", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "created_at", "updated_at"] },
   { name: "order_jobs", keys: ["id"], columns: ["id", "order_id", "supplier_id", "rider_id", "state", "fulfillment_mode", "pickup_lat", "pickup_lng", "pickup_label", "dropoff_lat", "dropoff_lng", "dropoff_label", "supplier_subtotal_minor", "delivery_distance_meters", "delivery_fee_minor", "rider_commission_bps", "estimated_hours", "estimated_production_minutes", "scheduled_for", "deadline", "created_at", "updated_at"] },
-  { name: "order_line_items", keys: ["id"], columns: ["id", "order_id", "job_id", "source_catalog_item_id", "source_supplier_service_id", "item_name_snapshot", "description_snapshot", "pricing_basis_snapshot", "pricing_unit_snapshot", "package_qty_snapshot", "turnaround_hours_snapshot", "speed_tier_snapshot", "turnaround_days_snapshot", "turnaround_minutes_snapshot", "production_day_minutes_snapshot", "base_unit_price_minor", "effective_unit_price_minor", "quantity", "line_subtotal_minor", "accepted_format_codes_snapshot", "structured_spec_snapshot", "artwork_file_id", "artwork_links", "artwork_attachments", "artwork_guidance", "express_print", "print_layout", "quantity_mode", "colour_pricing", "color_targets", "cover_spine", "special_instructions", "document_pages", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "snapshot_finalized", "created_at"] },
+  { name: "order_line_items", keys: ["id"], columns: ["id", "order_id", "job_id", "source_catalog_item_id", "source_supplier_service_id", "item_name_snapshot", "description_snapshot", "pricing_basis_snapshot", "pricing_unit_snapshot", "package_qty_snapshot", "turnaround_hours_snapshot", "speed_tier_snapshot", "turnaround_days_snapshot", "turnaround_minutes_snapshot", "production_day_minutes_snapshot", "base_unit_price_minor", "effective_unit_price_minor", "quantity", "line_subtotal_minor", "accepted_format_codes_snapshot", "structured_spec_snapshot", "artwork_file_id", "artwork_links", "artwork_attachments", "artwork_guidance", "express_print", "express_original_file_id", "express_original_guidance", "print_layout", "quantity_mode", "colour_pricing", "color_targets", "cover_spine", "special_instructions", "document_pages", "mockup_file_id", "dropoff_lat", "dropoff_lng", "dropoff_label", "measure_pages", "measure_width_milli", "measure_height_milli", "measure_length_milli", "sort_order", "snapshot_finalized", "created_at"] },
   { name: "order_line_item_options", keys: ["id"], columns: ["id", "order_line_item_id", "source_option_group_id", "source_option_id", "group_name_snapshot", "group_kind_snapshot", "option_label_snapshot", "price_modifier_minor", "sort_order"] },
   { name: "order_invoices", keys: ["order_id"], columns: ["order_id", "invoice_number", "issued_at", "snapshot"] },
   { name: "order_baskets", keys: ["id"], columns: ["id", "client_id", "receipt_order_id", "total_minor", "pickup_fee_minor", "deadline", "fulfillment_mode", "payment", "created_at", "updated_at"] },
@@ -532,6 +533,12 @@ function rowsFromStore(store) {
     });
   }
   for (const item of store.catalogItems || []) {
+    for (const [paper,prices] of Object.entries(item.expressPricing || {})) {
+      if(paper==='plans') {
+        for(const [type,sizes] of Object.entries(prices))for(const [size,tiers] of Object.entries(sizes))for(const [tier,price] of Object.entries(tiers))
+          rows.supplier_catalog_express_prices.push({catalog_item_id:item.id,paper_size:size,plan_type:type,tier_code:tier,price_minor:money(price,'express.pagePriceMinor')});
+      } else for(const [tier,price] of Object.entries(prices))rows.supplier_catalog_express_prices.push({catalog_item_id:item.id,paper_size:paper,plan_type:'',tier_code:tier,price_minor:money(price,'express.pagePriceMinor')});
+    }
     for (const size of item.colourPricing?.sizes || []) {
       const key = `${size.widthMilli}:${size.heightMilli}`;
       rows.supplier_catalog_colour_sizes.push({catalog_item_id:item.id,size_key:key,paper_size:size.paperSize,width_milli:size.widthMilli,height_milli:size.heightMilli,tier_set:size.tierSet});
@@ -797,6 +804,8 @@ function rowsFromStore(store) {
       special_instructions: line.specialInstructions || "",
       document_pages: line.documentPages ?? null,
       express_print: line.expressPrint ?? null,
+      express_original_file_id: line.expressOriginalFileId ?? null,
+      express_original_guidance: line.expressOriginalGuidance ?? null,
       mockup_file_id: line.mockupFileId ?? null,
       dropoff_lat: line.dropoff?.lat ?? null,
       dropoff_lng: line.dropoff?.lng ?? null,
@@ -1163,7 +1172,7 @@ async function readCatalogItemContext(graph, ids) {
   await read('supplier_profiles', 'WHERE user_id = ANY($1::text[])', [owners]);
   await read('supplier_services', 'WHERE id = ANY($1::text[])', [loaded.supplier_catalog_items.map(row => row.supplier_service_id)]);
   await read('supplier_service_file_formats', 'WHERE supplier_service_id = ANY($1::text[])', [loaded.supplier_services.map(row => row.id)]);
-  for (const name of ['supplier_catalog_option_groups', 'supplier_catalog_item_photos', 'supplier_catalog_price_tiers', 'supplier_catalog_speed_tiers', 'supplier_catalog_item_file_formats', 'supplier_catalog_prep_steps', 'supplier_catalog_colour_sizes', 'supplier_catalog_colour_prices']) {
+  for (const name of ['supplier_catalog_option_groups', 'supplier_catalog_item_photos', 'supplier_catalog_price_tiers', 'supplier_catalog_speed_tiers', 'supplier_catalog_item_file_formats', 'supplier_catalog_prep_steps', 'supplier_catalog_express_prices', 'supplier_catalog_colour_sizes', 'supplier_catalog_colour_prices']) {
     await read(name, 'WHERE catalog_item_id = ANY($1::text[])', [items]);
   }
   await read('supplier_catalog_options', 'WHERE option_group_id = ANY($1::text[])', [loaded.supplier_catalog_option_groups.map(row => row.id)]);
@@ -1269,7 +1278,7 @@ async function readCatalogueGraph(graph, actorIds, { supplierIds = null, itemIds
   const items = loaded.supplier_catalog_items.map(row => row.id);
   for (const name of ['supplier_catalog_option_groups', 'supplier_catalog_item_photos', 'supplier_catalog_price_tiers',
     'supplier_catalog_speed_tiers', 'supplier_catalog_item_file_formats', 'supplier_catalog_prep_steps',
-    'supplier_catalog_colour_sizes', 'supplier_catalog_colour_prices']) {
+    'supplier_catalog_express_prices', 'supplier_catalog_colour_sizes', 'supplier_catalog_colour_prices']) {
     await read(name, 'WHERE catalog_item_id = ANY($1::text[])', [items]);
   }
   await read('supplier_catalog_options', 'WHERE option_group_id = ANY($1::text[])', [loaded.supplier_catalog_option_groups.map(row => row.id)]);
@@ -2584,6 +2593,7 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
       printerMaxWidthFeet: row.printer_max_width_feet,
       printLayouts: row.print_layouts || [],
       pricedByColour: row.priced_by_colour === true, oneColour: row.one_colour === true,
+      ...(expressPricingFromRows(loaded,row.id) ? {expressPricing:expressPricingFromRows(loaded,row.id)} : {}),
       colourPricing: colourPricingFromRows(loaded,row.id),
       express: row.express === true,
       sampleAvailable: row.sample_available === true,
@@ -2741,6 +2751,7 @@ function storeFromRows(loaded, { legalPenaltyGate, surveyLaunchedAt = null, supp
     ...(row.artwork_guidance == null ? {} : { artworkGuidance: row.artwork_guidance }),
     ...(row.document_pages == null ? {} : { documentPages: row.document_pages }),
     ...(row.express_print == null ? {} : { expressPrint: row.express_print }),
+    ...(row.express_original_file_id == null ? {} : {expressOriginalFileId:row.express_original_file_id,expressOriginalGuidance:row.express_original_guidance}),
     ...(row.mockup_file_id == null ? {} : { mockupFileId: row.mockup_file_id }),
     ...(row.dropoff_lat == null ? {} : { dropoff: { lat: row.dropoff_lat, lng: row.dropoff_lng, label: row.dropoff_label } }),
   }));
@@ -3196,6 +3207,18 @@ function catalogHitsCte() {
   `;
 }
 
+function expressPricingFromRows(loaded,id) {
+  const rows=(loaded.supplier_catalog_express_prices || []).filter(row=>row.catalog_item_id===id);
+  if(!rows.length)return null;
+  const pricing={};
+  for(const row of rows) {
+    if(row.plan_type) {
+      pricing.plans ||= {};pricing.plans[row.plan_type] ||= {};pricing.plans[row.plan_type][row.paper_size] ||= {};
+      pricing.plans[row.plan_type][row.paper_size][row.tier_code]=row.price_minor;
+    }else {(pricing[row.paper_size] ||= {})[row.tier_code]=row.price_minor;}
+  }
+  return pricing;
+}
 function colourPricingFromRows(loaded,id) {
   const sizes = (loaded.supplier_catalog_colour_sizes || []).filter(row => row.catalog_item_id === id).map(size => ({
     paperSize:size.paper_size,widthMilli:size.width_milli,heightMilli:size.height_milli,
@@ -3300,13 +3323,14 @@ async function queryOwnCatalogItems(database, params) {
   const page = hasMore ? rows.slice(0, limit) : rows;
   const last = hasMore ? page[page.length - 1] : null;
   const ids = page.map(row => row.id);
-  const [sizes,prices] = await Promise.all([
+  const [sizes,prices,expressPrices] = await Promise.all([
     database.query('SELECT * FROM supplier_catalog_colour_sizes WHERE catalog_item_id = ANY($1::text[])',[ids]),
     database.query('SELECT * FROM supplier_catalog_colour_prices WHERE catalog_item_id = ANY($1::text[])',[ids]),
+    database.query('SELECT * FROM supplier_catalog_express_prices WHERE catalog_item_id = ANY($1::text[])',[ids]),
   ]);
-  const colours = {supplier_catalog_colour_sizes:sizes.rows,supplier_catalog_colour_prices:prices.rows};
+  const colours = {supplier_catalog_colour_sizes:sizes.rows,supplier_catalog_colour_prices:prices.rows,supplier_catalog_express_prices:expressPrices.rows};
   return {
-    items: page.map(row => ({...catalogItemFromListRow(row),colourPricing:colourPricingFromRows(colours,row.id)})),
+    items: page.map(row => ({...catalogItemFromListRow(row),colourPricing:colourPricingFromRows(colours,row.id),...(expressPricingFromRows(colours,row.id)?{expressPricing:expressPricingFromRows(colours,row.id)}:{})})),
     nextCursor: last
       ? encodeCatalogCursor({
           k: hasQuery ? [last.rank, catalogSecondaryFromRow(last, sort)] : catalogSecondaryFromRow(last, sort),

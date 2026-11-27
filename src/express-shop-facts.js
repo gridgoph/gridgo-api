@@ -64,7 +64,7 @@ export function expressCardPrice(quote, lines) {
   const priced = lines.map(line => ({ line, ...expressLinePrice(line) }));
   const printedPages = priced.reduce((sum, row) => sum + row.line.documentPages.printed * row.quantity, 0);
   const printingMinor = priced.reduce((sum, row) => sum + row.lineSubtotalMinor, 0);
-  const rates = new Set(priced.map(row => row.unitRateMinor));
+  const rates = new Set(priced.flatMap(row => row.line.expressPrint?.pagePricing?.pages.map(p=>p.priceMinor) || [row.unitRateMinor]));
   return {
     totalMinor: quote.totalMinor,
     printedPages,
