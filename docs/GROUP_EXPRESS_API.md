@@ -5,6 +5,11 @@ This API supplies the host/member and rider companion screens for reports
 repository. All calls require Clerk authentication and the selected client role,
 except rider calls, which require the approved assigned rider.
 
+Group orders keep this flow and the bracket service fee. Accept-first Express
+(`acceptFirst`, [Express](EXPRESS_API.md#accept-first-express-send-accept-then-pay))
+is for one client's request, and a group draft that sends it returns
+`409 express_accept_first_unavailable`.
+
 The group contains at most 15 people including its host. A person can belong to
 only one open or checkout-open group. Invite tokens contain 256 random bits;
 only SHA-256 digests persist. The token expires at `closesAt` and refuses full,

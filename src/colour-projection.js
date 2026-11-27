@@ -1,5 +1,5 @@
 import { splitVoucherMinor } from './voucher-money.js';
-import { serviceFeeMoney } from './service-fee.js';
+import { serviceFeeMoney, groupLevelFee } from './service-fee.js';
 import { canonicalColourPricing } from './colour-pricing.js';
 
 /** Page display amounts cover all ordered copies/sets, so odd centavos can be
@@ -36,7 +36,7 @@ export function publicColourListing(pricing) {
 /** Match the original invoice's all-in line allocation using frozen money. */
 export function orderColourClientAmount(store,order,line) {
   if (!order || !line) return null;
-  if (order.serviceFeeSchedule?.version !== 2) {
+  if (!groupLevelFee(order.serviceFeeSchedule)) {
     const schedule = order.serviceFeeSchedule || {version:1,rateBps:order.serviceFeeRateBps ?? 0};
     return line.lineSubtotalMinor + serviceFeeMoney(line.lineSubtotalMinor,schedule).grossServiceFeeMinor;
   }

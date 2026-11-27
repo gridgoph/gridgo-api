@@ -1,3 +1,4 @@
+import { groupLevelFee } from './service-fee.js';
 import { publicColourQuote } from './colour-projection.js';
 import { splitVoucherMinor } from './voucher-money.js';
 import { clientVoucher } from './voucher-projection.js';
@@ -5,19 +6,20 @@ import { clientPerk } from './member-perk-projection.js';
 import { clientMoneyMinor } from './supplier-catalog.js';
 
 /** Add client display amounts using only the immutable receipt's fee snapshot. */
-export function clientInvoice(snapshot, { exposeWorking = false, hideSupplierAmounts = snapshot.organizationDiscountRateBps > 0 || snapshot.serviceFeeSchedule?.version === 2 || snapshot.groups?.some(group => group.serviceFeeSchedule?.version === 2) } = {}) {
+export function clientInvoice(snapshot, { exposeWorking = false, hideSupplierAmounts = snapshot.organizationDiscountRateBps > 0 || groupLevelFee(snapshot.serviceFeeSchedule) || snapshot.groups?.some(group => groupLevelFee(group.serviceFeeSchedule)) } = {}) {
   const invoice = structuredClone(snapshot);
   const priceSection = (section) => {
     section.clientItemSubtotalMinor = section.itemSubtotalMinor + (section.grossServiceFeeMinor ?? section.serviceFeeMinor);
     if (!Number.isSafeInteger(section.clientItemSubtotalMinor)) throw new RangeError('Invoice amount exceeds safe integer range');
     const pricing = { settings: { serviceFeeRateBps: section.serviceFeeRateBps ?? invoice.serviceFeeRateBps,
       serviceFeeSchedule: section.serviceFeeSchedule } };
-    const shares = section.serviceFeeSchedule?.version === 2
+    const shares = groupLevelFee(section.serviceFeeSchedule)
       ? splitVoucherMinor(section.grossServiceFeeMinor ?? section.serviceFeeMinor, (section.lines || []).map(line => line.amountMinor)) : null;
     section.lines = (section.lines || []).map((source, index) => {
       const line = { ...source };
       if(invoice.groupOrderId) {delete line.artworkFileId;delete line.artworkLinks;delete line.artworkAttachments;delete line.artworkPreviewFileId;}
-      line.clientUnitPriceMinor = clientMoneyMinor(pricing, line.unitPriceMinor);
+      // The Express rule is a minimum per order, never per unit: the unit stays the shop's price.
+      line.clientUnitPriceMinor = section.serviceFeeSchedule?.version === 3 ? line.unitPriceMinor : clientMoneyMinor(pricing, line.unitPriceMinor);
       line.clientAmountMinor = shares ? line.amountMinor + shares[index] : clientMoneyMinor(pricing, line.amountMinor);
       if (source.colourPricing) line.colourPricing = publicColourQuote(source.colourPricing,exposeWorking ? "ops_admin" : "client",line.clientAmountMinor);
       if (hideSupplierAmounts || (!exposeWorking && source.colourPricing?.pricedByColour)) {

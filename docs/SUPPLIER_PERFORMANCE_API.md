@@ -115,6 +115,13 @@ No-fault decisions recompute consequences without deleting the underlying histor
 Use `X-Gridgo-Role` for a selected role when needed. A different supplier cannot
 read another shop's Performance. Private response headers include `no-store`.
 
+`performance.expressAcceptance` reports the shop's accept rate for accept-first
+Express offers over 30 days: `{ windowDays, offered, accepted, declined, timedOut,
+rate }`. `rate` is `null` without offers. Declines and missed 60-second windows
+count against it. Offers the client withdrew, and offers still open, are left out.
+It carries no warning and creates no warning event. See
+[Express](EXPRESS_API.md#accept-rate).
+
 Example `performance`:
 
 ```json

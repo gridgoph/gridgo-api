@@ -22,6 +22,8 @@ import { routeShopFileAccess, recordShopFileAccess, fileAccessJobs } from './sho
 import { isExpressDocumentOrder } from './express-offers.js';
 import { awardExpressFriendPass } from './express-rewards.js';
 import { expressRates, expressEvent, expressStatus, assertExpressPaymentSubmission, expireExpressPayments } from './express-orders.js';
+import { expressCheckoutSettings, nextExpressCheckoutSettings } from './express-checkout-rules.js';
+import { acceptFirstWorkDue, sweepAcceptFirst } from './express-accept-first.js';
 import { routeExpressOrders } from './express-routes.js';
 import { reconcileDispatchOffers, declineDispatchOffer, requireDispatchOffer, offerTimeoutSeconds } from './dispatch-offers.js';
 import { routeCash, collectCash, cashRequest, settleCashRedelivery } from './cash-routes.js';
@@ -984,9 +986,10 @@ function publicOperationalSettings(settings, store = null, user = null) {
   } = settings || {};
   if (!['ops_admin', 'super_admin'].includes(user?.role)) {
     delete rest.expressRates;
+    delete rest.expressCheckout;
     delete rest.serviceFeeSchedule;
     delete rest.scheduledServiceFee;
-  }
+  } else rest.expressCheckout = expressCheckoutSettings(settings);
   const paymentQr = { method: "qr_manual", caption: "QR Ph" };
   const file = store ? readyPaymentQrFile(store) : null;
   if (file) paymentQr.imageUrl = `${PAYMENT_QR_PUBLIC_PATH}?v=${encodeURIComponent(file.fileId)}`;
@@ -4623,6 +4626,8 @@ async function handleAuditedRequest(req, res) {
         supplierVerification: Object.hasOwn(body,"supplierVerification") ? body.supplierVerification : verificationSettings(store.settings),
         homePrinter: Object.hasOwn(body,"homePrinter") ? body.homePrinter : homeSettings(store.settings),
         expressRates: Object.hasOwn(body,"expressRates") ? body.expressRates : expressRates(store.settings),
+        // Accept-first Express fee and QR confirmation rules; partial patches keep the rest.
+        expressCheckout: Object.hasOwn(body,"expressCheckout") ? nextExpressCheckoutSettings(store.settings, body.expressCheckout) : expressCheckoutSettings(store.settings),
         groupPaymentTimeoutMinutes: Object.hasOwn(body,"groupPaymentTimeoutMinutes") ? body.groupPaymentTimeoutMinutes : (store.settings.groupPaymentTimeoutMinutes??10),
         cash: Object.hasOwn(body,'cash') ? (body.cash && typeof body.cash==='object' && !Array.isArray(body.cash)
           ? {...cashSettings(store.settings),...body.cash}:body.cash) : cashSettings(store.settings),
@@ -6653,7 +6658,11 @@ async function handleAuditedRequest(req, res) {
       installment.rejectedAt = rejectedAt;
       installment.rejectedBy = user.id;
       installment.rejectionReason = reason;
-      if (installmentCode === "initial") {
+      if (installmentCode === "initial" && order.expressOrder?.paymentRelease) {
+        // The shop already started on the receipt: work continues, handover waits for a new payment.
+        order.expressOrder.paymentRelease.receiptRejected = { at: rejectedAt, reason };
+        order.paymentStatus = "unpaid";
+      } else if (installmentCode === "initial") {
         order.state = order.moneyModelVersion === 3
           ? "awaiting_initial_payment"
           : (order.moneyModelVersion === 1 ? "awaiting_downpayment" : "awaiting_initial_payment");
@@ -6714,8 +6723,11 @@ async function handleAuditedRequest(req, res) {
         // transfer hands the order to quality control rather than to the shop.
         // Older orders were quoted and approved long before payment, so for
         // them a confirmed payment really is the last gate.
-        order.state = order.expressOrder?.paymentTiming==='after_acceptance'&&order.shopAcceptance?.status==='accepted'&&order.fileCheck?.status==='passed'
+        // An accept-first receipt under the instant limit already let the shop start.
+        order.state = order.expressOrder?.paymentRelease ? order.state
+          : order.expressOrder?.paymentTiming==='after_acceptance'&&order.shopAcceptance?.status==='accepted'&&order.fileCheck?.status==='passed'
           ? 'payment_authorized' : order.moneyModelVersion === 3 ? "needs_qa" : "payment_authorized";
+        if (order.expressOrder?.paymentReview) order.expressOrder.paymentReview.confirmedAt = confirmedAt;
         // Paid up front, the one confirmation settles the whole order.
         order.paymentStatus = order.payments?.final_online?.status === "not_required"
           ? "paid" : "initial_payment_confirmed";
@@ -7042,7 +7054,7 @@ async function handleAuditedRequest(req, res) {
       if(order.orderType==='express'&&homeProfile(store,order.supplierId)&&order.shopAcceptance?.status!=='accepted'
         &&['supplier_accepted','payment_authorized','production','supplier_self_qc','ready_for_dispatch'].includes(next))return send(res,409,{error:'home_express_accept_required'});
       if(order.expressOrder?.paymentTiming==='after_acceptance'&&['supplier_accepted','payment_authorized','production','supplier_self_qc','ready_for_dispatch'].includes(next)
-        && !paymentSettled(order.payments?.initial))return send(res,409,{error:'payment_required',message:'The shop must accept A3 Express through its accept action, then the client pays before work starts.'});
+        && !paymentSettled(order.payments?.initial) && !order.expressOrder.paymentRelease)return send(res,409,{error:'payment_required',message:'The shop must accept A3 Express through its accept action, then the client pays before work starts.'});
       if(order.orderType==='express' && order.fulfillmentMode==='pickup' && ['rider_assigned','picked_up','out_for_delivery','awaiting_collection','delivered','issue_window_open','completed'].includes(next)) {
         return send(res,409,{error:'express_pickup_code_required'});
       }
@@ -8594,6 +8606,20 @@ async function sweepDispatchOffers(includeWaiting = false) {
   } catch (error) { console.warn(`dispatch offer sweep failed: ${error?.code || 'unavailable'}`); }
   finally { dispatchOffersBusy = false; }
 }
+// Accept-first Express runs on one-minute shop windows, so it is swept every second.
+let acceptFirstBusy = false;
+async function sweepExpressAcceptFirst() {
+  if (acceptFirstBusy) return;
+  acceptFirstBusy = true;
+  try {
+    if (!await acceptFirstWorkDue(database, now())) return;
+    await enqueueMutation(async () => {
+      const store = await load();
+      if (sweepAcceptFirst(store, { at: now(), id })) await save(store);
+    });
+  } catch (error) { console.warn(`express accept-first sweep failed: ${error?.code || 'unavailable'}`); }
+  finally { acceptFirstBusy = false; }
+}
 let lifecycleBusy = false;
 async function runLifecycleWork() {
   if (lifecycleBusy) return;
@@ -8756,6 +8782,8 @@ server.listen(PORT, HOST, () => {
   dispatchOfferTimer.unref();
   const lifecycleTimer = setInterval(runLifecycleWork, Math.max(1000,Number(process.env.GRIDGO_LIFECYCLE_INTERVAL_MS)||30000));
   lifecycleTimer.unref();
+  const acceptFirstTimer = setInterval(sweepExpressAcceptFirst, 1000);
+  acceptFirstTimer.unref();
   const callsTimer = setInterval(sweepCalls, 1000);
   callsTimer.unref();
   const saveUpkeepTimer = setInterval(sweepSaveUpkeep, 1000);
